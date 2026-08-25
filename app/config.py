@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     tool_allowed_hosts: str = ""
     # Disables the SSRF guard entirely. Development only.
     tool_ssrf_disabled: bool = False
+    # Fixed plaintext key for the seeded webchat demo tenant (ticket 12).
+    # Dev/demo shortcut only — never rotated, never per-tenant.
+    webchat_demo_api_key: str = "demo-webchat-key"
+    # Humanizer pacing knobs (see app/conversations/humanize.py, ticket 14).
+    humanize_chars_per_sec: float = 35.0
+    humanize_min_delay_seconds: float = 0.8
+    humanize_max_delay_seconds: float = 4.0
+    humanize_max_parts: int = 4
 
 
 @lru_cache
