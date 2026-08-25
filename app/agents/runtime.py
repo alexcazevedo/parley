@@ -25,6 +25,7 @@ from app.llm.factory import get_provider, resolve_model
 from app.memory.service import MemoryService
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun, AgentRunStatus
+from app.models.channel import Channel
 from app.models.conversation import Conversation
 from app.models.memory import Memory
 from app.models.message import Message, MessageDirection, MessageRole
@@ -45,6 +46,15 @@ EMPTY_REPLY_MESSAGE = "Desculpe, não entendi. Pode reformular?"
 MAX_ITERATIONS_ERROR = "max_iterations"
 
 TURN_TIMEOUT_SECONDS = 60
+
+# Appended to the system prompt when the conversation's channel has
+# `config.humanize` on: the splitter in app/conversations/humanize.py cuts on
+# blank lines, so we ask the model to produce them.
+HUMANIZE_STYLE_HINT = (
+    "Style: write like a human chat agent — short messages, split distinct thoughts "
+    "into separate paragraphs with a blank line between them; at most a few sentences "
+    "per paragraph."
+)
 
 
 class AgentRuntime:
@@ -126,7 +136,12 @@ class AgentRuntime:
         memories = await self._load_memories(session, agent, conversation)
         history = await self._recent_messages(session, agent, conversation)
         messages = self._context_builder.build(
-            agent, conversation, history, memories, tool_specs
+            agent,
+            conversation,
+            history,
+            memories,
+            tool_specs,
+            style_hint=await self._style_hint(session, conversation),
         )
         if not any(message.role == ROLE_USER for message in messages):
             # The batch isn't visible on this session (or was pruned); the model
@@ -204,6 +219,15 @@ class AgentRuntime:
             max_tool_iterations=agent.max_tool_iterations,
         )
         return MAX_ITERATIONS_MESSAGE
+
+    async def _style_hint(
+        self, session: AsyncSession, conversation: Conversation
+    ) -> str | None:
+        """The humanizer's prompt hint, when this conversation's channel wants it."""
+        channel = await session.get(Channel, conversation.channel_id)
+        if channel is None or not bool((channel.config or {}).get("humanize")):
+            return None
+        return HUMANIZE_STYLE_HINT
 
     async def _recent_messages(
         self, session: AsyncSession, agent: Agent, conversation: Conversation

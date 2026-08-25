@@ -14,6 +14,7 @@ import respx
 
 from app.channels.base import OutgoingMessage
 from app.channels.evolution import EvolutionAdapter
+from app.channels.webchat import WebChatAdapter
 from app.models.channel import Channel, ChannelType
 from app.models.contact import Contact
 from app.queue.redis_queue import JOBS_KEY
@@ -260,3 +261,153 @@ async def test_send_message_raises_on_non_2xx():
     message = OutgoingMessage(conversation_id=uuid.uuid4(), content="hi")
     with pytest.raises(httpx.HTTPStatusError):
         await adapter.send_message(message, contact, channel)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_mark_read_posts_to_evolution_mark_message_as_read():
+    channel = Channel(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        type=ChannelType.WHATSAPP_EVOLUTION,
+        name="WhatsApp",
+        agent_id=uuid.uuid4(),
+        config={"base_url": "https://evolution.example.com", "instance": "harness-instance"},
+        secret_encrypted=secrets_crypto.encrypt("evo-secret-xyz"),
+    )
+    contact = Contact(
+        id=uuid.uuid4(),
+        tenant_id=channel.tenant_id,
+        channel_id=channel.id,
+        external_user_id="5511999998888",
+    )
+    route = respx.post(
+        "https://evolution.example.com/chat/markMessageAsRead/harness-instance"
+    ).mock(return_value=httpx.Response(200, json={}))
+
+    adapter = EvolutionAdapter()
+    await adapter.mark_read("wamid.abc123", contact, channel)
+
+    assert route.called
+    request = route.calls.last.request
+    assert request.headers["apikey"] == "evo-secret-xyz"
+    assert json.loads(request.content) == {
+        "readMessages": [
+            {
+                "remoteJid": "5511999998888@s.whatsapp.net",
+                "fromMe": False,
+                "id": "wamid.abc123",
+            }
+        ]
+    }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_mark_read_raises_on_non_2xx():
+    channel = Channel(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        type=ChannelType.WHATSAPP_EVOLUTION,
+        name="WhatsApp",
+        agent_id=uuid.uuid4(),
+        config={"base_url": "https://evolution.example.com", "instance": "harness-instance"},
+        secret_encrypted=secrets_crypto.encrypt("evo-secret-xyz"),
+    )
+    contact = Contact(
+        id=uuid.uuid4(),
+        tenant_id=channel.tenant_id,
+        channel_id=channel.id,
+        external_user_id="5511999998888",
+    )
+    respx.post("https://evolution.example.com/chat/markMessageAsRead/harness-instance").mock(
+        return_value=httpx.Response(500, json={"error": "boom"})
+    )
+
+    adapter = EvolutionAdapter()
+    with pytest.raises(httpx.HTTPStatusError):
+        await adapter.mark_read("wamid.abc123", contact, channel)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_send_typing_posts_to_evolution_send_presence():
+    channel = Channel(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        type=ChannelType.WHATSAPP_EVOLUTION,
+        name="WhatsApp",
+        agent_id=uuid.uuid4(),
+        config={"base_url": "https://evolution.example.com", "instance": "harness-instance"},
+        secret_encrypted=secrets_crypto.encrypt("evo-secret-xyz"),
+    )
+    contact = Contact(
+        id=uuid.uuid4(),
+        tenant_id=channel.tenant_id,
+        channel_id=channel.id,
+        external_user_id="5511999998888",
+    )
+    route = respx.post(
+        "https://evolution.example.com/chat/sendPresence/harness-instance"
+    ).mock(return_value=httpx.Response(200, json={}))
+
+    adapter = EvolutionAdapter()
+    await adapter.send_typing(contact, channel, 1.5)
+
+    assert route.called
+    request = route.calls.last.request
+    assert request.headers["apikey"] == "evo-secret-xyz"
+    assert json.loads(request.content) == {
+        "number": "5511999998888",
+        "presence": "composing",
+        "delay": 1500,
+    }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_send_typing_raises_on_non_2xx():
+    channel = Channel(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        type=ChannelType.WHATSAPP_EVOLUTION,
+        name="WhatsApp",
+        agent_id=uuid.uuid4(),
+        config={"base_url": "https://evolution.example.com", "instance": "harness-instance"},
+        secret_encrypted=secrets_crypto.encrypt("evo-secret-xyz"),
+    )
+    contact = Contact(
+        id=uuid.uuid4(),
+        tenant_id=channel.tenant_id,
+        channel_id=channel.id,
+        external_user_id="5511999998888",
+    )
+    respx.post("https://evolution.example.com/chat/sendPresence/harness-instance").mock(
+        return_value=httpx.Response(500, json={"error": "boom"})
+    )
+
+    adapter = EvolutionAdapter()
+    with pytest.raises(httpx.HTTPStatusError):
+        await adapter.send_typing(contact, channel, 1.5)
+
+
+@pytest.mark.asyncio
+async def test_webchat_adapter_hooks_are_noop():
+    channel = Channel(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        type=ChannelType.WEBCHAT,
+        name="Web Chat",
+        agent_id=uuid.uuid4(),
+        config={},
+    )
+    contact = Contact(
+        id=uuid.uuid4(),
+        tenant_id=channel.tenant_id,
+        channel_id=channel.id,
+        external_user_id="web-user-1",
+    )
+
+    adapter = WebChatAdapter()
+    assert await adapter.mark_read("msg-1", contact, channel) is None
+    assert await adapter.send_typing(contact, channel, 1.0) is None

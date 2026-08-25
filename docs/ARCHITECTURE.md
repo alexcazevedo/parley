@@ -195,6 +195,35 @@ Two sources merged by `ToolRegistry`, in priority order:
 instead of returning control to the model — `handoff_to_human` is the only
 current user.
 
+## Humanizer
+
+Makes replies feel human, not bot-instant. Enabled per channel via
+`config: {"humanize": true}`, the humanizer is a send-path wrapper in
+`app/conversations/humanize.py` that:
+
+1. **Read receipt & presence** (WhatsApp/Evolution only): marks the inbound
+   message read and sends "composing" presence, via optional `mark_read()` and
+   `send_typing()` hooks on `ChannelAdapter` (no-op by default; Evolution
+   implements both via its REST API).
+2. **Split replies**: breaks long replies into 2–4 short bubbles on blank
+   lines (agent instruction tells the model to write chat-style messages);
+   falls back to sentence-split if blank-line parsing fails. Never splits
+   code blocks or mid-word. Zero extra LLM calls — the split is mechanical.
+3. **Paced delivery**: delays between bubbles proportional to their length,
+   using configurable typing speed (chars/sec) and min/max per-bubble delay
+   (global `Settings`). Web Chat persists staggered parts (one per DB commit)
+   so polling renders them over seconds; Evolution sends each part immediately
+   via `sendText`, each preceded by a `sendPresence` composing update.
+
+When `humanize: false` (or absent), the legacy single-message path runs
+byte-for-byte as before. Delays happen within the conversation turn (lock
+already held) — they only slow that one conversation, never the worker's
+other jobs. Failures in read/typing calls are best-effort: never cost the user
+their reply.
+
+Hook points: `ChannelAdapter.mark_read()`, `ChannelAdapter.send_typing()` in
+`app/channels/base.py`; integration hooks in `app/channels/evolution.py`.
+
 ## Extension points
 
 - **New channel**: implement `ChannelAdapter` (`app/channels/base.py`),

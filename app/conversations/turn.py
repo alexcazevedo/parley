@@ -13,6 +13,7 @@ as the reply. The worker injects `AgentRuntime`; `EchoRuntime` stays the
 default so nothing accidentally calls a live model.
 """
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
@@ -20,8 +21,10 @@ from typing import Protocol, runtime_checkable
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.channels.base import OutgoingMessage
+from app.channels.base import ChannelAdapter, OutgoingMessage
 from app.channels.registry import get_adapter
+from app.config import get_settings
+from app.conversations.humanize import split_reply, typing_delay_seconds
 from app.conversations.summary import maybe_summarize
 from app.llm.factory import get_provider
 from app.models.agent import Agent
@@ -87,6 +90,17 @@ async def process_turn(
         )
         return None
 
+    # Loaded before the runtime runs: `humanize` decides whether the inbound
+    # batch gets a read receipt *before* we start "typing".
+    channel = await session.get(Channel, conversation.channel_id)
+    contact = await session.get(Contact, conversation.contact_id)
+    assert channel is not None and contact is not None, "conversation has dangling FKs"
+    adapter = get_adapter(channel.type)
+    humanized = bool((channel.config or {}).get("humanize"))
+
+    if humanized:
+        await _mark_read(adapter, messages, contact, channel)
+
     input_text = "\n".join(message.content for message in messages)
     runtime = runtime or EchoRuntime()
     if isinstance(runtime, SessionAwareTurnRuntime):
@@ -94,33 +108,19 @@ async def process_turn(
     else:
         reply_text = await runtime.run(conversation, input_text)
 
-    reply = Message(
-        id=uuid.uuid4(),
-        tenant_id=conversation.tenant_id,
-        conversation_id=conversation.id,
-        channel_id=conversation.channel_id,
-        direction=MessageDirection.OUT,
-        role=MessageRole.ASSISTANT,
-        type="text",
-        content=reply_text,
-        # Explicit timestamp: Postgres `now()` is the transaction timestamp, so
-        # a server default would order the reply *before* the tool messages the
-        # runtime just wrote inside this same transaction.
-        created_at=datetime.now(UTC),
-    )
-    session.add(reply)
-    await session.flush()
-
-    channel = await session.get(Channel, conversation.channel_id)
-    contact = await session.get(Contact, conversation.contact_id)
-    assert channel is not None and contact is not None, "conversation has dangling FKs"
-
-    adapter = get_adapter(channel.type)
-    await adapter.send_message(
-        OutgoingMessage(conversation_id=conversation.id, content=reply_text),
-        contact,
-        channel,
-    )
+    if humanized:
+        reply = await _deliver_humanized(
+            session, conversation, adapter, contact, channel, reply_text
+        )
+    else:
+        reply = _build_reply(conversation, reply_text)
+        session.add(reply)
+        await session.flush()
+        await adapter.send_message(
+            OutgoingMessage(conversation_id=conversation.id, content=reply_text),
+            contact,
+            channel,
+        )
 
     conversation.last_message_at = datetime.now(UTC)
     await _maybe_summarize(session, conversation, runtime)
@@ -131,6 +131,84 @@ async def process_turn(
         message_count=len(messages),
     )
     return reply
+
+
+def _build_reply(conversation: Conversation, content: str) -> Message:
+    return Message(
+        id=uuid.uuid4(),
+        tenant_id=conversation.tenant_id,
+        conversation_id=conversation.id,
+        channel_id=conversation.channel_id,
+        direction=MessageDirection.OUT,
+        role=MessageRole.ASSISTANT,
+        type="text",
+        content=content,
+        # Explicit timestamp: Postgres `now()` is the transaction timestamp, so
+        # a server default would order the reply *before* the tool messages the
+        # runtime just wrote inside this same transaction.
+        created_at=datetime.now(UTC),
+    )
+
+
+async def _mark_read(
+    adapter: ChannelAdapter, messages: list[Message], contact: Contact, channel: Channel
+) -> None:
+    """Best-effort read receipt for the newest inbound message of the batch."""
+    external_message_id = messages[-1].external_message_id
+    if not external_message_id:
+        return
+    try:
+        await adapter.mark_read(external_message_id, contact, channel)
+    except Exception:
+        logger.warning("turn.mark_read_failed", channel_id=str(channel.id), exc_info=True)
+
+
+async def _deliver_humanized(
+    session: AsyncSession,
+    conversation: Conversation,
+    adapter: ChannelAdapter,
+    contact: Contact,
+    channel: Channel,
+    reply_text: str,
+) -> Message:
+    """Split the reply and deliver it as paced bubbles, committing per part.
+
+    The commit inside the loop is the point: polling clients (webchat) see each
+    bubble appear as it is sent instead of the whole reply at once. It also
+    commits whatever the runtime wrote (AgentRun, tool messages) — fine, the
+    turn is past the point where it would roll back.
+    """
+    settings = get_settings()
+    parts = split_reply(reply_text, settings.humanize_max_parts) or [reply_text]
+
+    last: Message | None = None
+    for index, part in enumerate(parts):
+        delay = typing_delay_seconds(part, settings)
+        try:
+            await adapter.send_typing(contact, channel, delay)
+        except Exception:
+            logger.warning("turn.send_typing_failed", channel_id=str(channel.id), exc_info=True)
+        await asyncio.sleep(delay)
+
+        message = _build_reply(conversation, part)
+        session.add(message)
+        await session.flush()
+        try:
+            await adapter.send_message(
+                OutgoingMessage(conversation_id=conversation.id, content=part), contact, channel
+            )
+        except Exception:
+            # The first part keeps the non-humanized path's behavior (raise, turn
+            # fails); later parts are best-effort so an already-delivered reply
+            # is never rolled back over a partial send failure.
+            if index == 0:
+                raise
+            logger.warning("turn.part_send_failed", channel_id=str(channel.id), exc_info=True)
+        await session.commit()
+        last = message
+
+    assert last is not None, "split_reply fallback guarantees at least one part"
+    return last
 
 
 async def _maybe_summarize(

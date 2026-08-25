@@ -62,6 +62,7 @@ class ContextBuilder:
         recent_messages: Sequence[Message],
         memories: Sequence[Memory] = (),
         tools: Sequence[ToolSpec] = (),
+        style_hint: str | None = None,
     ) -> list[LLMMessage]:
         """System prompt + the last `agent.context_message_limit` messages.
 
@@ -70,16 +71,26 @@ class ContextBuilder:
         the request's `tools` field, so duplicating them in the system prompt only
         burns tokens. It stays in the signature because prompt-side tool listing
         is a plausible per-agent knob later.
+
+        `style_hint` is appended as the final system-prompt part — the humanizer
+        uses it to ask for short, blank-line-separated chat bubbles.
         """
         limit = agent.context_message_limit or 20
         messages: list[LLMMessage] = [
-            LLMMessage(role=ROLE_SYSTEM, content=self._system_prompt(agent, conversation, memories))
+            LLMMessage(
+                role=ROLE_SYSTEM,
+                content=self._system_prompt(agent, conversation, memories, style_hint),
+            )
         ]
         messages.extend(self._history(list(recent_messages)[-limit:]))
         return messages
 
     def _system_prompt(
-        self, agent: Agent, conversation: Conversation, memories: Sequence[Memory]
+        self,
+        agent: Agent,
+        conversation: Conversation,
+        memories: Sequence[Memory],
+        style_hint: str | None = None,
     ) -> str:
         parts = [agent.instructions.strip()]
         facts = [m.content.strip() for m in memories if m.content and m.content.strip()]
@@ -88,6 +99,8 @@ class ContextBuilder:
         summary = (conversation.summary or "").strip()
         if summary:
             parts.append(SUMMARY_HEADER + "\n" + summary)
+        if style_hint and style_hint.strip():
+            parts.append(style_hint.strip())
         return "\n\n".join(parts)
 
     def _history(self, window: Sequence[Message]) -> list[LLMMessage]:

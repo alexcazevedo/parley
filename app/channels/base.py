@@ -50,3 +50,21 @@ class ChannelAdapter(abc.ABC):
 
     async def download_media(self, *args: Any, **kwargs: Any) -> bytes:
         raise NotImplementedError("media is out of scope — text only (see PRODUCT.md)")
+
+    async def mark_read(
+        self, external_message_id: str, contact: Contact, channel: Channel
+    ) -> None:
+        """Mark an inbound message as read on the channel's transport.
+
+        No-op by default; channels that support read receipts override this.
+        """
+        return None
+
+    async def send_typing(
+        self, contact: Contact, channel: Channel, duration_seconds: float
+    ) -> None:
+        """Show a "typing…"/composing indicator on the channel's transport.
+
+        No-op by default; channels that support presence override this.
+        """
+        return None

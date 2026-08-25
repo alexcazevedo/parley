@@ -88,3 +88,50 @@ class EvolutionAdapter(ChannelAdapter):
                 json={"number": contact.external_user_id, "text": message.content},
             )
         response.raise_for_status()
+
+    async def mark_read(
+        self, external_message_id: str, contact: Contact, channel: Channel
+    ) -> None:
+        base_url, instance, apikey = self._connection(channel)
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
+                f"{base_url}/chat/markMessageAsRead/{instance}",
+                headers={"apikey": apikey},
+                json={
+                    "readMessages": [
+                        {
+                            "remoteJid": f"{contact.external_user_id}{_JID_SUFFIX}",
+                            "fromMe": False,
+                            "id": external_message_id,
+                        }
+                    ]
+                },
+            )
+        response.raise_for_status()
+
+    async def send_typing(
+        self, contact: Contact, channel: Channel, duration_seconds: float
+    ) -> None:
+        base_url, instance, apikey = self._connection(channel)
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
+                f"{base_url}/chat/sendPresence/{instance}",
+                headers={"apikey": apikey},
+                json={
+                    "number": contact.external_user_id,
+                    "presence": "composing",
+                    "delay": int(duration_seconds * 1000),
+                },
+            )
+        response.raise_for_status()
+
+    def _connection(self, channel: Channel) -> tuple[str, str, str]:
+        config = channel.config or {}
+        base_url = str(config["base_url"]).rstrip("/")
+        instance = config["instance"]
+        apikey = (
+            secrets_crypto.decrypt(channel.secret_encrypted) if channel.secret_encrypted else ""
+        )
+        return base_url, instance, apikey

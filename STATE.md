@@ -1,21 +1,19 @@
 # STATE — rewrite after every ticket completes; never append. ≤30 lines total.
 
 ## Now
-idle — MVP approved 2026-08-24 (mvp approval 2 of 2 spent)
+humanizer mvp run COMPLETE 2026-08-25 — tickets 14–17 done, 1 attempt each, suite 121 green; live demo verified: 3 staggered bubbles + get_order round-trip at /chat. Awaiting final diff review (mvp approval 2 of 2).
 
 ## Next
-- user runs `scripts/demo.py` with real LLM_API_KEY (live e2e); optional follow-ups below
+- final diff review with user → then commit (both runs 12–13 + 14–17 uncommitted)
 
 ## Decisions
-- execution: parallel×2; lanes merged into main at a2e3f75; worktrees + lane branches removed
-- host ports: Postgres 5434, Redis 6380, API 8001, mock-tools 9000 (5433/8000 taken by other local projects)
-- uv; tests: real Postgres :5434 (`harness_test`) + fakeredis
-- debounce: harness:pending:{conv} LIST, harness:due ZSET, harness:lock:{conv}; MULTI/WATCH not Lua
-- agent: ToolRegistry([Builtin, Http]); terminal tool via ToolResult.meta {terminal, final_text}
-- capped run → AgentRun.status=ERROR error="max_iterations" (no enum member)
-- Evolution: POST /webhooks/whatsapp/{channel_id}, header `apikey`
-- micro-fix post-11: RedisQueue.dequeue swallows redis TimeoutError on idle BRPOP (worker crashed otherwise)
-- migrations 0001–0004; 12 commits; suite 102 passed; every ticket 1 attempt
+- humanizer: per-channel config.humanize; Settings knobs (chars_per_sec 35, delay 0.8–4s, max_parts 4); style hint appended to system prompt when humanized
+- flow: mark_read (best-effort) → split (blank-line + sentence fallback, code-fence atomic) → per part typing→sleep→persist→send→commit (staggered polling bubbles); humanize off = legacy path byte-for-byte
+- adapter hooks mark_read/send_typing no-op base; Evolution markMessageAsRead + sendPresence
+- micro-fix post-17 (orchestrator): stale docker image — container had pre-fix in-place JSONB mutation (no UPDATE emitted); local code correct; rebuild resolved. Lesson: image rebuild must FOLLOW last code fix; grep-only checks miss it
+- ticket 17 deviation kept: added tests/test_bootstrap.py (outside file list, beneficial)
+- host ports: Postgres 5434, Redis 6380, API 8001, mock-tools 9000
+- prior runs: harness MVP at 92c2b2c; web-chat prototype tickets 12–13
 
 ## Blockers
-- none (live demo needs real LLM_API_KEY in .env — placeholder now)
+- none

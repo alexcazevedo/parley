@@ -60,6 +60,15 @@ a single agent turn once the debounce window closes (see
 `docs/ARCHITECTURE.md`), and the turn's reply goes back out through the same
 `ChannelAdapter` the message came in on.
 
+**Humanizer**: replies feel human — not bot-instant. Enabled per channel via
+`config: {"humanize": true}`, the humanizer marks inbound messages as read
+(WhatsApp), sends "composing…" presence (WhatsApp), splits long replies into
+2–4 short bubbles, and paces each bubble's send with a delay proportional to
+its length (typing speed, min/max delay per bubble, and split count are
+configurable global Settings). Web Chat keeps legacy single-message delivery
+when humanize is off; all channels support split, paced bubbles when on. See
+`docs/ARCHITECTURE.md` for the full flow and adapter hooks.
+
 ## Run it
 
 ```bash
