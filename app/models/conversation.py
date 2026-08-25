@@ -5,11 +5,10 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, Text, func
-from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TenantScoped
+from app.models.base import Base, TenantScoped, pg_enum
 
 
 class ConversationState(enum.StrEnum):
@@ -35,7 +34,7 @@ class Conversation(Base, TenantScoped):
         UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False
     )
     state: Mapped[ConversationState] = mapped_column(
-        SAEnum(ConversationState, name="conversation_state", native_enum=True),
+        pg_enum(ConversationState, "conversation_state"),
         nullable=False,
         default=ConversationState.ACTIVE_AI,
     )

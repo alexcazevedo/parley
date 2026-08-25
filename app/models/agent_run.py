@@ -5,11 +5,10 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, Text, func
-from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TenantScoped
+from app.models.base import Base, TenantScoped, pg_enum
 
 
 class AgentRunStatus(enum.StrEnum):
@@ -28,7 +27,7 @@ class AgentRun(Base, TenantScoped):
         UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
     )
     status: Mapped[AgentRunStatus] = mapped_column(
-        SAEnum(AgentRunStatus, name="agent_run_status", native_enum=True),
+        pg_enum(AgentRunStatus, "agent_run_status"),
         nullable=False,
         default=AgentRunStatus.RUNNING,
     )

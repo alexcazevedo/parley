@@ -10,11 +10,10 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func, text
-from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TenantScoped
+from app.models.base import Base, TenantScoped, pg_enum
 
 
 class MessageDirection(enum.StrEnum):
@@ -53,10 +52,10 @@ class Message(Base, TenantScoped):
         UUID(as_uuid=True), ForeignKey("channels.id", ondelete="CASCADE"), nullable=False
     )
     direction: Mapped[MessageDirection] = mapped_column(
-        SAEnum(MessageDirection, name="message_direction", native_enum=True), nullable=False
+        pg_enum(MessageDirection, "message_direction"), nullable=False
     )
     role: Mapped[MessageRole] = mapped_column(
-        SAEnum(MessageRole, name="message_role", native_enum=True), nullable=False
+        pg_enum(MessageRole, "message_role"), nullable=False
     )
     type: Mapped[str] = mapped_column(String(50), nullable=False, default="text")
     content: Mapped[str] = mapped_column(Text, nullable=False)

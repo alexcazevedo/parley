@@ -5,11 +5,10 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, Text, func
-from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TenantScoped
+from app.models.base import Base, TenantScoped, pg_enum
 
 
 class MemoryType(enum.StrEnum):
@@ -34,7 +33,7 @@ class Memory(Base, TenantScoped):
         UUID(as_uuid=True), ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False
     )
     type: Mapped[MemoryType] = mapped_column(
-        SAEnum(MemoryType, name="memory_type", native_enum=True), nullable=False
+        pg_enum(MemoryType, "memory_type"), nullable=False
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     importance: Mapped[int] = mapped_column(Integer, nullable=False, default=3)

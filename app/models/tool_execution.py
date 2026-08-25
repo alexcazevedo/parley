@@ -5,11 +5,10 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
-from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TenantScoped
+from app.models.base import Base, TenantScoped, pg_enum
 
 
 class ToolExecutionStatus(enum.StrEnum):
@@ -35,7 +34,7 @@ class ToolExecution(Base, TenantScoped):
     arguments: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[ToolExecutionStatus] = mapped_column(
-        SAEnum(ToolExecutionStatus, name="tool_execution_status", native_enum=True), nullable=False
+        pg_enum(ToolExecutionStatus, "tool_execution_status"), nullable=False
     )
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

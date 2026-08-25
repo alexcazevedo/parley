@@ -99,10 +99,16 @@ def _wait_for_new_message(
     conversation_id: str,
     baseline_count: int,
 ) -> list[dict[str, Any]]:
-    """Poll until the visible transcript has more messages than `baseline_count`."""
+    """Poll until the transcript grew past `baseline_count` AND the newest
+    message is a reply (not the user message we just sent — the user's own
+    message also grows the transcript, which would end the wait too early)."""
+
+    def _got_reply(msgs: list[dict[str, Any]]) -> bool:
+        return len(msgs) > baseline_count and msgs[-1]["role"] != "user"
+
     deadline = time.time() + REPLY_TIMEOUT_SECONDS
     messages = _get_messages(client, base_url, headers, conversation_id)
-    while len(messages) <= baseline_count:
+    while not _got_reply(messages):
         if time.time() >= deadline:
             raise TimeoutError(
                 f"timed out after {REPLY_TIMEOUT_SECONDS}s waiting for a reply "

@@ -5,11 +5,10 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
-from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TenantScoped
+from app.models.base import Base, TenantScoped, pg_enum
 
 
 class ChannelType(enum.StrEnum):
@@ -24,7 +23,7 @@ class Channel(Base, TenantScoped):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     type: Mapped[ChannelType] = mapped_column(
-        SAEnum(ChannelType, name="channel_type", native_enum=True), nullable=False
+        pg_enum(ChannelType, "channel_type"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     agent_id: Mapped[uuid.UUID] = mapped_column(
