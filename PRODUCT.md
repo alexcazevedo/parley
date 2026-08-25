@@ -4,64 +4,57 @@ routing_profile: cloud         # cloud | cloud+local (local is opt-in, never a d
 parallel_default: sequential   # sequential | parallel
 ---
 
-# Sentiment-triggered escalation
+# Barge-in — interruption handling
 
 ## What / why
 
-Human agents hand a conversation off instinctively when a customer is
-getting angry; today's harness only escalates when the user explicitly
-asks (agent calls `handoff_to_human`) or an operator intervenes. Item #4
-of the seamless roadmap: detect frustration and escalate proactively —
-before the user has to demand a person.
+Last seamless-roadmap item (#5). When a user sends a new message while the
+agent is mid-turn (LLM running, tools executing, humanizer pacing bubbles
+over many seconds), today that message queues as the NEXT turn: the bot
+finishes replying to the stale question, then answers the correction in a
+second reply. Two bot tells at once — ignoring what the user just said,
+then double-answering. A human reads the new message and adjusts.
 
 Shape (decided during grilling):
 
-- **Detection — harness classifier, not agent discretion**: a cheap
-  separate LLM call runs BEFORE the agent turn, scoring the inbound
-  debounced batch (with recent conversation context) for user frustration,
-  0.0–1.0. Deterministic and auditable; works even when the agent model
-  would stubbornly keep trying. Language-agnostic (LLM judges, no keyword
-  lists).
-- **Trigger behavior — skip the agent, de-escalate fast**: score ≥
-  threshold on an `ACTIVE_AI` conversation short-circuits the turn: no
-  normal AI answer; conversation transitions to `HUMAN_HANDOFF` through
-  the existing warm-handoff path (#3 — operator brief generated, reason
-  notes detected frustration + score); user receives the agent's existing
-  `handoff_message` text as the reply, delivered through the normal
-  channel path (humanizer pacing applies).
-- **Attribution**: the handoff records that the SYSTEM (sentiment
-  detector) requested it — visible in `latest_handoff.requested_by`
-  (enum extension + migration).
-- **Config**: per-agent enable flag (default off; demo agent on). Global
-  Settings: threshold (default 0.7), classifier timeout. Classifier uses
-  the existing LLM provider.
-- **Safety**: classifier is strictly best-effort — failure or timeout logs
-  and the normal agent turn proceeds. Never double-escalates (only fires
-  on `ACTIVE_AI`; handed-off conversations already skip turns).
+- **Checkpoint supersede, never mid-call abort.** The turn checks "did a
+  newer inbound message arrive for this conversation?" at safe points
+  only: once before delivery starts, and between humanizer bubbles. No
+  cancellation during LLM or tool calls — no task-abort machinery, no
+  tool side-effect hazards.
+- **On supersede**: unsent parts are dropped (already-sent bubbles stand —
+  natural, humans get cut off mid-thought too), the turn's reply is
+  abandoned, the agent run is marked superseded (observable, not an
+  error), and the conversation's turn re-runs promptly with the FULL
+  outstanding batch (old unanswered content + the interrupting messages)
+  so the user gets one coherent reply addressing everything.
+- **Guarantees** (test-carried): no inbound message is ever lost or left
+  unanswered; never two replies to one batch; a conversation that is
+  handed off / not ACTIVE_AI keeps today's behavior; supersede signal
+  failure degrades to today's behavior (reply delivered, next turn
+  answers the new message).
+- Applies to all channels; webchat's polling page needs no changes.
+  Detection rides the existing ingest path/queue — no new transport.
 
 ## Primary user story
 
-As a frustrated end user venting at a business's chat, I get handed to a
-human the moment my messages turn sour — without having to explicitly
-demand "let me talk to a person" — so the conversation de-escalates
-instead of a bot persisting at me.
+As an end user who sends a correction while the bot is still typing
+("actually it's order 99, not 12345"), I see it stop and give me one
+answer that reflects my correction — instead of finishing a now-wrong
+reply and answering me twice.
 
 ## Out of scope
 
-- Operator dashboards/analytics of sentiment scores; storing per-message
-  score history beyond the triggering handoff
-- Hybrid prompt-nudge mechanism, keyword lists, non-LLM classifiers
-- Per-tenant/per-channel threshold overrides (per-agent flag + global
-  threshold only)
-- Cooldowns / re-escalation tuning after an operator resumes
-- Barge-in (#5), operator mini-page
-- Webchat page or channel adapter changes
+- Mid-LLM / mid-tool cancellation, tool side-effect rollback
+- Partial-bubble retraction (deleting already-sent messages)
+- "User is typing" signals from channels as pre-emptive pause
+- Operator mini-page; any webchat page changes
+- Cross-conversation or cross-channel interruption semantics
 
 ## Success demo
 
-Done when: in `/chat` I send escalating frustrated messages ("isso não
-resolve nada", "que atendimento horrível") and get no bot answer — just
-the soft handoff message — while `GET /conversations/{id}` shows
-`HUMAN_HANDOFF` with a `latest_handoff` brief citing the detected
-frustration; tests cover below-threshold no-op, threshold trip, and
-classifier failure proceeding with a normal turn.
+Done when: in `/chat` I ask about order 12345 and, while the reply bubbles
+are still pacing out, send "na verdade é o pedido 99" — the stale bubbles
+stop and a single fresh reply addresses order 99, nothing answers twice;
+plus tests covering supersede at each checkpoint, the no-lost-message and
+no-double-reply guarantees, and the superseded run marking.

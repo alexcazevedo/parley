@@ -66,3 +66,23 @@ async def drain_pending(redis: Redis, conversation_id: uuid.UUID | str) -> list[
 
 async def has_pending(redis: Redis, conversation_id: uuid.UUID | str) -> bool:
     return await redis.llen(pending_key(conversation_id)) > 0
+
+
+async def requeue_pending(
+    redis: Redis,
+    conversation_id: uuid.UUID | str,
+    message_ids: list[uuid.UUID],
+) -> None:
+    """Put a drained batch back at the head of the pending list (barge-in).
+
+    Used when a turn is superseded: `message_ids` (the batch that was just
+    drained and processed) needs to go back in front of whatever arrived
+    while the turn was running, so the next turn answers old + new together,
+    in arrival order. `LPUSH` prepends each argument in turn, so pushing the
+    ids in reverse order leaves them at the head in their original order —
+    ahead of the interrupting messages already on the list.
+    """
+    if not message_ids:
+        return
+    key = pending_key(conversation_id)
+    await redis.lpush(key, *[str(mid) for mid in reversed(message_ids)])

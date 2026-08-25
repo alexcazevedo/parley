@@ -17,14 +17,25 @@ writes its own rows — `app.agents.runtime.AgentRuntime` persists an `AgentRun`
 plus the tool-call/tool-result messages and must land in the same transaction
 as the reply. The worker injects `AgentRuntime`; `EchoRuntime` stays the
 default so nothing accidentally calls a live model.
+
+Barge-in (PRODUCT.md): callers may inject a `supersede_check` — "did a newer
+inbound message arrive for this conversation?". It is consulted at exactly two
+safe checkpoints, never mid-LLM/mid-tool: once after the runtime returns and
+before delivery starts, and again between humanizer bubbles. A hit drops the
+unsent parts, marks the turn's `AgentRun` superseded and returns `Superseded`
+instead of a reply; already-sent bubbles stand. No check (or a failing one)
+means today's behavior, byte for byte.
 """
 
 import asyncio
 import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.sentiment import score_frustration
@@ -36,6 +47,7 @@ from app.conversations.summary import maybe_summarize
 from app.handoff.summarizer import handoff_with_summary
 from app.llm.factory import get_provider
 from app.models.agent import Agent
+from app.models.agent_run import AgentRun, AgentRunStatus
 from app.models.channel import Channel
 from app.models.contact import Contact
 from app.models.conversation import Conversation, ConversationState
@@ -71,17 +83,47 @@ class EchoRuntime:
         return f"echo: {input_text}"
 
 
+SupersedeCheck = Callable[[], Awaitable[bool]]
+"""Probe: has a newer inbound message arrived for this conversation?"""
+
+
+@dataclass(frozen=True)
+class Superseded:
+    """Outcome of a turn interrupted at a checkpoint, in place of a reply.
+
+    `delivered_parts` is how many humanizer bubbles had already gone out (and
+    stay out) when the turn stopped: 0 at the pre-delivery checkpoint.
+    """
+
+    delivered_parts: int
+
+
+@dataclass(frozen=True)
+class _Delivery:
+    """What `_deliver` did: the last persisted reply row, parts sent, cut short?"""
+
+    message: Message | None
+    parts_sent: int
+    superseded: bool
+
+
 async def process_turn(
     session: AsyncSession,
     conversation_id: uuid.UUID,
     messages: list[Message],
     runtime: AnyTurnRuntime | None = None,
-) -> Message | None:
+    *,
+    supersede_check: SupersedeCheck | None = None,
+) -> Message | Superseded | None:
     """Run one turn for `conversation_id` over `messages` (arrival order).
 
     Returns the persisted assistant message, or `None` when no reply was
     produced (unknown conversation, empty batch, or a conversation that is not
     `ACTIVE_AI` — a human is driving it, so the AI stays quiet).
+
+    Returns `Superseded` instead when `supersede_check` reported a newer
+    inbound message at one of the two checkpoints: the reply (or its remaining
+    bubbles) is abandoned for the next turn to answer as one batch.
     """
     if not messages:
         return None
@@ -126,7 +168,26 @@ async def process_turn(
     else:
         reply_text = await runtime.run(conversation, input_text)
 
-    reply = await _deliver(session, conversation, adapter, contact, channel, humanized, reply_text)
+    # Checkpoint 1: last moment before anything is sent. The commit keeps the
+    # rows the runtime already wrote (AgentRun, tool messages) — a superseded
+    # turn is observable, not lost work.
+    if await _is_superseded(supersede_check):
+        return await _abandon_turn(session, conversation, delivered_parts=0)
+
+    delivery = await _deliver(
+        session,
+        conversation,
+        adapter,
+        contact,
+        channel,
+        humanized,
+        reply_text,
+        supersede_check=supersede_check,
+    )
+    # Checkpoint 2 fired between bubbles: the parts already sent stand.
+    if delivery.superseded:
+        return await _abandon_turn(session, conversation, delivered_parts=delivery.parts_sent)
+    reply = delivery.message
 
     conversation.last_message_at = datetime.now(UTC)
     await _maybe_summarize(session, conversation, runtime)
@@ -170,9 +231,13 @@ async def _maybe_escalate_on_sentiment(
         reason=f"frustração do usuário detectada (score {score:.2f})",
         requested_by=HandoffRequestedBy.SYSTEM,
     )
-    reply = await _deliver(
+    # No supersede checkpoints here on purpose: the conversation is already
+    # HUMAN_HANDOFF, so the handoff_message is not a stale AI answer — it must
+    # go out whole no matter what arrived meanwhile.
+    delivery = await _deliver(
         session, conversation, adapter, contact, channel, humanized, agent.handoff_message
     )
+    reply = delivery.message
     conversation.last_message_at = datetime.now(UTC)
     await session.commit()
     logger.info(
@@ -191,11 +256,18 @@ async def _deliver(
     channel: Channel,
     humanized: bool,
     reply_text: str,
-) -> Message:
-    """Persist + send one reply, paced into bubbles when the channel is humanized."""
+    *,
+    supersede_check: SupersedeCheck | None = None,
+) -> _Delivery:
+    """Persist + send one reply, paced into bubbles when the channel is humanized.
+
+    Only the humanized path can be interrupted (checkpoint 2, between bubbles);
+    the single-message path is one send with nothing left to cut, so it is
+    covered entirely by checkpoint 1 in `process_turn`.
+    """
     if humanized:
         return await _deliver_humanized(
-            session, conversation, adapter, contact, channel, reply_text
+            session, conversation, adapter, contact, channel, reply_text, supersede_check
         )
     reply = _build_reply(conversation, reply_text)
     session.add(reply)
@@ -203,7 +275,7 @@ async def _deliver(
     await adapter.send_message(
         OutgoingMessage(conversation_id=conversation.id, content=reply_text), contact, channel
     )
-    return reply
+    return _Delivery(message=reply, parts_sent=1, superseded=False)
 
 
 def _build_reply(conversation: Conversation, content: str) -> Message:
@@ -243,19 +315,28 @@ async def _deliver_humanized(
     contact: Contact,
     channel: Channel,
     reply_text: str,
-) -> Message:
+    supersede_check: SupersedeCheck | None = None,
+) -> _Delivery:
     """Split the reply and deliver it as paced bubbles, committing per part.
 
     The commit inside the loop is the point: polling clients (webchat) see each
     bubble appear as it is sent instead of the whole reply at once. It also
     commits whatever the runtime wrote (AgentRun, tool messages) — fine, the
     turn is past the point where it would roll back.
+
+    Checkpoint 2 lives at the top of every iteration but the first: the first
+    part is already covered by checkpoint 1, and the pacing pause is exactly
+    where a user's correction lands. Stopping mid-reply leaves the bubbles that
+    already went out standing — humans get cut off mid-thought too.
     """
     settings = get_settings()
     parts = split_reply(reply_text, settings.humanize_max_parts) or [reply_text]
 
     last: Message | None = None
     for index, part in enumerate(parts):
+        if index > 0 and await _is_superseded(supersede_check):
+            return _Delivery(message=last, parts_sent=index, superseded=True)
+
         delay = typing_delay_seconds(part, settings)
         try:
             await adapter.send_typing(contact, channel, delay)
@@ -281,7 +362,62 @@ async def _deliver_humanized(
         last = message
 
     assert last is not None, "split_reply fallback guarantees at least one part"
-    return last
+    return _Delivery(message=last, parts_sent=len(parts), superseded=False)
+
+
+async def _is_superseded(check: SupersedeCheck | None) -> bool:
+    """Ask the probe whether a newer inbound message arrived. Never raises.
+
+    A broken signal must not cost the user their reply (PRODUCT.md), so any
+    failure degrades to today's behavior: not superseded, reply delivered, the
+    new message answered by the next turn.
+    """
+    if check is None:
+        return False
+    try:
+        return bool(await check())
+    except Exception:
+        logger.warning("turn.supersede_check_failed", exc_info=True)
+        return False
+
+
+async def _abandon_turn(
+    session: AsyncSession, conversation: Conversation, *, delivered_parts: int
+) -> Superseded:
+    """Give up the rest of the reply: mark the run, commit, report the outcome.
+
+    The commit is what makes a superseded turn observable — it persists the
+    AgentRun and the tool messages the runtime wrote. `last_message_at` and the
+    rolling summary are deliberately skipped: this turn produced no answer.
+    """
+    await _mark_run_superseded(session, conversation)
+    await session.commit()
+    logger.info(
+        "turn.superseded",
+        conversation_id=str(conversation.id),
+        delivered_parts=delivered_parts,
+    )
+    return Superseded(delivered_parts)
+
+
+async def _mark_run_superseded(session: AsyncSession, conversation: Conversation) -> None:
+    """Flag this turn's `AgentRun` as superseded, if the runtime wrote one.
+
+    The row is flushed but not committed, so it is visible inside this
+    transaction. Runtimes without runs (`EchoRuntime`, test doubles) are a
+    no-op. An ERROR run keeps its status: a superseded errored turn is still an
+    error, and losing that would hide real failures.
+    """
+    result = await session.execute(
+        select(AgentRun)
+        .where(AgentRun.conversation_id == conversation.id)
+        .order_by(AgentRun.created_at.desc(), AgentRun.id)
+        .limit(1)
+    )
+    run = result.scalar_one_or_none()
+    if run is None or run.status == AgentRunStatus.ERROR:
+        return
+    run.status = AgentRunStatus.SUPERSEDED
 
 
 async def _maybe_summarize(

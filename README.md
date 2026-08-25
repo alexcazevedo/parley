@@ -80,6 +80,9 @@ configurable global Settings). Web Chat keeps legacy single-message delivery
 when humanize is off; all channels support split, paced bubbles when on. See
 `docs/ARCHITECTURE.md` for the full flow and adapter hooks.
 
+**Barge-in**: a message arriving mid-reply supersedes the turn at safe
+checkpoints; the conversation re-runs with the full batch.
+
 ## Run it
 
 ```bash

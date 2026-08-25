@@ -15,6 +15,10 @@ class AgentRunStatus(enum.StrEnum):
     RUNNING = "running"
     SUCCESS = "success"
     ERROR = "error"
+    # Barge-in: a newer inbound message arrived and the turn dropped its unsent
+    # reply at a checkpoint (app/conversations/turn.py). Observable, not an
+    # error — the batch is re-answered by the next turn.
+    SUPERSEDED = "superseded"
 
 
 class AgentRun(Base, TenantScoped):

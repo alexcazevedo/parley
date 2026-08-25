@@ -1,16 +1,18 @@
 # STATE — rewrite after every ticket completes; never append. ≤30 lines total.
 
 ## Now
-sentiment-escalation mvp run COMPLETE 2026-08-25 — tickets 20–21 done (1 attempt each) + orchestrator calibration micro-fix; suite 142 green; live rage probe passes with ticket's exact wording (score 0.70 → HUMAN_HANDOFF, requested_by=system, brief, handoff_message delivered, no AI answer). Awaiting final diff review (mvp approval 2 of 2).
+barge-in mvp run COMPLETE 2026-08-25 — tickets 22–23 done (1 attempt each); suite 154 green; live probe passes (interrupt mid-LLM → run superseded then success, single reply about order 99, nothing answers twice). Awaiting final diff review (mvp approval 2 of 2).
 
 ## Next
 - final diff review with user → commit
 
 ## Decisions
-- micro-fix post-21: classifier prompt gained rubric anchors (0.7–0.8 = explicit complaint about service/assistant, sarcasm, insults) — original prompt scored "que atendimento horrivel" 0.6, under 0.7 threshold; threshold kept at 0.7 (anchoring the prompt beats blunt threshold drop)
-- turn gate: _maybe_escalate_on_sentiment pre-runtime; _deliver helper shared by normal + escalation paths; handoff before delivery (state correctness over latency)
-- 'system' already in pg enum — migration 0006 = agents.sentiment_escalation_enabled only
-- prior: warm-handoff 6e05006, humanizer a7aa4c4, web chat 892a13f; host ports 5434/6380/8001/9000
+- execution: sequential in place (23 depends on 22)
+- supersede signal = existing Redis pending list (`has_pending` after drain); no new transport
+- checkpoints: before delivery + between humanizer bubbles only; escalation path exempt; probe failure → today's behavior
+- turn API: `process_turn(..., *, supersede_check)` → `Message | Superseded(delivered_parts) | None`; scheduler requeues drained batch at list head (`debounce.requeue_pending`) then existing tail re-arms now
+- AgentRunStatus.SUPERSEDED via migration 0007 (ALTER TYPE ADD VALUE, autocommit block, no-op downgrade)
+- prior: sentiment fd19d19, warm-handoff 6e05006, humanizer a7aa4c4, web chat 892a13f; host ports 5434/6380/8001/9000
 
 ## Blockers
 - none

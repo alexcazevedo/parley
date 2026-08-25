@@ -1,0 +1,618 @@
+{
+  "/Users/aazevedo/dev/conversational-harness/migrations/env.py": {
+    "mtime": 1787613779.951813,
+    "hash": "58bfca851b4c2e894d4da86aad415bfb"
+  },
+  "/Users/aazevedo/dev/conversational-harness/migrations/versions/0005_handoff_summary.py": {
+    "mtime": 1787672657.2106123,
+    "hash": "33c2707a5bd78eb81470012c454c10c5"
+  },
+  "/Users/aazevedo/dev/conversational-harness/migrations/versions/0004_handoff_message.py": {
+    "mtime": 1787619965.5828786,
+    "hash": "3a40a6358232fb0b6dbf274e981654ab"
+  },
+  "/Users/aazevedo/dev/conversational-harness/migrations/versions/0003_summary_cursor.py": {
+    "mtime": 1787619965.582789,
+    "hash": "82c5346c0b4cbe996cf0e428fc5b5ca9"
+  },
+  "/Users/aazevedo/dev/conversational-harness/migrations/versions/0006_sentiment_flag.py": {
+    "mtime": 1787681225.2775056,
+    "hash": "14cc8e71ea3e09c43da04fa7c8af6c68"
+  },
+  "/Users/aazevedo/dev/conversational-harness/migrations/versions/0007_agent_run_superseded.py": {
+    "mtime": 1787686344.286971,
+    "hash": "3a14fa7335dc0336212e41597762e657"
+  },
+  "/Users/aazevedo/dev/conversational-harness/migrations/versions/0001_tenants.py": {
+    "mtime": 1787613966.5863762,
+    "hash": "39f3abc53d34d3df856c69c7e4d13781"
+  },
+  "/Users/aazevedo/dev/conversational-harness/migrations/versions/0002_core.py": {
+    "mtime": 1787617298.7978432,
+    "hash": "11dcee876e37f52214de76135f88ad58"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/db.py": {
+    "mtime": 1787613712.0994577,
+    "hash": "bde24bd370449620eb0fe3e20f43652d"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/config.py": {
+    "mtime": 1787681213.8632805,
+    "hash": "5be80b4819c7946132dda0c947bd1a59"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/__init__.py": {
+    "mtime": 1787613684.6888556,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/main.py": {
+    "mtime": 1787622223.5052,
+    "hash": "ff59f11524054dc3243c7629a80b90e4"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/tools/registry.py": {
+    "mtime": 1787619965.5818632,
+    "hash": "e8d7e24a2af3d4667dfda6d1c205b4c0"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/tools/__init__.py": {
+    "mtime": 1787619965.5812905,
+    "hash": "5b19dd19b828914e56c75597f0fe41ee"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/tools/http.py": {
+    "mtime": 1787619965.5817018,
+    "hash": "58adb92fd13d6d070adcf5a93f3f871f"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/tools/ssrf.py": {
+    "mtime": 1787620185.0779665,
+    "hash": "2c01ba216a31e94892a4f1d1acf47f04"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/tools/builtin.py": {
+    "mtime": 1787672755.4720478,
+    "hash": "51be1aa470ef887f99ea1d96ad8cfa7a"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/tools/base.py": {
+    "mtime": 1787619965.5814161,
+    "hash": "74b6fc1c7049db67188f78a3108c551a"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/tools/validation.py": {
+    "mtime": 1787619965.582255,
+    "hash": "884a4bd48d5559ba49fe73c9d7452ef5"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/messages/ingest.py": {
+    "mtime": 1787617557.2535262,
+    "hash": "a1055c573971b26cf4bea778356cae7d"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/messages/__init__.py": {
+    "mtime": 1787617550.9283333,
+    "hash": "e0179a0a0e16756fb71f5b6c3f38372d"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/llm/__init__.py": {
+    "mtime": 1787619965.5795226,
+    "hash": "22fc9f8a5a3337cee8ecbf8b8361ace0"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/llm/factory.py": {
+    "mtime": 1787619965.5797465,
+    "hash": "e0b433beb5920e0762ac4f7730e00f47"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/llm/base.py": {
+    "mtime": 1787619965.579634,
+    "hash": "c4d3f473af82c28dd281cbd79eb7ae80"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/llm/providers/fake.py": {
+    "mtime": 1787619965.5799942,
+    "hash": "187f43430f5677ea0d27dc0b7ab88434"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/llm/providers/openai_compatible.py": {
+    "mtime": 1787619965.5801134,
+    "hash": "f28c1cb0325ed7e0cf1d6cf036a2da88"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/llm/providers/__init__.py": {
+    "mtime": 1787619965.5798857,
+    "hash": "6a87d819381315e8812d892b83fb31a7"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/memory/service.py": {
+    "mtime": 1787619965.5804927,
+    "hash": "983963dc846876357b40c506024fcdfc"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/memory/__init__.py": {
+    "mtime": 1787619965.5803163,
+    "hash": "68529f86ed5c634871e69ee205d5b701"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/security/auth.py": {
+    "mtime": 1787613750.268304,
+    "hash": "2219ddcc67509b0db10093396bf86a8c"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/security/limits.py": {
+    "mtime": 1787618272.3056388,
+    "hash": "3fe8ef0919abc65dcd85d957593cf9b4"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/security/__init__.py": {
+    "mtime": 1787613739.2659545,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/security/ratelimit.py": {
+    "mtime": 1787618272.3057337,
+    "hash": "2ad998cc40f5d12af4514885fd616432"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/handoff/service.py": {
+    "mtime": 1787619965.5793858,
+    "hash": "ebf2feac8f8a8a9bbab63647def3ca97"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/handoff/__init__.py": {
+    "mtime": 1787619965.5792928,
+    "hash": "4f7cc3bc5875b1b2e7332b134c9e1b4b"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/handoff/summarizer.py": {
+    "mtime": 1787672677.303917,
+    "hash": "9b6006073e184681a0d7ee6b6f2e2cda"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/agents/sentiment.py": {
+    "mtime": 1787682014.5560997,
+    "hash": "c9b5edca59a146247a08e17d3ecabf4d"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/agents/__init__.py": {
+    "mtime": 1787619965.5774767,
+    "hash": "acb7eb4318f1aa418a43b94bf8745196"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/agents/runtime.py": {
+    "mtime": 1787661823.7185168,
+    "hash": "1a786e972ba98713131ef3e8874bfe58"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/agents/context.py": {
+    "mtime": 1787661809.973624,
+    "hash": "98b95eb7bfecf9ea3b1a8ab04e946a4b"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/repositories/contacts.py": {
+    "mtime": 1787617105.760721,
+    "hash": "672609a855334ded91f8d375a61477c3"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/repositories/tools.py": {
+    "mtime": 1787617103.55815,
+    "hash": "7925fb05593e09db346bfe1c8a6c3c96"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/repositories/__init__.py": {
+    "mtime": 1787617094.7868788,
+    "hash": "f34d82538231b6318ebd0eb2eedc7852"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/repositories/agents.py": {
+    "mtime": 1787617101.3117497,
+    "hash": "1bde80aab8096205b741b89df62a36ac"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/repositories/messages.py": {
+    "mtime": 1787617109.900818,
+    "hash": "4e972be4c5bc1667affd3accf098d694"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/repositories/memories.py": {
+    "mtime": 1787619965.5811608,
+    "hash": "72d0c5abaf34a6bc4d6a32a466e3b229"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/repositories/channels.py": {
+    "mtime": 1787617102.4392006,
+    "hash": "970411ca68df63eb5a02b36f0e0ad25e"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/repositories/conversations.py": {
+    "mtime": 1787617106.8162994,
+    "hash": "7be06ef8c74f30c10e7aa9366de15307"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/repositories/base.py": {
+    "mtime": 1787617291.3762393,
+    "hash": "bbdd4ca0b7585e4cd73f687cc9d94d5f"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/tenant.py": {
+    "mtime": 1787613728.920996,
+    "hash": "9a72bfd5f7b47eadddf9c7533c00230d"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/memory.py": {
+    "mtime": 1787621220.0562675,
+    "hash": "f401d7b2c37c1c56d66705c5a04e6811"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/agent_run.py": {
+    "mtime": 1787686337.8996744,
+    "hash": "c55c7c6a6422ac1477217d957e4e0a50"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/handoff.py": {
+    "mtime": 1787672755.4719434,
+    "hash": "32a00f6948f8db4dbbd5c4005aa032f3"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/conversation.py": {
+    "mtime": 1787621220.056263,
+    "hash": "5f69ba8b54a390914399ac7d9e0b6774"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/channel.py": {
+    "mtime": 1787621220.0561948,
+    "hash": "104e00695279ffb784fcf9d1d55a2d6c"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/__init__.py": {
+    "mtime": 1787617091.57873,
+    "hash": "e11b07d5b6172e7a82eaf5f2390f9aba"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/message.py": {
+    "mtime": 1787621220.0562863,
+    "hash": "a846c3d6f4d3e087c58938a9c4b507f4"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/tool_execution.py": {
+    "mtime": 1787621220.0563116,
+    "hash": "e744ffc45d006f032d3e646d5348aaa1"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/agent.py": {
+    "mtime": 1787681220.138168,
+    "hash": "7da59e7201f445a2383166eb6869d70d"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/tool.py": {
+    "mtime": 1787617287.0817661,
+    "hash": "b1f4a1963de77eded8ad7f0b0911aea3"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/base.py": {
+    "mtime": 1787621229.286373,
+    "hash": "cfcefe0000a202568fbe8ba5f751c2f0"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/models/contact.py": {
+    "mtime": 1787617043.8744342,
+    "hash": "836e325086282789267d6475515715f9"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/observability/logging.py": {
+    "mtime": 1787613737.024725,
+    "hash": "fbbb1ecd265835b100626e7054c10e0f"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/observability/__init__.py": {
+    "mtime": 1787613733.3432243,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/conversations/turn.py": {
+    "mtime": 1787686398.378136,
+    "hash": "1dfb58447492dd5139a71567b1f78d64"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/conversations/__init__.py": {
+    "mtime": 1787617543.8330994,
+    "hash": "ccd6dcf594c3e709dda85ac3496a9dca"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/conversations/humanize.py": {
+    "mtime": 1787661593.2641356,
+    "hash": "3f42eea2253b098cccc42aabb614fa08"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/conversations/summary.py": {
+    "mtime": 1787619965.578993,
+    "hash": "aa26803ae47e82066925e4a8cae1dfc0"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/conversations/lock.py": {
+    "mtime": 1787619965.578752,
+    "hash": "bd5349e5de7b2dee40937007659d6e79"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/conversations/resolver.py": {
+    "mtime": 1787617550.387805,
+    "hash": "af9c649de819a51aedb672044812bb72"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/conversations/debounce.py": {
+    "mtime": 1787686639.1629524,
+    "hash": "122c506fb601ab1dc11f56d4812d4df2"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/queue/__init__.py": {
+    "mtime": 1787617535.1419778,
+    "hash": "95b95c2eec40e077204457352c918b9b"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/queue/redis_queue.py": {
+    "mtime": 1787620550.5930834,
+    "hash": "81c94a430bba2bcde5a2f66b33984a4a"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/queue/base.py": {
+    "mtime": 1787617538.9239192,
+    "hash": "8bcd4ffe1d7962aec7d88965eb17300b"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/deps.py": {
+    "mtime": 1787613755.0492759,
+    "hash": "55582856f225818a118993f1297a2efc"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/contacts.py": {
+    "mtime": 1787619965.5780911,
+    "hash": "2f19e4da2fcc219974150a9c8292f8ce"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/health.py": {
+    "mtime": 1787613758.0216286,
+    "hash": "1343f830eba07c11cd8ea32c0ac7c826"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/tools.py": {
+    "mtime": 1787617154.323944,
+    "hash": "860d98fb81d4d5834c7ffc3a03fa309f"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/__init__.py": {
+    "mtime": 1787613752.4973543,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/agents.py": {
+    "mtime": 1787617130.7970796,
+    "hash": "fa42c53983de002ac88247edd7b43c8a"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/chat.py": {
+    "mtime": 1787681331.122792,
+    "hash": "1d1eb3caecb9c2d3ce1cc21ee8213a69"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/channels.py": {
+    "mtime": 1787617142.8637226,
+    "hash": "5a0e35a6bf7bbd30d45c5f2aab9596f7"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/errors.py": {
+    "mtime": 1787618272.304047,
+    "hash": "ced6a1c046f5b98c532a9185c96a7fd2"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/dev.py": {
+    "mtime": 1787618272.3039205,
+    "hash": "4251df6206e5f043815b090ea8fe4015"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/webhooks.py": {
+    "mtime": 1787618272.304377,
+    "hash": "696c68058ad22f0169d25132c96a7b1c"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/webchat.py": {
+    "mtime": 1787618272.3042667,
+    "hash": "947269defc5fc77c5817cc7b1e9166c7"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/tenants.py": {
+    "mtime": 1787613761.744297,
+    "hash": "eb0a209e6e4397e56355023a14a0750a"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/api/conversations.py": {
+    "mtime": 1787672897.5670416,
+    "hash": "ef00795d8992dfb34a933a5a3a2b5dae"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/workers/__init__.py": {
+    "mtime": 1787613766.5491924,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/workers/scheduler.py": {
+    "mtime": 1787686977.371265,
+    "hash": "d2b9e1ebb87d558b4ca0ead7102d0375"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/workers/main.py": {
+    "mtime": 1787619965.5824678,
+    "hash": "68f791c4312d81b22465bfc8e0969322"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/channels/registry.py": {
+    "mtime": 1787618272.3049169,
+    "hash": "adaa2e1ad827644e76aceba03a1dce01"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/channels/evolution.py": {
+    "mtime": 1787661656.3134778,
+    "hash": "541c94134bdc4af1020ed2651b2c604c"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/channels/__init__.py": {
+    "mtime": 1787617523.8566272,
+    "hash": "4076822fae60776a0110c2cd4a81ec32"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/channels/webchat.py": {
+    "mtime": 1787617532.5046737,
+    "hash": "845fcd5c3a454ad594967760aa0d8159"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/channels/base.py": {
+    "mtime": 1787661649.5782633,
+    "hash": "32d8b007f7ebcd8e8e453a589e155727"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/conftest.py": {
+    "mtime": 1787617222.1791227,
+    "hash": "249164cb54a8967b04ad360417c88823"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_handoff_summary.py": {
+    "mtime": 1787672744.4872172,
+    "hash": "6019884cfa0468f505ae6a382061ed92"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_latest_handoff_api.py": {
+    "mtime": 1787672918.4894488,
+    "hash": "42ed4db608b9dd7b6e2f326c015575f8"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_humanize.py": {
+    "mtime": 1787661572.8923116,
+    "hash": "61b84dc891534965398bdd41af1bb148"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_hardening.py": {
+    "mtime": 1787618272.3065581,
+    "hash": "3113957a8350570a20c9ea25f191b412"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_tenant_isolation.py": {
+    "mtime": 1787617247.1546178,
+    "hash": "d177e70e0199297d3fbd8110c3c30831"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_handoff.py": {
+    "mtime": 1787619965.5835614,
+    "hash": "14381586bfa56b0b3dc817ec476d7dcc"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/__init__.py": {
+    "mtime": 1787613824.8495147,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_barge_in_scheduler.py": {
+    "mtime": 1787687131.268373,
+    "hash": "3d36db24d651578fa5bdea9ec309c7e0"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_sentiment_escalation.py": {
+    "mtime": 1787681560.1220746,
+    "hash": "e8534d4cc49c23d1b1d8810722c7e254"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_ssrf.py": {
+    "mtime": 1787619965.5839276,
+    "hash": "765bbca7a79f37bebe8d433a6777eeaa"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_sentiment.py": {
+    "mtime": 1787681307.686321,
+    "hash": "5f6adeec59ce54fc9d6ed0a64f387c45"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_agent_loop.py": {
+    "mtime": 1787619965.5831385,
+    "hash": "99129f50fc42b5e1a7c94e25f8c0dffd"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_ingest.py": {
+    "mtime": 1787617606.4378593,
+    "hash": "ad7fd6ffccbf451590ff8b4631c88d12"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_debounce.py": {
+    "mtime": 1787686667.4318168,
+    "hash": "28b7bf3c7aa0ea200eb948ba71c25c89"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_http_tools.py": {
+    "mtime": 1787619965.5836961,
+    "hash": "2be28fbf22d0ac3a58a19a787279167d"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_bootstrap.py": {
+    "mtime": 1787672831.5427232,
+    "hash": "86b3a1b6879eac2ee42e57bb655777ee"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_summary.py": {
+    "mtime": 1787619965.5841165,
+    "hash": "c996ceb821cf9dd9e6773d7cd3dcf8f0"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_barge_in_turn.py": {
+    "mtime": 1787686482.9950342,
+    "hash": "eea5c0d0ebbc42d53d285a6b95c9c584"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_memory.py": {
+    "mtime": 1787619965.5838072,
+    "hash": "2a90e76bb6ac6e3c727ad15342ea38e4"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_health.py": {
+    "mtime": 1787613846.6601381,
+    "hash": "460c417069c253095389eef370619789"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_crud.py": {
+    "mtime": 1787617265.9201875,
+    "hash": "f8f7e59163284467d9c3fea54782baa6"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_evolution.py": {
+    "mtime": 1787661680.0283494,
+    "hash": "85e593a70c67bf9f0106c95ea18d8d66"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_turn_humanize.py": {
+    "mtime": 1787661942.748237,
+    "hash": "10fbe49f99cd0765338c93db69ce1242"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_e2e_demo.py": {
+    "mtime": 1787620279.7620919,
+    "hash": "de4fbc136ed0d5d331047cd5928726c3"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_context_builder.py": {
+    "mtime": 1787619965.583262,
+    "hash": "483e48f42877a94e41865a4db19103b7"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tests/test_tenants.py": {
+    "mtime": 1787613850.045615,
+    "hash": "c2117de8d66c39e2f7544931a8677139"
+  },
+  "/Users/aazevedo/dev/conversational-harness/scripts/mock_tool_server.py": {
+    "mtime": 1787620208.6013515,
+    "hash": "bf6880be7004a8a6f21c7476a3a8686d"
+  },
+  "/Users/aazevedo/dev/conversational-harness/scripts/demo.py": {
+    "mtime": 1787621341.6739728,
+    "hash": "3fb1285f494141f8aae880b0633ca329"
+  },
+  "/Users/aazevedo/dev/conversational-harness/PRODUCT.md": {
+    "mtime": 1787685846.6887732,
+    "hash": "2f61e701b2d0a63b8ebd895f09375f30"
+  },
+  "/Users/aazevedo/dev/conversational-harness/STATE.md": {
+    "mtime": 1787687490.2272568,
+    "hash": "a339e4cd5e770d5168e9d92b7e34eee3"
+  },
+  "/Users/aazevedo/dev/conversational-harness/README.md": {
+    "mtime": 1787686944.6038373,
+    "hash": "adef531493869912908b9a5cf4b0de46"
+  },
+  "/Users/aazevedo/dev/conversational-harness/docker-compose.yml": {
+    "mtime": 1787620201.72895,
+    "hash": "3c8dddd5580896cdedf8ccbccd22df24"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/06-http-tools-ssrf.md": {
+    "mtime": 1787619965.584802,
+    "hash": "c50e0acc2ad1546696013a41756dc68e"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/05-llm-agent-loop.md": {
+    "mtime": 1787619965.5846574,
+    "hash": "b18cb2884ebca72103d0f9e6eb531f8b"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/04-debounce-lock-turn.md": {
+    "mtime": 1787619965.5843513,
+    "hash": "7d32630da9c965b0ffaee21454679700"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/17-demo-wiring-docs.md": {
+    "mtime": 1787662311.7678916,
+    "hash": "7c0c0480364f8127e7d510855545c6a7"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/02-core-schema-crud.md": {
+    "mtime": 1787617359.4824052,
+    "hash": "a967fc5d4d882bdde86c7ac154c521ad"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/12-chat-bootstrap.md": {
+    "mtime": 1787622282.5095832,
+    "hash": "02988ab43bf87e479e7801eaf13e2da6"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/09-whatsapp-evolution.md": {
+    "mtime": 1787618272.3068116,
+    "hash": "625c732d7d7798d9599723ad324479fd"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/07-memory-summary.md": {
+    "mtime": 1787619965.5850084,
+    "hash": "8f0bac9626aa723f263b19b3b8e14fee"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/03-ingestion-webchat-queue.md": {
+    "mtime": 1787617652.1897311,
+    "hash": "33afa8e59d0b020ec0a3aa8d659897bb"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/13-chat-page.md": {
+    "mtime": 1787622410.9631622,
+    "hash": "e204f3e61cecd18af151107c241b2359"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/11-e2e-demo-readme.md": {
+    "mtime": 1787620591.7510216,
+    "hash": "e67c844ad8f4f57bc9628d130f98a7b3"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/21-turn-sentiment-escalation.md": {
+    "mtime": 1787682003.1343372,
+    "hash": "fbe1f0433c13238c8b58e6e9253b1ecf"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/08-handoff.md": {
+    "mtime": 1787619965.5851219,
+    "hash": "76db040c0d6829d2ef8082d35a3705aa"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/19-latest-handoff-api-docs.md": {
+    "mtime": 1787673067.283596,
+    "hash": "951a9fd6c6ee589b3ebaa5131eed36dd"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/10-hardening.md": {
+    "mtime": 1787618272.3070219,
+    "hash": "dfb32c4c24231cdb8f5894fbc8de244a"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/01-foundation.md": {
+    "mtime": 1787616901.8906837,
+    "hash": "fcf54995882fabd1c4a6de707a388e95"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/14-humanize-splitter.md": {
+    "mtime": 1787661618.4789104,
+    "hash": "af32369c59ccf62f990ac74e3652d7b5"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/20-sentiment-classifier.md": {
+    "mtime": 1787681388.5133557,
+    "hash": "ec8da4ea8bf08674984d62e50857bf07"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/22-turn-supersede-checkpoints.md": {
+    "mtime": 1787686556.1533983,
+    "hash": "8d2637f0745910f5101ebbf7f9dc015e"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/16-turn-humanize-integration.md": {
+    "mtime": 1787661976.9876978,
+    "hash": "915854281789d682a6d16f08de32eb93"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/23-scheduler-barge-in-requeue.md": {
+    "mtime": 1787687490.2228646,
+    "hash": "34ef9ddfc24d1f939c49a81363e168d2"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/15-adapter-typing-hooks.md": {
+    "mtime": 1787661714.357142,
+    "hash": "56a8c1b17fcae60953e46d31d3a09db8"
+  },
+  "/Users/aazevedo/dev/conversational-harness/tickets/18-handoff-summary-core.md": {
+    "mtime": 1787672835.7069573,
+    "hash": "0fc0e5777254144aeaa688855fc54088"
+  },
+  "/Users/aazevedo/dev/conversational-harness/app/static/chat.html": {
+    "mtime": 1787622348.3855863,
+    "hash": "49eb68d977ebbddb580a85923a6accb1"
+  },
+  "/Users/aazevedo/dev/conversational-harness/docs/ARCHITECTURE.md": {
+    "mtime": 1787686969.2919157,
+    "hash": "dc97ac4bb0f51e1bb151cd038447d918"
+  }
+}

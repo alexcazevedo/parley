@@ -205,9 +205,16 @@ async def test_message_arriving_during_turn_requeues_conversation(
     runtime = LateMessageRuntime()
     await tick(fake_redis, _session_factory(db_session), runtime, now=time.time() + 5)
 
+    # The mid-turn push supersedes the turn (the scheduler's supersede probe
+    # sees it): the runtime still ran once, but no reply went out, the
+    # conversation is re-armed, and the drained "Oi" batch is requeued ahead
+    # of the interrupting message.
     assert runtime.calls == ["Oi"]
+    assert await _assistant_messages(db_session, conversation_id) == []
     assert await fake_redis.zscore(DUE_KEY, str(conversation_id)) is not None
-    assert await fake_redis.llen(pending_key(conversation_id)) == 1
+    pending = await fake_redis.lrange(pending_key(conversation_id), 0, -1)
+    assert len(pending) == 2
+    assert uuid.UUID(pending[0]) == uuid.UUID(first["message_id"])
 
 
 async def test_echo_runtime_is_the_default(client, fake_redis, db_session):

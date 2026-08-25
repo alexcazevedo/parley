@@ -130,10 +130,16 @@ same conversation.
    - atomically drains `harness:pending:{conversation_id}` (`LRANGE` +
      `DEL` in one `MULTI/EXEC`, so nothing arriving mid-drain is lost);
    - loads those messages, joins their content, and calls
-     `process_turn(session, conversation_id, messages, runtime)`;
+     `process_turn(session, conversation_id, messages, runtime,
+     supersede_check=check)`, where `check` probes
+     `debounce.has_pending(redis, conversation_id)` — has a newer message
+     landed on the pending list since the drain? If the turn comes back
+     `Superseded`, the just-drained batch is put back on the pending list
+     via `debounce.requeue_pending` (ahead of whatever interrupted it) instead
+     of being counted as processed — see "Barge-in" below;
    - releases the lock; if more messages arrived on the pending list while
-     the lock was held, re-schedules the conversation immediately for
-     another turn.
+     the lock was held (including a requeued superseded batch), re-schedules
+     the conversation immediately for another turn.
 4. `process_turn` persists the assistant's reply in the same transaction the
    runtime used, sends it through the `ChannelAdapter`, updates
    `last_message_at`, and best-effort-advances the rolling summary.
@@ -241,6 +247,40 @@ their reply.
 
 Hook points: `ChannelAdapter.mark_read()`, `ChannelAdapter.send_typing()` in
 `app/channels/base.py`; integration hooks in `app/channels/evolution.py`.
+
+## Barge-in
+
+A message arriving mid-turn stops the stale reply instead of queuing a second
+answer behind it. `app/conversations/turn.py::process_turn` checks a
+`supersede_check` probe at exactly two safe checkpoints — once after the
+runtime returns and before any part is sent, and again between humanizer
+bubbles — never mid-LLM or mid-tool-call, so nothing is aborted while it has
+side effects in flight.
+
+- **Checkpoints only**: no cancellation during the LLM call or tool
+  execution; a hit is only acted on at the two points above.
+- **Sent bubbles stand**: a checkpoint 2 hit drops the unsent parts, but
+  whatever already went out stays out — same as a human getting cut off
+  mid-thought.
+- **Observable, not an error**: the turn's `AgentRun` (if the runtime wrote
+  one) is flipped to `AgentRunStatus.SUPERSEDED` (an `ERROR` run keeps its
+  error status), and `process_turn` returns `Superseded(delivered_parts)`
+  instead of a `Message`.
+- **Requeue -> one merged reply**: `app/workers/scheduler.py::tick` passes a
+  probe backed by `debounce.has_pending(redis, conversation_id)` (the
+  existing pending list — no new transport) and, on `Superseded`, calls
+  `debounce.requeue_pending` to put the drained batch back at the head of the
+  pending list, ahead of whatever interrupted it. The scheduler's normal
+  re-arm (see "Queue / debounce algorithm" step 3) fires the very next tick,
+  which drains old + new together and answers them as one reply.
+- **Degrade to today on probe failure**: `_is_superseded` never lets a
+  probe exception escape — a broken signal is treated as "not superseded",
+  so the reply is delivered in full and the interrupting message is simply
+  answered by the next turn, exactly like before this feature existed.
+- **Escalation path exempt**: `_maybe_escalate_on_sentiment`'s handoff
+  message is never a stale AI answer, so it is delivered whole with no
+  supersede checkpoints — a conversation already moving to `HUMAN_HANDOFF`
+  must not have its handoff message shredded mid-flight.
 
 ## Sentiment escalation
 

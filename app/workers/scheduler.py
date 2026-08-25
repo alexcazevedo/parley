@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.conversations import debounce, lock
-from app.conversations.turn import TurnRuntime, process_turn
+from app.conversations.turn import Superseded, TurnRuntime, process_turn
 from app.models.message import Message
 
 logger = structlog.get_logger(__name__)
@@ -79,10 +79,29 @@ async def tick(
             message_ids = await debounce.drain_pending(redis, raw_conversation_id)
             if not message_ids:
                 continue
+
+            async def check(raw_conversation_id: str = raw_conversation_id) -> bool:
+                return await debounce.has_pending(redis, raw_conversation_id)
+
             async with session_factory() as session:
                 messages = await _load_messages(session, message_ids)
-                await process_turn(session, conversation_id, messages, runtime)
-            processed.append(conversation_id)
+                result = await process_turn(
+                    session, conversation_id, messages, runtime, supersede_check=check
+                )
+            if isinstance(result, Superseded):
+                # Put the outstanding batch back ahead of the interrupting
+                # messages so the next turn answers everything at once. This
+                # runs inside the `try`, before the lock releases: a crash
+                # right here is the only way to lose the batch — the same
+                # exposure a crash mid-turn already has today.
+                await debounce.requeue_pending(redis, raw_conversation_id, message_ids)
+                logger.info(
+                    "scheduler.turn_superseded",
+                    conversation_id=raw_conversation_id,
+                    delivered_parts=result.delivered_parts,
+                )
+            else:
+                processed.append(conversation_id)
         finally:
             await lock.release(redis, raw_conversation_id, token)
 
