@@ -6,6 +6,7 @@
 path (see PRODUCT.md: "it never bypasses the pipeline").
 """
 
+import logging
 import uuid
 from typing import Any
 
@@ -21,6 +22,10 @@ from app.models.channel import Channel
 from app.models.tenant import Tenant
 from app.queue.redis_queue import RedisQueue
 from app.repositories.channels import ChannelsRepository
+from app.security.limits import check_message_size
+from app.security.ratelimit import check_rate_limit
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/channels/webchat", tags=["webchat"])
 
@@ -85,6 +90,22 @@ async def post_webchat_message(
     redis: Redis = Depends(get_redis),
 ) -> IngestOut:
     channel = await resolve_channel(db, tenant, payload.channel_id)
+
+    # Rate limit: channel_id:user_id
+    from app.config import get_settings
+    settings = get_settings()
+    user_key = f"{payload.channel_id}:{payload.user_id}"
+    await check_rate_limit(redis, "user", user_key, settings.rate_limit_user_per_min)
+
+    # Size limit: strict enforcement (413 if exceeded)
+    within_limit, _message = check_message_size(
+        payload.message, enforce_strict=True
+    )
+    if not within_limit:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+        )
+
     return await ingest_message(
         db, redis, tenant, channel, payload.user_id, payload.message, payload.message_id
     )

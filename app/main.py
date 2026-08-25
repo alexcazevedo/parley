@@ -14,6 +14,7 @@ from app.api import (
     webchat,
     webhooks,
 )
+from app.api.errors import add_exception_handlers
 from app.observability.logging import configure_logging, request_id_middleware
 
 configure_logging()
@@ -21,6 +22,7 @@ configure_logging()
 app = FastAPI(title="Conversational Agent Harness")
 
 app.middleware("http")(request_id_middleware)
+add_exception_handlers(app)
 
 app.include_router(health.router)
 app.include_router(tenants.router)

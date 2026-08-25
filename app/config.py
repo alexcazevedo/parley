@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     debounce_seconds: int = 3
     log_level: str = "INFO"
+    rate_limit_tenant_per_min: int = 600
+    rate_limit_user_per_min: int = 30
+    max_message_chars: int = 4000
 
 
 @lru_cache

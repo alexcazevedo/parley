@@ -19,10 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_redis
 from app.channels.evolution import EvolutionAdapter, IgnoredEvent
+from app.config import get_settings
 from app.messages.ingest import ingest
 from app.models.channel import Channel
 from app.queue.redis_queue import RedisQueue
 from app.security import secrets as secrets_crypto
+from app.security.limits import check_message_size
+from app.security.ratelimit import check_rate_limit
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 logger = logging.getLogger(__name__)
@@ -58,6 +61,25 @@ async def whatsapp_webhook(
     except IgnoredEvent as exc:
         logger.info("ignoring evolution webhook event: %s", exc)
         return {"status": "ignored"}
+
+    # Rate limit: channel_id:external_user_id
+    settings = get_settings()
+    user_key = f"{channel_id}:{incoming.external_user_id}"
+    await check_rate_limit(
+        redis, "user", user_key, settings.rate_limit_user_per_min
+    )
+
+    # Size limit: silently truncate and log for webhooks
+    within_limit, message_to_store = check_message_size(
+        incoming.content, enforce_strict=False
+    )
+    if not within_limit:
+        logger.warning(
+            "webhook message truncated: channel_id=%s, user_id=%s",
+            channel_id,
+            incoming.external_user_id,
+        )
+        incoming.content = message_to_store
 
     await ingest(db, RedisQueue(redis), incoming)
     await db.commit()
