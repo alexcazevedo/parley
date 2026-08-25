@@ -242,6 +242,30 @@ their reply.
 Hook points: `ChannelAdapter.mark_read()`, `ChannelAdapter.send_typing()` in
 `app/channels/base.py`; integration hooks in `app/channels/evolution.py`.
 
+## Sentiment escalation
+
+Proactive handoff when a user gets angry, without them having to ask for a
+person. Enabled per agent via `agents.sentiment_escalation_enabled` (default
+off; the `/chat` demo agent on).
+
+1. **Classifier** (`app/agents/sentiment.py`): one cheap LLM call scoring the
+   debounced inbound batch plus the last 10 messages for user frustration,
+   0.0–1.0. Runs in `process_turn` after the `ACTIVE_AI` state check and
+   *before* the runtime, so a frustrated batch never gets an AI answer.
+2. **Threshold**: global `Settings.sentiment_threshold` (0.7) and
+   `sentiment_timeout_seconds` (5.0) — no per-tenant/per-channel overrides.
+3. **Trip** (`app/conversations/turn.py::_maybe_escalate_on_sentiment`): the
+   turn short-circuits — the agent runtime and the rolling summary are both
+   skipped; the conversation goes to `HUMAN_HANDOFF` through the same warm
+   handoff as everything else (`handoff_with_summary`, so the operator brief
+   is generated) with `requested_by=system` and a reason citing the score;
+   the agent's `handoff_message` is delivered as the reply through the normal
+   send path, so humanizer pacing still applies.
+4. **Best-effort**: the classifier never blocks a turn. Any error, timeout or
+   unparseable answer scores `None`, which is treated as "no signal" and the
+   normal agent turn proceeds. Only `ACTIVE_AI` conversations are scored, so
+   an already handed-off conversation can't double-escalate.
+
 ## Extension points
 
 - **New channel**: implement `ChannelAdapter` (`app/channels/base.py`),

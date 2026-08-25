@@ -13,6 +13,12 @@ best-effort AI-summarized operator brief and surfaces it as `latest_handoff`
 on `GET /conversations/{id}`, so the operator doesn't make the contact repeat
 themselves.
 
+Sentiment escalation: on agents with `sentiment_escalation_enabled`, a cheap
+classifier scores each inbound batch for frustration before the agent runs, and
+a score at or above `SENTIMENT_THRESHOLD` (0.7) skips the AI answer entirely —
+the conversation warm-hands off with `requested_by=system` and the user gets
+the agent's `handoff_message`.
+
 **Principle**: the customer implements the business tools; the harness
 manages the conversation and agent runtime.
 

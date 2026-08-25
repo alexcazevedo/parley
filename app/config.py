@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     humanize_min_delay_seconds: float = 0.8
     humanize_max_delay_seconds: float = 4.0
     humanize_max_parts: int = 4
+    # Sentiment escalation classifier (see app/agents/sentiment.py, ticket 20).
+    sentiment_threshold: float = 0.7
+    sentiment_timeout_seconds: float = 5.0
 
 
 @lru_cache

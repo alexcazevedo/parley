@@ -64,8 +64,17 @@ async def _get_or_create_webchat_channel(db: AsyncSession, tenant: Tenant) -> Ch
             # Merge the new key into the config dict and update
             new_config = {**channel.config, "humanize": True}
             updated_channel = await channels_repo.update(tenant.id, channel.id, config=new_config)
-            await db.commit()
-            return updated_channel
+            channel = updated_channel
+
+        # Idempotent upgrade: flip the demo agent's sentiment escalation flag
+        # on if an earlier bootstrap left it off. Plain bool column — simple
+        # setattr + commit, not the JSONB merge-and-write dance above.
+        agents_repo = AgentsRepository(db)
+        agent = await agents_repo.get(tenant.id, channel.agent_id)
+        if agent is not None and not agent.sentiment_escalation_enabled:
+            agent.sentiment_escalation_enabled = True
+
+        await db.commit()
         return channel
 
     settings = get_settings()
@@ -96,6 +105,7 @@ async def _get_or_create_webchat_channel(db: AsyncSession, tenant: Tenant) -> Ch
         tool_names=["get_order"],
         memory_enabled=True,
         handoff_enabled=True,
+        sentiment_escalation_enabled=True,
     )
     await db.flush()
 

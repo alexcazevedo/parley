@@ -4,57 +4,64 @@ routing_profile: cloud         # cloud | cloud+local (local is opt-in, never a d
 parallel_default: sequential   # sequential | parallel
 ---
 
-# Warm-handoff summary
+# Sentiment-triggered escalation
 
 ## What / why
 
-When a conversation escalates to a human (`handoff_to_human` tool or
-operator-initiated), today's operator gets only a raw transcript and a
-one-line `reason`. Making the user repeat themselves is the classic moment
-the "seamless" illusion breaks — Sierra/Decagon-class products hand the
-operator an AI-written brief instead. Add that brief to the harness: at
-handoff time, one extra LLM call writes a short summary the operator reads
-before their first message.
+Human agents hand a conversation off instinctively when a customer is
+getting angry; today's harness only escalates when the user explicitly
+asks (agent calls `handoff_to_human`) or an operator intervenes. Item #4
+of the seamless roadmap: detect frustration and escalate proactively —
+before the user has to demand a person.
 
 Shape (decided during grilling):
 
-- **Storage**: new nullable `summary` column on the existing `Handoff` row
-  (Alembic migration). Generated for BOTH `handoff_to_human`-initiated and
-  operator-initiated handoffs.
-- **Surface**: `GET /conversations/{id}` gains `latest_handoff:
-  {reason, summary, requested_by, created_at} | null` (newest handoff for
-  the conversation). The summary NEVER enters the message transcript — the
-  end-user webchat page polls messages and would leak it.
-- **Content**: compact operator brief — who the contact is (known
-  memories/name), what they want, what the agent already did/answered
-  (including tool results), why the handoff happened, user's current tone.
-  Written in the conversation's language.
-- **Generation**: reuses the existing LLM provider + conversation context
-  (recent messages, rolling `conversation.summary`, memories, handoff
-  reason). Strictly best-effort: any LLM failure logs and completes the
-  handoff with `summary = null` — escalation must never be blocked or
-  delayed past a sensible timeout by the summarizer.
+- **Detection — harness classifier, not agent discretion**: a cheap
+  separate LLM call runs BEFORE the agent turn, scoring the inbound
+  debounced batch (with recent conversation context) for user frustration,
+  0.0–1.0. Deterministic and auditable; works even when the agent model
+  would stubbornly keep trying. Language-agnostic (LLM judges, no keyword
+  lists).
+- **Trigger behavior — skip the agent, de-escalate fast**: score ≥
+  threshold on an `ACTIVE_AI` conversation short-circuits the turn: no
+  normal AI answer; conversation transitions to `HUMAN_HANDOFF` through
+  the existing warm-handoff path (#3 — operator brief generated, reason
+  notes detected frustration + score); user receives the agent's existing
+  `handoff_message` text as the reply, delivered through the normal
+  channel path (humanizer pacing applies).
+- **Attribution**: the handoff records that the SYSTEM (sentiment
+  detector) requested it — visible in `latest_handoff.requested_by`
+  (enum extension + migration).
+- **Config**: per-agent enable flag (default off; demo agent on). Global
+  Settings: threshold (default 0.7), classifier timeout. Classifier uses
+  the existing LLM provider.
+- **Safety**: classifier is strictly best-effort — failure or timeout logs
+  and the normal agent turn proceeds. Never double-escalates (only fires
+  on `ACTIVE_AI`; handed-off conversations already skip turns).
 
 ## Primary user story
 
-As a human operator picking up an escalated conversation, I open it and
-read a short AI-written brief — who I'm talking to, what they need, what
-the bot already tried, and why it escalated — so I can send my first
-message immediately without asking the user to repeat anything.
+As a frustrated end user venting at a business's chat, I get handed to a
+human the moment my messages turn sour — without having to explicitly
+demand "let me talk to a person" — so the conversation de-escalates
+instead of a bot persisting at me.
 
 ## Out of scope
 
-- Operator dashboard/queue UI (REST only; mini-page is a future run)
-- Sentiment-triggered auto-escalation (#4) and barge-in (#5)
-- Re-summarizing on resume/close, or live-updating the brief while handed off
-- Notifying operators (webhook/email/push) that a handoff happened
-- Redaction/PII filtering inside the brief
-- Changes to the webchat page or channel adapters
+- Operator dashboards/analytics of sentiment scores; storing per-message
+  score history beyond the triggering handoff
+- Hybrid prompt-nudge mechanism, keyword lists, non-LLM classifiers
+- Per-tenant/per-channel threshold overrides (per-agent flag + global
+  threshold only)
+- Cooldowns / re-escalation tuning after an operator resumes
+- Barge-in (#5), operator mini-page
+- Webchat page or channel adapter changes
 
 ## Success demo
 
-Done when: in `/chat` I say "quero falar com uma pessoa", and
-`GET /conversations/{id}` returns `latest_handoff` with an LLM-written
-brief covering want/tried/why/tone — plus tests proving a summary is
-persisted for tool- and operator-initiated handoffs and that an LLM
-failure still completes the handoff with a null summary.
+Done when: in `/chat` I send escalating frustrated messages ("isso não
+resolve nada", "que atendimento horrível") and get no bot answer — just
+the soft handoff message — while `GET /conversations/{id}` shows
+`HUMAN_HANDOFF` with a `latest_handoff` brief citing the detected
+frustration; tests cover below-threshold no-op, threshold trip, and
+classifier failure proceeding with a normal turn.

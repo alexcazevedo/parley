@@ -4,6 +4,12 @@
 single `input_text`, hands it to a runtime, then persists the answer as an
 outbound assistant message and pushes it through the channel adapter.
 
+One thing runs before the runtime: for agents with
+`sentiment_escalation_enabled`, the frustration classifier
+(`app/agents/sentiment.py`) scores the batch, and a score at or above
+`settings.sentiment_threshold` short-circuits the turn into a warm handoff
+(`requested_by=system`) whose reply is the agent's `handoff_message`.
+
 Two runtime shapes are accepted. `TurnRuntime` is text-in/text-out and needs
 nothing from the database (`EchoRuntime`, test doubles).
 `SessionAwareTurnRuntime` additionally receives the turn's session, because it
@@ -21,16 +27,19 @@ from typing import Protocol, runtime_checkable
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.sentiment import score_frustration
 from app.channels.base import ChannelAdapter, OutgoingMessage
 from app.channels.registry import get_adapter
 from app.config import get_settings
 from app.conversations.humanize import split_reply, typing_delay_seconds
 from app.conversations.summary import maybe_summarize
+from app.handoff.summarizer import handoff_with_summary
 from app.llm.factory import get_provider
 from app.models.agent import Agent
 from app.models.channel import Channel
 from app.models.contact import Contact
 from app.models.conversation import Conversation, ConversationState
+from app.models.handoff import HandoffRequestedBy
 from app.models.message import Message, MessageDirection, MessageRole
 
 logger = structlog.get_logger(__name__)
@@ -102,25 +111,22 @@ async def process_turn(
         await _mark_read(adapter, messages, contact, channel)
 
     input_text = "\n".join(message.content for message in messages)
+
+    agent = await session.get(Agent, conversation.agent_id)
+    if agent is not None and agent.sentiment_escalation_enabled:
+        escalation = await _maybe_escalate_on_sentiment(
+            session, conversation, agent, adapter, contact, channel, humanized, input_text
+        )
+        if escalation is not None:
+            return escalation
+
     runtime = runtime or EchoRuntime()
     if isinstance(runtime, SessionAwareTurnRuntime):
         reply_text = await runtime.run_turn(session, conversation, input_text)
     else:
         reply_text = await runtime.run(conversation, input_text)
 
-    if humanized:
-        reply = await _deliver_humanized(
-            session, conversation, adapter, contact, channel, reply_text
-        )
-    else:
-        reply = _build_reply(conversation, reply_text)
-        session.add(reply)
-        await session.flush()
-        await adapter.send_message(
-            OutgoingMessage(conversation_id=conversation.id, content=reply_text),
-            contact,
-            channel,
-        )
+    reply = await _deliver(session, conversation, adapter, contact, channel, humanized, reply_text)
 
     conversation.last_message_at = datetime.now(UTC)
     await _maybe_summarize(session, conversation, runtime)
@@ -129,6 +135,73 @@ async def process_turn(
         "turn.completed",
         conversation_id=str(conversation_id),
         message_count=len(messages),
+    )
+    return reply
+
+
+async def _maybe_escalate_on_sentiment(
+    session: AsyncSession,
+    conversation: Conversation,
+    agent: Agent,
+    adapter: ChannelAdapter,
+    contact: Contact,
+    channel: Channel,
+    humanized: bool,
+    input_text: str,
+) -> Message | None:
+    """Score the inbound batch; on a frustrated batch, hand off instead of answering.
+
+    Returns the delivered `handoff_message` when the turn was short-circuited,
+    or `None` to let the normal agent turn proceed. The scorer is best-effort
+    (`None` = no signal), so a broken classifier never costs the user a reply.
+
+    The classifier + operator brief run before the reply goes out, which adds a
+    few seconds of latency to an escalating turn — accepted for mvp: state
+    correctness (never answering as the AI once we've decided to escalate)
+    matters more than shaving that delay.
+    """
+    score = await score_frustration(session, conversation, agent, input_text)
+    if score is None or score < get_settings().sentiment_threshold:
+        return None
+
+    await handoff_with_summary(
+        session,
+        conversation,
+        reason=f"frustração do usuário detectada (score {score:.2f})",
+        requested_by=HandoffRequestedBy.SYSTEM,
+    )
+    reply = await _deliver(
+        session, conversation, adapter, contact, channel, humanized, agent.handoff_message
+    )
+    conversation.last_message_at = datetime.now(UTC)
+    await session.commit()
+    logger.info(
+        "turn.sentiment_escalated",
+        conversation_id=str(conversation.id),
+        score=score,
+    )
+    return reply
+
+
+async def _deliver(
+    session: AsyncSession,
+    conversation: Conversation,
+    adapter: ChannelAdapter,
+    contact: Contact,
+    channel: Channel,
+    humanized: bool,
+    reply_text: str,
+) -> Message:
+    """Persist + send one reply, paced into bubbles when the channel is humanized."""
+    if humanized:
+        return await _deliver_humanized(
+            session, conversation, adapter, contact, channel, reply_text
+        )
+    reply = _build_reply(conversation, reply_text)
+    session.add(reply)
+    await session.flush()
+    await adapter.send_message(
+        OutgoingMessage(conversation_id=conversation.id, content=reply_text), contact, channel
     )
     return reply
 

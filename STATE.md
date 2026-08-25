@@ -1,18 +1,16 @@
 # STATE — rewrite after every ticket completes; never append. ≤30 lines total.
 
 ## Now
-idle — warm-handoff mvp complete + approved 2026-08-25, committed 6e05006; suite 129 green; both handoff paths live-verified
+sentiment-escalation mvp run COMPLETE 2026-08-25 — tickets 20–21 done (1 attempt each) + orchestrator calibration micro-fix; suite 142 green; live rage probe passes with ticket's exact wording (score 0.70 → HUMAN_HANDOFF, requested_by=system, brief, handoff_message delivered, no AI answer). Awaiting final diff review (mvp approval 2 of 2).
 
 ## Next
-- optional follow-ups: sentiment-triggered escalation (#4), barge-in (#5), operator mini-page
+- final diff review with user → commit
 
 ## Decisions
-- summarizer wraps pure HandoffService: handoff_with_summary in app/handoff/summarizer.py; best-effort wait_for 10s, None on failure
-- surface: latest_handoff {reason, summary, requested_by, created_at} on single-GET only; list endpoint deliberately excludes (N+1)
-- migration 0005 handoffs.summary Text nullable; verified in compose DB
-- micro-fix during run: ruff I001 tests/test_bootstrap.py (pre-existing from a7aa4c4 — ticket 17 linted app only; lesson: lint app AND tests in checks)
-- prior: humanizer a7aa4c4, web chat 892a13f, harness MVP 92c2b2c
-- host ports: Postgres 5434, Redis 6380, API 8001, mock-tools 9000
+- micro-fix post-21: classifier prompt gained rubric anchors (0.7–0.8 = explicit complaint about service/assistant, sarcasm, insults) — original prompt scored "que atendimento horrivel" 0.6, under 0.7 threshold; threshold kept at 0.7 (anchoring the prompt beats blunt threshold drop)
+- turn gate: _maybe_escalate_on_sentiment pre-runtime; _deliver helper shared by normal + escalation paths; handoff before delivery (state correctness over latency)
+- 'system' already in pg enum — migration 0006 = agents.sentiment_escalation_enabled only
+- prior: warm-handoff 6e05006, humanizer a7aa4c4, web chat 892a13f; host ports 5434/6380/8001/9000
 
 ## Blockers
 - none
