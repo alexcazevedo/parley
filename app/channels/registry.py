@@ -1,11 +1,13 @@
 """Maps `Channel.type` to its `ChannelAdapter` implementation."""
 
 from app.channels.base import ChannelAdapter
+from app.channels.evolution import EvolutionAdapter
 from app.channels.webchat import WebChatAdapter
 from app.models.channel import ChannelType
 
 _ADAPTERS: dict[ChannelType, type[ChannelAdapter]] = {
     ChannelType.WEBCHAT: WebChatAdapter,
+    ChannelType.WHATSAPP_EVOLUTION: EvolutionAdapter,
 }
 
 
