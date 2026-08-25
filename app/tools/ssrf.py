@@ -14,8 +14,12 @@ Configuration is read from `os.environ` at call time rather than from
 - `TOOL_SSRF_DISABLED=true` — disables the guard entirely. Development only;
   every call logs a loud warning.
 
-(These belong in `Settings` eventually; they live here because ticket 06 may
-not touch `app/config.py` while other tickets are editing it in parallel.)
+Both are also mirrored on `app.config.Settings` (`tool_allowed_hosts`,
+`tool_ssrf_disabled`) so they show up alongside the rest of the app's
+configuration and in `.env.example` — but this module intentionally keeps
+reading `os.environ` directly at call time rather than through a `Settings`
+instance, so tests can monkeypatch the env vars per-test without touching a
+cached `get_settings()`.
 """
 
 import asyncio

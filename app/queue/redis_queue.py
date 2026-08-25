@@ -3,6 +3,7 @@ list for jobs that exhaust their retries.
 """
 
 from redis.asyncio import Redis
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.queue.base import Job, Queue
 
@@ -19,7 +20,12 @@ class RedisQueue(Queue):
         await self.redis.lpush(JOBS_KEY, job.to_json())
 
     async def dequeue(self, timeout: int = 0) -> Job | None:
-        result = await self.redis.brpop([JOBS_KEY], timeout=timeout)
+        try:
+            result = await self.redis.brpop([JOBS_KEY], timeout=timeout)
+        except RedisTimeoutError:
+            # Some client configurations surface an idle BRPOP as a socket
+            # timeout instead of a nil reply; treat it as "nothing to do".
+            return None
         if result is None:
             return None
         _, raw = result

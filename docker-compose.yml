@@ -36,6 +36,10 @@ services:
       # name, not by the host-mapped ports used in .env for local `uv run`.
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-harness}:${POSTGRES_PASSWORD:-harness}@postgres:5432/${POSTGRES_DB:-harness}
       REDIS_URL: redis://redis:6379/0
+      # Allow tools to reach the demo's mocked business endpoint past the
+      # SSRF guard (see app/tools/ssrf.py) — scripts/demo.py registers
+      # `get_order` at http://mock-tools:9000/orders.
+      TOOL_ALLOWED_HOSTS: mock-tools
     command: >
       sh -c "uv run alembic upgrade head && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:
@@ -45,6 +49,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mock-tools:
+        condition: service_started
 
   worker:
     build:
@@ -54,12 +60,28 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-harness}:${POSTGRES_PASSWORD:-harness}@postgres:5432/${POSTGRES_DB:-harness}
       REDIS_URL: redis://redis:6379/0
+      TOOL_ALLOWED_HOSTS: mock-tools
     command: uv run python -m app.workers.main
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mock-tools:
+        condition: service_started
+
+  # Stands in for a customer's own business-logic endpoint (see
+  # scripts/mock_tool_server.py and PRODUCT.md's success demo): a bare
+  # `GET /orders?order_id=` the demo's `get_order` tool points at. No env
+  # needed — it's just mounted into the same built image so it shares the
+  # already-installed FastAPI/uvicorn deps, no separate Dockerfile.
+  mock-tools:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ./scripts:/srv/scripts:ro
+    command: uv run uvicorn scripts.mock_tool_server:app --host 0.0.0.0 --port 9000
 
 volumes:
   postgres_data:

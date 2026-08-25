@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     rate_limit_tenant_per_min: int = 600
     rate_limit_user_per_min: int = 30
     max_message_chars: int = 4000
+    # SSRF guard for outbound customer-tool HTTP calls (see app/tools/ssrf.py).
+    # Comma-separated hostname allowlist; when non-empty only these hosts may
+    # be called, bypassing the private/loopback IP checks — this is how
+    # docker-compose points tools at the in-network `mock-tools` demo service.
+    tool_allowed_hosts: str = ""
+    # Disables the SSRF guard entirely. Development only.
+    tool_ssrf_disabled: bool = False
 
 
 @lru_cache
