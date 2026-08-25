@@ -1,10 +1,10 @@
 # STATE — rewrite after every ticket completes; never append. ≤30 lines total.
 
 ## Now
-warm-handoff mvp run COMPLETE 2026-08-25 — tickets 18–19 done, 1 attempt each, suite 129 green; BOTH paths live-verified (operator + agent-tool handoff produce LLM brief in latest_handoff). Awaiting final diff review (mvp approval 2 of 2).
+idle — warm-handoff mvp complete + approved 2026-08-25, committed 6e05006; suite 129 green; both handoff paths live-verified
 
 ## Next
-- final diff review with user → commit
+- optional follow-ups: sentiment-triggered escalation (#4), barge-in (#5), operator mini-page
 
 ## Decisions
 - summarizer wraps pure HandoffService: handoff_with_summary in app/handoff/summarizer.py; best-effort wait_for 10s, None on failure
