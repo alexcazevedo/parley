@@ -9,10 +9,14 @@ how to run it.
 ```
 app/
   api/            REST routers (tenants, agents, channels, tools, contacts,
-                   conversations, webchat, dev, webhooks, health). Every
-                   router is thin: parse/validate -> repository or service ->
-                   commit -> response model. Auth deps live in
-                   app/security/auth.py (X-Admin-Key, X-API-Key).
+                   conversations, webchat, dev, webhooks, health, chat,
+                   operator). Every router is thin: parse/validate ->
+                   repository or service -> commit -> response model. Auth
+                   deps live in app/security/auth.py (X-Admin-Key, X-API-Key).
+                   operator.py serves the self-contained operator inbox page
+                   (app/static/operator.html) at GET /operator — no API auth
+                   on the route itself, since the page gates on X-API-Key in
+                   JS against the endpoints below.
   channels/       ChannelAdapter interface + two implementations: webchat
                    (REST only) and evolution (WhatsApp). parse_incoming/
                    send_message is the whole seam.
@@ -306,6 +310,32 @@ off; the `/chat` demo agent on).
    normal agent turn proceeds. Only `ACTIVE_AI` conversations are scored, so
    an already handed-off conversation can't double-escalate.
 
+## Operator UI
+
+`app/static/operator.html` is a self-contained (no build, no framework)
+static page served at `GET /operator`, giving a human the same handoff
+surface `/chat` gives an end user — see PRODUCT.md "Operator UI".
+
+- **Key gate**: on load the page reads the tenant `X-API-Key` from
+  `localStorage["harness_operator_api_key"]`; if absent it shows a small
+  form (prefilled with the demo key) instead of any page content. Every
+  fetch sends the stored key; a `401`/`403` from any call clears it and
+  re-shows the gate — there is no separate login/session endpoint.
+- **Inbox / Ativas**: two tabs over the same `GET /conversations` list —
+  `state=HUMAN_HANDOFF` (with `include_handoff=true` for the brief) for the
+  inbox, `state=ACTIVE_AI&state=WAITING` for Ativas — both polled every 3s,
+  re-rendered only when the serialized JSON changes.
+- **Conversation pane**: `GET /conversations/{id}/messages` polled every
+  1.5s while a conversation is open; the inbox pane adds a reply box
+  (`POST .../messages`), **Resumir** (`POST .../resume`) and **Fechar**
+  (`POST .../close`); the Ativas pane is read-only plus one **Assumir**
+  button (`POST .../handoff` with `requested_by=operator`) that moves the
+  conversation into the inbox.
+- **What it is not**: no operator accounts/login, no per-operator
+  assignment, no notifications/unread counts, no run/tool/sentiment views —
+  same "Not included" list as PRODUCT.md. Auth is exactly the existing
+  tenant `X-API-Key`; the page adds no new auth code.
+
 ## Extension points
 
 - **New channel**: implement `ChannelAdapter` (`app/channels/base.py`),
@@ -324,5 +354,6 @@ off; the `/chat` demo agent on).
   `app/agents/runtime.py`.
 - **Operator dashboard**: the REST surface
   (`GET/POST /conversations/{id}/messages`, `/handoff`, `/resume`, `/close`,
-  `GET /conversations/{id}`'s `latest_handoff` brief) is already
-  dashboard-ready; only a UI is missing (out of scope per PRODUCT.md).
+  `GET /conversations`/`{id}`'s `latest_handoff` brief) is what `/operator`
+  (see "Operator UI" below) is built on; further UI polish (accounts,
+  assignment, notifications) is still out of scope per PRODUCT.md.

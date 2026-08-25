@@ -10,6 +10,7 @@ from app.api import (
     conversations,
     dev,
     health,
+    operator,
     tenants,
     tools,
     webchat,
@@ -34,5 +35,6 @@ app.include_router(contacts.router)
 app.include_router(conversations.router)
 app.include_router(webchat.router)
 app.include_router(chat.router)
+app.include_router(operator.router)
 app.include_router(dev.router)
 app.include_router(webhooks.router)

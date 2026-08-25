@@ -19,7 +19,7 @@ from app.handoff.service import HandoffService, IllegalTransitionError
 from app.handoff.summarizer import handoff_with_summary
 from app.models.channel import Channel
 from app.models.contact import Contact
-from app.models.conversation import ConversationState
+from app.models.conversation import Conversation, ConversationState
 from app.models.handoff import Handoff, HandoffRequestedBy
 from app.models.message import Message, MessageDirection, MessageRole
 from app.models.tenant import Tenant
@@ -57,6 +57,8 @@ class ConversationOut(BaseModel):
     last_message_at: datetime | None
     created_at: datetime
     latest_handoff: HandoffOut | None = None
+    contact_external_user_id: str | None = None
+    contact_display_name: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -98,17 +100,26 @@ async def _get_conversation_or_404(db: AsyncSession, tenant: Tenant, conversatio
 
 @router.get("", response_model=list[ConversationOut])
 async def list_conversations(
-    state: ConversationState | None = Query(default=None),
+    state: list[ConversationState] | None = Query(default=None),
+    include_handoff: bool = Query(default=False),
+    limit: int = Query(default=100, ge=1, le=500),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> list[ConversationOut]:
-    # `latest_handoff` is intentionally left null here (its default) rather
-    # than fetched per row — a per-conversation handoff query for every item
-    # in a list response would be an N+1. Single-GET below pays that one
-    # extra query for the full brief.
-    filters = {"state": state} if state is not None else {}
-    conversations = await _repo(db).list(tenant.id, **filters)
-    return [ConversationOut.model_validate(c) for c in conversations]
+    """Powers the operator inbox and Ativas lists: repeatable `state` filter,
+    newest-activity-first ordering, contact label always attached (one extra
+    statement), and — only when `include_handoff=true` — the latest handoff
+    brief per row via a single bounded `DISTINCT ON` statement. With
+    `include_handoff` left at its default, `latest_handoff` stays null (its
+    default) rather than being fetched per row, which would be an N+1;
+    single-GET below always pays that one extra query for the full brief.
+    """
+    conversations = await _repo(db).list_for_inbox(tenant.id, state, limit)
+    outs = [ConversationOut.model_validate(c) for c in conversations]
+    await _attach_contacts(db, tenant, conversations, outs)
+    if include_handoff:
+        await _attach_latest_handoffs(db, tenant, conversations, outs)
+    return outs
 
 
 @router.get("/{conversation_id}", response_model=ConversationOut)
@@ -119,10 +130,61 @@ async def get_conversation(
 ) -> ConversationOut:
     conversation = await _get_conversation_or_404(db, tenant, conversation_id)
     out = ConversationOut.model_validate(conversation)
+    await _attach_contacts(db, tenant, [conversation], [out])
     latest_handoff = await _latest_handoff(db, tenant, conversation_id)
     if latest_handoff is not None:
         out.latest_handoff = HandoffOut.model_validate(latest_handoff)
     return out
+
+
+async def _attach_contacts(
+    db: AsyncSession,
+    tenant: Tenant,
+    conversations: list[Conversation],
+    outs: list[ConversationOut],
+) -> None:
+    """Loads every contact referenced by `conversations` in ONE statement and
+    maps `external_user_id`/`display_name` onto the matching `ConversationOut`
+    — used by both the list and the single GET so neither pays an N+1.
+    """
+    contact_ids = {c.contact_id for c in conversations}
+    if not contact_ids:
+        return
+    result = await db.execute(
+        select(Contact).where(Contact.tenant_id == tenant.id, Contact.id.in_(contact_ids))
+    )
+    contacts_by_id = {c.id: c for c in result.scalars().all()}
+    for conversation, out in zip(conversations, outs, strict=True):
+        contact = contacts_by_id.get(conversation.contact_id)
+        if contact is not None:
+            out.contact_external_user_id = contact.external_user_id
+            out.contact_display_name = contact.display_name
+
+
+async def _attach_latest_handoffs(
+    db: AsyncSession,
+    tenant: Tenant,
+    conversations: list[Conversation],
+    outs: list[ConversationOut],
+) -> None:
+    """List-sized equivalent of `_latest_handoff`: one `DISTINCT ON
+    (conversation_id)` statement for the whole page instead of one query per
+    row. Conversations without any handoff keep `latest_handoff=None`.
+    """
+    conversation_ids = [c.id for c in conversations]
+    if not conversation_ids:
+        return
+    result = await db.execute(
+        select(Handoff)
+        .distinct(Handoff.conversation_id)
+        .where(Handoff.tenant_id == tenant.id, Handoff.conversation_id.in_(conversation_ids))
+        .order_by(Handoff.conversation_id, Handoff.created_at.desc())
+    )
+    handoffs_by_conversation = {h.conversation_id: h for h in result.scalars().all()}
+    for conversation, out in zip(conversations, outs, strict=True):
+        handoff = handoffs_by_conversation.get(conversation.id)
+        if handoff is not None:
+            out.latest_handoff = HandoffOut.model_validate(handoff)
 
 
 async def _latest_handoff(

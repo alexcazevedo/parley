@@ -96,6 +96,9 @@ docker compose up -d --build
 # worker, and mock-tools (:9000 inside the compose network — the demo's
 # fake business endpoint).
 
+# operator page: http://localhost:8001/operator (paste the tenant API key;
+# the demo key is prefilled)
+
 uv run scripts/demo.py
 # scripts the PRODUCT.md "success demo" against the running stack over
 # plain HTTP: creates a tenant/agent/tool/channel, sends "Oi" / "Queria
@@ -148,6 +151,7 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
 | `POST /conversations/{id}/messages` | operator reply (typically while `HUMAN_HANDOFF`) |
 | `POST /conversations/{id}/handoff` / `/resume` / `/close` | conversation state transitions |
 | `GET/POST/DELETE /contacts/{id}/memories` | long-term memory CRUD |
+| `GET /operator` | self-contained operator inbox page (handoff triage, reply, resume/close) |
 
 ## Evolution API (WhatsApp) setup
 

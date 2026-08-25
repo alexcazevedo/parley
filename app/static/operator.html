@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Acme — Operador</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f2f3f5; color: #1a1a1a; }
+  header { background: #1a1a2e; color: #fff; padding: 14px 20px; font-size: 18px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+  header a { color: #cfd3ff; font-size: 13px; font-weight: 400; text-decoration: none; cursor: pointer; }
+  header a:hover { text-decoration: underline; }
+  /* --- key gate --- */
+  #gate { max-width: 360px; margin: 80px auto; background: #fff; border: 1px solid #e0e0e0; border-radius: 10px; padding: 24px; text-align: center; }
+  #gate h1 { font-size: 16px; margin: 0 0 16px; }
+  #gate input { width: 100%; padding: 10px 12px; border: 1px solid #ccc; border-radius: 8px; font-size: 14px; margin-bottom: 10px; }
+  #gate button { width: 100%; padding: 10px; border: none; border-radius: 8px; background: #4a6cf7; color: #fff; font-size: 14px; cursor: pointer; }
+  .error-line { color: #d64545; font-size: 12px; margin-top: 10px; min-height: 14px; }
+  /* --- main layout --- */
+  #app { display: flex; height: calc(100vh - 49px); }
+  #list-col { width: 340px; flex: none; background: #fff; border-right: 1px solid #e0e0e0; display: flex; flex-direction: column; }
+  #tabs { display: flex; border-bottom: 1px solid #e0e0e0; }
+  .tab { flex: 1; padding: 12px; text-align: center; font-size: 13px; cursor: pointer; color: #666; border-bottom: 2px solid transparent; }
+  .tab.active { color: #1a1a2e; font-weight: 600; border-bottom-color: #4a6cf7; }
+  #list { flex: 1; overflow-y: auto; }
+  #empty-state { padding: 24px; text-align: center; color: #888; font-size: 13px; }
+  .row { padding: 12px 14px; border-bottom: 1px solid #eee; cursor: pointer; }
+  .row:hover { background: #f7f8fc; }
+  .row.selected { background: #eef1ff; }
+  .row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+  .row-contact { font-weight: 600; font-size: 13px; }
+  .row-time { font-size: 11px; color: #999; flex: none; }
+  .row-chip { display: inline-block; font-size: 10px; padding: 2px 7px; border-radius: 999px; background: #e0e0e0; color: #555; margin-top: 4px; }
+  .row-handoff { font-size: 12px; color: #555; margin-top: 4px; }
+  #conv-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #conv-empty { margin: auto; color: #888; font-size: 14px; }
+  #brief { background: #fff8e0; border-bottom: 1px solid #f0dfa0; padding: 12px 16px; font-size: 13px; }
+  #brief b { color: #7a5c00; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .bubble { max-width: 70%; padding: 10px 14px; border-radius: 14px; line-height: 1.4; white-space: pre-wrap; word-wrap: break-word; }
+  .bubble.user { align-self: flex-start; background: #ffffff; color: #1a1a1a; border: 1px solid #e0e0e0; border-bottom-left-radius: 4px; }
+  .bubble.assistant { align-self: flex-end; background: #dfe3f5; color: #444; border-bottom-right-radius: 4px; }
+  .bubble.human_operator { align-self: flex-end; background: #4a6cf7; color: #fff; border-bottom-right-radius: 4px; }
+  .bubble .label { display: block; font-size: 10px; opacity: 0.75; margin-bottom: 2px; }
+  .chip { align-self: center; background: #e0e0e0; color: #555; font-size: 12px; padding: 4px 10px; border-radius: 999px; }
+  #actions { flex: none; border-top: 1px solid #e0e0e0; padding: 10px 16px; background: #fff; }
+  #actions textarea { width: 100%; resize: none; padding: 8px 12px; border: 1px solid #ccc; border-radius: 10px; font-size: 14px; font-family: inherit; min-height: 44px; }
+  #action-buttons { display: flex; gap: 8px; margin-top: 8px; }
+  #action-buttons button { padding: 8px 16px; border: none; border-radius: 8px; font-size: 13px; cursor: pointer; }
+  #send-btn { background: #4a6cf7; color: #fff; }
+  #resume-btn { background: #2fa86b; color: #fff; }
+  #close-btn { background: #999; color: #fff; }
+  #assumir-btn { background: #d67b1c; color: #fff; }
+  #action-buttons button:disabled { opacity: 0.6; cursor: not-allowed; }
+  #action-error { color: #d64545; font-size: 12px; padding: 6px 16px 0; min-height: 14px; }
+  #notice { padding: 16px; color: #555; font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <h1>Acme — Operador</h1>
+  <input id="gate-input" type="text" placeholder="Chave da API do tenant" />
+  <button id="gate-btn">Entrar</button>
+  <div id="gate-error" class="error-line"></div>
+</div>
+
+<div id="app" style="display:none">
+  <header>
+    Acme — Operador
+    <a id="logout-link">Sair</a>
+  </header>
+  <div id="app-body" style="display:flex; height:calc(100% - 49px);">
+    <div id="list-col">
+      <div id="tabs">
+        <div class="tab active" data-tab="inbox">Caixa de entrada</div>
+        <div class="tab" data-tab="ativas">Ativas</div>
+      </div>
+      <div id="list"></div>
+      <div id="empty-state" style="display:none">Nenhuma conversa aguardando</div>
+    </div>
+    <div id="conv-col">
+      <div id="conv-empty">Selecione uma conversa</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const GATE_KEY = "harness_operator_api_key";
+  const TABS = {
+    inbox: { states: ["HUMAN_HANDOFF"] },
+    ativas: { states: ["ACTIVE_AI", "WAITING"] },
+  };
+  const STATE_LABEL = {
+    ACTIVE_AI: "IA ativa",
+    WAITING: "Aguardando",
+    HUMAN_HANDOFF: "Com atendente",
+    CLOSED: "Encerrada",
+  };
+  const REQUESTED_BY_LABEL = {
+    user: "cliente",
+    operator: "operador",
+    system: "sistema",
+    agent: "agente",
+  };
+
+  const gateEl = document.getElementById("gate");
+  const gateInput = document.getElementById("gate-input");
+  const gateBtn = document.getElementById("gate-btn");
+  const gateError = document.getElementById("gate-error");
+  const appEl = document.getElementById("app");
+  const logoutLink = document.getElementById("logout-link");
+  const listEl = document.getElementById("list");
+  const emptyStateEl = document.getElementById("empty-state");
+  const convColEl = document.getElementById("conv-col");
+  const tabEls = document.querySelectorAll(".tab");
+
+  gateInput.value = "demo-webchat-key";
+
+  let apiKey = null;
+  let activeTab = "inbox";
+  let lastListJson = "";
+  let selectedId = null;
+  let selectedConversation = null;
+  let lastMessagesJson = "";
+  let listTimer = null;
+  let messagesTimer = null;
+  let sending = false;
+
+  function showGate(errorText) {
+    stopTimers();
+    appEl.style.display = "none";
+    gateEl.style.display = "block";
+    gateError.textContent = errorText || "";
+  }
+
+  function stopTimers() {
+    if (listTimer) clearInterval(listTimer);
+    if (messagesTimer) clearInterval(messagesTimer);
+    listTimer = null;
+    messagesTimer = null;
+  }
+
+  async function apiFetch(path, options) {
+    const opts = options || {};
+    opts.headers = Object.assign({ "X-API-Key": apiKey }, opts.headers || {});
+    let res;
+    try {
+      res = await fetch(path, opts);
+    } catch (err) {
+      return { ok: false, network: true };
+    }
+    if (res.status === 401 || res.status === 403) {
+      localStorage.removeItem(GATE_KEY);
+      showGate("Chave inválida ou sem acesso.");
+      return { ok: false, authFailed: true };
+    }
+    return res;
+  }
+
+  function relativeTime(iso) {
+    if (!iso) return "";
+    const diffMs = Date.now() - new Date(iso).getTime();
+    const min = Math.floor(diffMs / 60000);
+    if (min < 1) return "agora";
+    if (min < 60) return "há " + min + " min";
+    const hours = Math.floor(min / 60);
+    if (hours < 24) return "há " + hours + " h";
+    return "há " + Math.floor(hours / 24) + " d";
+  }
+
+  function truncate(text, n) {
+    if (!text) return "";
+    return text.length > n ? text.slice(0, n) + "…" : text;
+  }
+
+  async function fetchList() {
+    const params = new URLSearchParams();
+    for (const s of TABS[activeTab].states) params.append("state", s);
+    params.append("include_handoff", "true");
+    params.append("limit", "100");
+    const res = await apiFetch("/conversations?" + params.toString());
+    if (!res.ok) return;
+    const conversations = await res.json();
+    const json = JSON.stringify(conversations);
+    if (json === lastListJson) return;
+    lastListJson = json;
+    renderList(conversations);
+  }
+
+  function renderList(conversations) {
+    listEl.innerHTML = "";
+    emptyStateEl.style.display = conversations.length === 0 ? "block" : "none";
+    for (const c of conversations) {
+      const row = document.createElement("div");
+      row.className = "row" + (c.id === selectedId ? " selected" : "");
+      row.dataset.id = c.id;
+      const label = c.contact_display_name || c.contact_external_user_id || c.id;
+      let html =
+        '<div class="row-top"><span class="row-contact"></span>' +
+        '<span class="row-time"></span></div>' +
+        '<span class="row-chip"></span>';
+      if (activeTab === "inbox" && c.latest_handoff) {
+        html += '<div class="row-handoff"></div>';
+      }
+      row.innerHTML = html;
+      row.querySelector(".row-contact").textContent = label;
+      row.querySelector(".row-time").textContent = relativeTime(c.last_message_at);
+      row.querySelector(".row-chip").textContent = STATE_LABEL[c.state] || c.state;
+      if (activeTab === "inbox" && c.latest_handoff) {
+        const by = REQUESTED_BY_LABEL[c.latest_handoff.requested_by] || c.latest_handoff.requested_by;
+        row.querySelector(".row-handoff").textContent =
+          by + ": " + truncate(c.latest_handoff.reason || "", 60);
+      }
+      row.addEventListener("click", () => selectConversation(c));
+      listEl.appendChild(row);
+    }
+  }
+
+  function switchTab(tab) {
+    activeTab = tab;
+    lastListJson = "";
+    tabEls.forEach((el) => el.classList.toggle("active", el.dataset.tab === tab));
+    fetchList();
+  }
+
+  function selectConversation(conversation) {
+    selectedId = conversation.id;
+    selectedConversation = conversation;
+    lastListJson = ""; // force re-render so the row highlight updates
+    lastMessagesJson = "";
+    renderConversationPane();
+    fetchMessages();
+    if (messagesTimer) clearInterval(messagesTimer);
+    messagesTimer = setInterval(fetchMessages, 1500);
+  }
+
+  function renderConversationPane() {
+    const c = selectedConversation;
+    const isInbox = c.state === "HUMAN_HANDOFF";
+    let briefHtml = "";
+    if (c.latest_handoff) {
+      const by = REQUESTED_BY_LABEL[c.latest_handoff.requested_by] || c.latest_handoff.requested_by;
+      const summary = c.latest_handoff.summary || "Resumo indisponível";
+      briefHtml =
+        '<div id="brief"><b>Handoff solicitado por ' + by + '</b>' +
+        (c.latest_handoff.reason ? " — " + c.latest_handoff.reason : "") +
+        "<br>" + summary + "</div>";
+    }
+    let actionsHtml;
+    if (isInbox) {
+      actionsHtml =
+        '<div id="actions">' +
+        '<textarea id="reply-input" placeholder="Responder ao cliente…"></textarea>' +
+        '<div id="action-error"></div>' +
+        '<div id="action-buttons">' +
+        '<button id="send-btn">Enviar</button>' +
+        '<button id="resume-btn">Resumir</button>' +
+        '<button id="close-btn">Fechar</button>' +
+        "</div></div>";
+    } else {
+      actionsHtml =
+        '<div id="actions"><div id="action-error"></div><div id="action-buttons">' +
+        '<button id="assumir-btn">Assumir</button>' +
+        "</div></div>";
+    }
+    convColEl.innerHTML =
+      briefHtml + '<div id="messages"></div>' + actionsHtml;
+
+    if (isInbox) {
+      const input = document.getElementById("reply-input");
+      document.getElementById("send-btn").addEventListener("click", sendReply);
+      document.getElementById("resume-btn").addEventListener("click", () => transition("resume"));
+      document.getElementById("close-btn").addEventListener("click", () => transition("close"));
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          sendReply();
+        }
+      });
+    } else {
+      document.getElementById("assumir-btn").addEventListener("click", assumir);
+    }
+  }
+
+  function showActionError(text) {
+    const el = document.getElementById("action-error");
+    if (el) el.textContent = text || "";
+  }
+
+  async function fetchMessages() {
+    if (!selectedId) return;
+    const res = await apiFetch("/conversations/" + selectedId + "/messages");
+    if (!res.ok) return;
+    const messages = await res.json();
+    const json = JSON.stringify(messages);
+    if (json === lastMessagesJson) return;
+    lastMessagesJson = json;
+    renderMessages(messages);
+  }
+
+  function renderMessages(messages) {
+    const el = document.getElementById("messages");
+    if (!el) return;
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    el.innerHTML = "";
+    for (const m of messages) {
+      const bubble = document.createElement("div");
+      if (m.role === "user") {
+        bubble.className = "bubble user";
+        bubble.textContent = m.content;
+      } else if (m.role === "assistant") {
+        bubble.className = "bubble assistant";
+        bubble.textContent = m.content;
+      } else if (m.role === "human_operator") {
+        bubble.className = "bubble human_operator";
+        bubble.innerHTML = '<span class="label">Você</span>';
+        bubble.appendChild(document.createTextNode(m.content));
+      } else {
+        bubble.className = "chip";
+        bubble.textContent = (m.role || "system") + ": " + m.content;
+      }
+      el.appendChild(bubble);
+    }
+    if (atBottom) el.scrollTop = el.scrollHeight;
+  }
+
+  async function sendReply() {
+    if (sending) return;
+    const input = document.getElementById("reply-input");
+    const text = input.value.trim();
+    if (!text) return;
+    sending = true;
+    document.getElementById("send-btn").disabled = true;
+    showActionError("");
+    const res = await apiFetch("/conversations/" + selectedId + "/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: text }),
+    });
+    if (res.ok) {
+      input.value = "";
+      lastMessagesJson = "";
+      await fetchMessages();
+    } else if (res.authFailed) {
+      // gate already shown
+    } else if (res.network) {
+      showActionError("Falha de rede. Tente novamente.");
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showActionError(res.status === 409 ? data.detail : "Não foi possível enviar a mensagem.");
+    }
+    sending = false;
+    const btn = document.getElementById("send-btn");
+    if (btn) btn.disabled = false;
+  }
+
+  async function transition(kind) {
+    showActionError("");
+    const res = await apiFetch("/conversations/" + selectedId + "/" + kind, { method: "POST" });
+    if (res.ok) {
+      if (messagesTimer) clearInterval(messagesTimer);
+      messagesTimer = null;
+      selectedId = null;
+      selectedConversation = null;
+      convColEl.innerHTML =
+        '<div id="notice">' +
+        (kind === "resume" ? "Conversa devolvida à IA." : "Conversa encerrada.") +
+        "</div>";
+      lastListJson = "";
+      fetchList();
+    } else if (res.authFailed) {
+      // gate already shown
+    } else if (res.network) {
+      showActionError("Falha de rede. Tente novamente.");
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showActionError(res.status === 409 ? data.detail : "Não foi possível concluir a ação.");
+    }
+  }
+
+  async function assumir() {
+    showActionError("");
+    const res = await apiFetch("/conversations/" + selectedId + "/handoff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "assumido pelo operador" }),
+    });
+    if (res.ok) {
+      const conversation = await res.json();
+      switchTab("inbox");
+      lastListJson = "";
+      await fetchList();
+      selectConversation(conversation);
+    } else if (res.authFailed) {
+      // gate already shown
+    } else if (res.network) {
+      showActionError("Falha de rede. Tente novamente.");
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showActionError(res.status === 409 ? data.detail : "Não foi possível assumir a conversa.");
+    }
+  }
+
+  function start() {
+    gateEl.style.display = "none";
+    appEl.style.display = "block";
+    lastListJson = "";
+    fetchList();
+    if (listTimer) clearInterval(listTimer);
+    listTimer = setInterval(fetchList, 3000);
+  }
+
+  gateBtn.addEventListener("click", () => {
+    const key = gateInput.value.trim();
+    if (!key) return;
+    localStorage.setItem(GATE_KEY, key);
+    apiKey = key;
+    start();
+  });
+
+  logoutLink.addEventListener("click", () => {
+    localStorage.removeItem(GATE_KEY);
+    location.reload();
+  });
+
+  tabEls.forEach((el) => {
+    el.addEventListener("click", () => {
+      selectedId = null;
+      selectedConversation = null;
+      if (messagesTimer) clearInterval(messagesTimer);
+      messagesTimer = null;
+      convColEl.innerHTML = '<div id="conv-empty">Selecione uma conversa</div>';
+      switchTab(el.dataset.tab);
+    });
+  });
+
+  const stored = localStorage.getItem(GATE_KEY);
+  if (stored) {
+    apiKey = stored;
+    start();
+  } else {
+    showGate("");
+  }
+})();
+</script>
+</body>
+</html>
