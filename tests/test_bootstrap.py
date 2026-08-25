@@ -1,6 +1,7 @@
 """Test the bootstrap endpoint for the demo webchat."""
 
 import uuid
+
 from sqlalchemy import select
 
 from app.models.channel import Channel

@@ -31,6 +31,10 @@ class Handoff(Base, TenantScoped):
     requested_by: Mapped[HandoffRequestedBy] = mapped_column(
         pg_enum(HandoffRequestedBy, "handoff_requested_by"), nullable=False
     )
+    # Best-effort LLM-written operator brief (who/what/why/tone). Nullable: the
+    # escalation itself must never be blocked by a failed/slow summary — see
+    # app/handoff/summarizer.py. Migration 0005.
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

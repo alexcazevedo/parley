@@ -17,7 +17,8 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.handoff.service import HandoffService, IllegalTransitionError
+from app.handoff.service import IllegalTransitionError
+from app.handoff.summarizer import handoff_with_summary
 from app.llm.base import ToolSpec
 from app.memory.service import MemoryService
 from app.models.agent import Agent
@@ -87,8 +88,8 @@ async def _handle_handoff(arguments: dict[str, Any], ctx: ToolContext) -> ToolRe
     if conversation is None:
         return ToolResult.failure("conversation not found")
     try:
-        await HandoffService(ctx.session).handoff(
-            conversation, arguments["reason"], HandoffRequestedBy.AGENT
+        await handoff_with_summary(
+            ctx.session, conversation, arguments["reason"], HandoffRequestedBy.AGENT
         )
     except IllegalTransitionError as exc:
         return ToolResult.failure(str(exc))

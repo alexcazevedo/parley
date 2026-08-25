@@ -4,66 +4,57 @@ routing_profile: cloud         # cloud | cloud+local (local is opt-in, never a d
 parallel_default: sequential   # sequential | parallel
 ---
 
-# Humanizer — paced, split, human-feeling replies
+# Warm-handoff summary
 
 ## What / why
 
-The harness pipeline (MVP, complete) replies correctly but *feels* like a
-bot: one instant wall of text. Top-tier conversational AI (Sierra, Decagon,
-Intercom Fin) makes delivery indistinguishable from a human typing: mark the
-inbound message read, show "composing…", pause proportionally to how much
-"typing" the reply needs, and send 2–4 short bubbles instead of one block.
-Build that delivery layer — the **humanizer** — into the outbound send path
-(`app/conversations/turn.py` → `ChannelAdapter.send_message`), for both real
-channels.
+When a conversation escalates to a human (`handoff_to_human` tool or
+operator-initiated), today's operator gets only a raw transcript and a
+one-line `reason`. Making the user repeat themselves is the classic moment
+the "seamless" illusion breaks — Sierra/Decagon-class products hand the
+operator an AI-written brief instead. Add that brief to the harness: at
+handoff time, one extra LLM call writes a short summary the operator reads
+before their first message.
 
-Design decided during grilling:
+Shape (decided during grilling):
 
-- **Config**: `channel.config.humanize: bool` per channel (transport
-  concern, matches existing `config` pattern). Pacing knobs are global
-  `Settings` with defaults: typing speed (chars/sec), min/max per-part
-  delay, max parts per reply.
-- **Splitting — converged approach**: agents get one appended instruction
-  line ("write short chat-style messages, blank line between them"); the
-  splitter splits on blank lines, with a mechanical sentence-split fallback
-  when the model returns a wall of text, hard cap ~4 parts, never mid-word,
-  code blocks never split. Zero extra LLM calls.
-- **Adapter surface**: optional `mark_read(...)` and `send_typing(...)`
-  hooks on `ChannelAdapter`, no-op by default. Evolution implements both
-  (`markMessageAsRead`, `sendPresence` composing) plus one `sendText` per
-  part. Webchat implements neither — parts are persisted staggered (commit
-  per part with the paced delay between), so the polling page renders
-  bubbles appearing over seconds; its existing client-side typing indicator
-  stays between parts.
-- Humanize sequencing lives in one module (`app/conversations/humanize.py`
-  or similar), called from `process_turn`; `humanize: false` (or absent)
-  keeps today's single-message behavior byte-for-byte.
-- Delays happen inside the conversation's turn (lock already held) — they
-  only slow that one conversation, never the worker's other jobs. Failures
-  in read/typing calls are best-effort: never cost the user their reply.
+- **Storage**: new nullable `summary` column on the existing `Handoff` row
+  (Alembic migration). Generated for BOTH `handoff_to_human`-initiated and
+  operator-initiated handoffs.
+- **Surface**: `GET /conversations/{id}` gains `latest_handoff:
+  {reason, summary, requested_by, created_at} | null` (newest handoff for
+  the conversation). The summary NEVER enters the message transcript — the
+  end-user webchat page polls messages and would leak it.
+- **Content**: compact operator brief — who the contact is (known
+  memories/name), what they want, what the agent already did/answered
+  (including tool results), why the handoff happened, user's current tone.
+  Written in the conversation's language.
+- **Generation**: reuses the existing LLM provider + conversation context
+  (recent messages, rolling `conversation.summary`, memories, handoff
+  reason). Strictly best-effort: any LLM failure logs and completes the
+  handoff with `summary = null` — escalation must never be blocked or
+  delayed past a sensible timeout by the summarizer.
 
 ## Primary user story
 
-As an end user chatting with a business on WhatsApp or web chat, I see my
-message get read, then "typing…", then a couple of short, naturally paced
-messages — so the conversation feels like a person, not a bot dumping a
-paragraph in two seconds.
+As a human operator picking up an escalated conversation, I open it and
+read a short AI-written brief — who I'm talking to, what they need, what
+the bot already tried, and why it escalated — so I can send my first
+message immediately without asking the user to repeat anything.
 
 ## Out of scope
 
-- Warm-handoff summaries, sentiment-triggered escalation, barge-in/run
-  cancellation (future runs — items #3–#5 of the seamless list)
-- WebSocket/SSE push for webchat (polling stays)
-- Per-tenant/per-agent pacing overrides beyond the global settings
-- Voice notes, media, reactions; presence beyond "composing"
-- Randomized "human error" simulation (typos, corrections)
+- Operator dashboard/queue UI (REST only; mini-page is a future run)
+- Sentiment-triggered auto-escalation (#4) and barge-in (#5)
+- Re-summarizing on resume/close, or live-updating the brief while handed off
+- Notifying operators (webhook/email/push) that a handoff happened
+- Redaction/PII filtering inside the brief
+- Changes to the webchat page or channel adapters
 
 ## Success demo
 
-Done when: in the browser at `/chat`, a reply that warrants it arrives as
-2+ separate bubbles staggered over seconds with the typing indicator
-between them; and the Evolution path is proven by tests (mocked Evolution
-HTTP) asserting the exact outbound sequence — read receipt, composing
-presence, then one paced `sendText` per part, in order — plus splitter unit
-tests and a regression run of the full suite with `humanize` off showing
-unchanged behavior.
+Done when: in `/chat` I say "quero falar com uma pessoa", and
+`GET /conversations/{id}` returns `latest_handoff` with an LLM-written
+brief covering want/tried/why/tone — plus tests proving a summary is
+persisted for tool- and operator-initiated handoffs and that an LLM
+failure still completes the handoff with a null summary.

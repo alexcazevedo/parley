@@ -8,6 +8,11 @@ observability — so a customer only implements business logic as HTTP tools
 and points a channel (WhatsApp via Evolution API, or their own Web Chat
 widget) at the harness.
 
+Warm handoff: when a conversation escalates to a human, the harness writes a
+best-effort AI-summarized operator brief and surfaces it as `latest_handoff`
+on `GET /conversations/{id}`, so the operator doesn't make the contact repeat
+themselves.
+
 **Principle**: the customer implements the business tools; the harness
 manages the conversation and agent runtime.
 

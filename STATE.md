@@ -1,19 +1,18 @@
 # STATE — rewrite after every ticket completes; never append. ≤30 lines total.
 
 ## Now
-humanizer mvp run COMPLETE 2026-08-25 — tickets 14–17 done, 1 attempt each, suite 121 green; live demo verified: 3 staggered bubbles + get_order round-trip at /chat. Awaiting final diff review (mvp approval 2 of 2).
+warm-handoff mvp run COMPLETE 2026-08-25 — tickets 18–19 done, 1 attempt each, suite 129 green; BOTH paths live-verified (operator + agent-tool handoff produce LLM brief in latest_handoff). Awaiting final diff review (mvp approval 2 of 2).
 
 ## Next
-- final diff review with user → then commit (both runs 12–13 + 14–17 uncommitted)
+- final diff review with user → commit
 
 ## Decisions
-- humanizer: per-channel config.humanize; Settings knobs (chars_per_sec 35, delay 0.8–4s, max_parts 4); style hint appended to system prompt when humanized
-- flow: mark_read (best-effort) → split (blank-line + sentence fallback, code-fence atomic) → per part typing→sleep→persist→send→commit (staggered polling bubbles); humanize off = legacy path byte-for-byte
-- adapter hooks mark_read/send_typing no-op base; Evolution markMessageAsRead + sendPresence
-- micro-fix post-17 (orchestrator): stale docker image — container had pre-fix in-place JSONB mutation (no UPDATE emitted); local code correct; rebuild resolved. Lesson: image rebuild must FOLLOW last code fix; grep-only checks miss it
-- ticket 17 deviation kept: added tests/test_bootstrap.py (outside file list, beneficial)
+- summarizer wraps pure HandoffService: handoff_with_summary in app/handoff/summarizer.py; best-effort wait_for 10s, None on failure
+- surface: latest_handoff {reason, summary, requested_by, created_at} on single-GET only; list endpoint deliberately excludes (N+1)
+- migration 0005 handoffs.summary Text nullable; verified in compose DB
+- micro-fix during run: ruff I001 tests/test_bootstrap.py (pre-existing from a7aa4c4 — ticket 17 linted app only; lesson: lint app AND tests in checks)
+- prior: humanizer a7aa4c4, web chat 892a13f, harness MVP 92c2b2c
 - host ports: Postgres 5434, Redis 6380, API 8001, mock-tools 9000
-- prior runs: harness MVP at 92c2b2c; web-chat prototype tickets 12–13
 
 ## Blockers
 - none

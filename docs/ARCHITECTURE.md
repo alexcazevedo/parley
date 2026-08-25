@@ -73,7 +73,7 @@ tenants (admin-created; api_key_hash)
                  │              prompt/completion_tokens, latency_ms, error)
                  │    └─ tool_executions (tool_id, arguments, result, status,
                  │                        latency_ms, error)
-                 └─ handoffs (reason, requested_by, resolved_at)
+                 └─ handoffs (reason, requested_by, summary, resolved_at)
   └─ tools (name, input_schema, endpoint, method, auth_config_encrypted,
             timeout_seconds)
   └─ memories (contact_id, type, content, importance, last_accessed_at,
@@ -86,6 +86,24 @@ tenants (admin-created; api_key_hash)
 terminal). `process_turn` only runs the agent when `state == ACTIVE_AI`; any
 other state means "a human is driving it, stay quiet" — new messages still
 persist, they just don't trigger a turn.
+
+**Warm-handoff brief**: both handoff paths (`handoff_to_human` tool and the
+operator-initiated `POST /conversations/{id}/handoff`) go through
+`app.handoff.summarizer.handoff_with_summary` instead of calling
+`HandoffService.handoff` directly. It performs the state transition, then
+makes one best-effort LLM call (`generate_handoff_summary`, timeout-bounded
+by `SUMMARY_TIMEOUT_SECONDS`) that reads recent messages, contact memories,
+the rolling conversation summary and the handoff reason to write a compact
+operator brief (who/what/why/tone, in the conversation's language), and
+stores it on `handoffs.summary`. Any LLM failure or timeout is logged and
+swallowed — the escalation itself is never blocked, and `summary` is simply
+left `null`. `GET /conversations/{id}` (single-GET only, not the list
+endpoint) surfaces the newest handoff row for the conversation as
+`latest_handoff: {reason, summary, requested_by, created_at} | null`, so an
+operator opening a handed-off conversation reads the brief before sending
+their first message. The summary never enters the message transcript, so the
+end-user-facing channel/webchat poll never sees it. See
+`app/handoff/summarizer.py`.
 
 ## Queue / debounce algorithm
 
@@ -241,6 +259,6 @@ Hook points: `ChannelAdapter.mark_read()`, `ChannelAdapter.send_typing()` in
   for a vector-similarity query without touching `app/tools/builtin.py` or
   `app/agents/runtime.py`.
 - **Operator dashboard**: the REST surface
-  (`GET/POST /conversations/{id}/messages`, `/handoff`, `/resume`, `/close`)
-  is already dashboard-ready; only a UI is missing (out of scope per
-  PRODUCT.md).
+  (`GET/POST /conversations/{id}/messages`, `/handoff`, `/resume`, `/close`,
+  `GET /conversations/{id}`'s `latest_handoff` brief) is already
+  dashboard-ready; only a UI is missing (out of scope per PRODUCT.md).

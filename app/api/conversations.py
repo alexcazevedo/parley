@@ -9,16 +9,18 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant, get_db
 from app.channels.base import OutgoingMessage
 from app.channels.registry import get_adapter
 from app.handoff.service import HandoffService, IllegalTransitionError
+from app.handoff.summarizer import handoff_with_summary
 from app.models.channel import Channel
 from app.models.contact import Contact
 from app.models.conversation import ConversationState
-from app.models.handoff import HandoffRequestedBy
+from app.models.handoff import Handoff, HandoffRequestedBy
 from app.models.message import Message, MessageDirection, MessageRole
 from app.models.tenant import Tenant
 from app.repositories.conversations import ConversationsRepository
@@ -31,6 +33,20 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 _TOOL_MESSAGE_TYPES = {"tool_call", "tool_result"}
 
 
+class HandoffOut(BaseModel):
+    """The warm-handoff operator brief — the newest `Handoff` row for a
+    conversation, surfaced on the single-conversation GET only (see
+    `get_conversation`).
+    """
+
+    reason: str | None
+    summary: str | None
+    requested_by: HandoffRequestedBy
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class ConversationOut(BaseModel):
     id: uuid.UUID
     contact_id: uuid.UUID
@@ -40,6 +56,7 @@ class ConversationOut(BaseModel):
     summary: str | None
     last_message_at: datetime | None
     created_at: datetime
+    latest_handoff: HandoffOut | None = None
 
     model_config = {"from_attributes": True}
 
@@ -85,6 +102,10 @@ async def list_conversations(
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> list[ConversationOut]:
+    # `latest_handoff` is intentionally left null here (its default) rather
+    # than fetched per row — a per-conversation handoff query for every item
+    # in a list response would be an N+1. Single-GET below pays that one
+    # extra query for the full brief.
     filters = {"state": state} if state is not None else {}
     conversations = await _repo(db).list(tenant.id, **filters)
     return [ConversationOut.model_validate(c) for c in conversations]
@@ -97,7 +118,27 @@ async def get_conversation(
     db: AsyncSession = Depends(get_db),
 ) -> ConversationOut:
     conversation = await _get_conversation_or_404(db, tenant, conversation_id)
-    return ConversationOut.model_validate(conversation)
+    out = ConversationOut.model_validate(conversation)
+    latest_handoff = await _latest_handoff(db, tenant, conversation_id)
+    if latest_handoff is not None:
+        out.latest_handoff = HandoffOut.model_validate(latest_handoff)
+    return out
+
+
+async def _latest_handoff(
+    db: AsyncSession, tenant: Tenant, conversation_id: uuid.UUID
+) -> Handoff | None:
+    """Newest handoff for the conversation regardless of resolved state —
+    unlike `HandoffService._latest_open_handoff`, this surfaces the brief
+    for handoffs the operator has already resumed/closed too.
+    """
+    result = await db.execute(
+        select(Handoff)
+        .where(Handoff.tenant_id == tenant.id, Handoff.conversation_id == conversation_id)
+        .order_by(Handoff.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
 
 
 @router.get("/{conversation_id}/messages", response_model=list[MessageOut])
@@ -172,7 +213,7 @@ async def handoff_conversation(
 ) -> ConversationOut:
     conversation = await _get_conversation_or_404(db, tenant, conversation_id)
     try:
-        await HandoffService(db).handoff(conversation, payload.reason, HandoffRequestedBy.OPERATOR)
+        await handoff_with_summary(db, conversation, payload.reason, HandoffRequestedBy.OPERATOR)
     except IllegalTransitionError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await db.commit()
