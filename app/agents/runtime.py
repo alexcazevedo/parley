@@ -22,6 +22,7 @@ from app.agents.context import ContextBuilder
 from app.config import Settings
 from app.llm.base import ROLE_ASSISTANT, ROLE_TOOL, ROLE_USER, LLMMessage, LLMProvider, ToolCall
 from app.llm.factory import get_provider, resolve_model
+from app.memory.service import MemoryService
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun, AgentRunStatus
 from app.models.conversation import Conversation
@@ -209,12 +210,26 @@ class AgentRuntime:
     async def _load_memories(
         self, session: AsyncSession, agent: Agent, conversation: Conversation
     ) -> list[Memory]:
-        """Long-term memory retrieval lands with the memory tools (ticket 07).
+        """Long-term facts folded into the system prompt (see `ContextBuilder`).
 
-        Until then every turn runs with an empty fact list; the seam is here so
-        that ticket only has to fill in the query.
+        Gated by `agent.memory_enabled` — the same flag that gates the
+        `remember` tool in `app/tools/builtin.py`, so a memory-disabled agent
+        neither writes nor reads long-term facts.
         """
-        return []
+        if not agent.memory_enabled:
+            return []
+        return await MemoryService(session).get_contact_memories(
+            conversation.tenant_id, conversation.contact_id
+        )
+
+    def llm_provider(self, agent: Agent) -> LLMProvider:
+        """The provider this runtime would use for `agent`.
+
+        Exposed so `app.conversations.turn` can run the post-turn summarizer
+        with the exact same (possibly scripted, in tests) provider the turn
+        itself just used, instead of constructing an unrelated one.
+        """
+        return self._provider or get_provider(agent, self._settings)
 
     def _persist_tool_calls(
         self,

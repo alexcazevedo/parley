@@ -22,6 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.base import OutgoingMessage
 from app.channels.registry import get_adapter
+from app.conversations.summary import maybe_summarize
+from app.llm.factory import get_provider
+from app.models.agent import Agent
 from app.models.channel import Channel
 from app.models.contact import Contact
 from app.models.conversation import Conversation, ConversationState
@@ -120,6 +123,7 @@ async def process_turn(
     )
 
     conversation.last_message_at = datetime.now(UTC)
+    await _maybe_summarize(session, conversation, runtime)
     await session.commit()
     logger.info(
         "turn.completed",
@@ -127,3 +131,25 @@ async def process_turn(
         message_count=len(messages),
     )
     return reply
+
+
+async def _maybe_summarize(
+    session: AsyncSession, conversation: Conversation, runtime: AnyTurnRuntime
+) -> None:
+    """Best-effort rolling summary: never allowed to cost the user their reply.
+
+    Reuses `runtime.llm_provider(agent)` when the runtime exposes one (e.g.
+    `AgentRuntime`, so the exact same — possibly scripted — provider the turn
+    just used is reused); falls back to `app.llm.factory.get_provider`
+    otherwise. `TurnRuntime` implementations with no LLM at all (e.g.
+    `EchoRuntime`) are simply skipped.
+    """
+    try:
+        agent = await session.get(Agent, conversation.agent_id)
+        if agent is None:
+            return
+        provider_for = getattr(runtime, "llm_provider", None)
+        llm = provider_for(agent) if callable(provider_for) else get_provider(agent)
+        await maybe_summarize(session, agent, conversation, llm)
+    except Exception:
+        logger.exception("turn.summarize_failed", conversation_id=str(conversation.id))

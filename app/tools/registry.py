@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.llm.base import ToolSpec
 from app.models.agent import Agent
 from app.tools.base import NoopExecutor, ToolContext, ToolExecutor, ToolResult
+from app.tools.builtin import BuiltinExecutor
 from app.tools.http import HttpToolExecutor
 
 logger = structlog.get_logger(__name__)
@@ -28,11 +29,11 @@ logger = structlog.get_logger(__name__)
 def default_executors() -> list[ToolExecutor]:
     """What a production run gets, in priority order.
 
-    `HttpToolExecutor.can_handle` claims every name, so it stays last: ticket
-    07's built-ins (`remember`, `handoff_to_human`) must be *prepended* here,
-    not appended, or they will never be reached.
+    `HttpToolExecutor.can_handle` claims every name, so it stays last:
+    `BuiltinExecutor` (`remember`, and `handoff_to_human` from ticket 08) is
+    *prepended*, not appended, or it would never be reached.
     """
-    return [HttpToolExecutor()]
+    return [BuiltinExecutor(), HttpToolExecutor()]
 
 
 class ToolRegistry:
