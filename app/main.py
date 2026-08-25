@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI
 
-from app.api import agents, channels, contacts, conversations, health, tenants, tools
+from app.api import agents, channels, contacts, conversations, dev, health, tenants, tools, webchat
 from app.observability.logging import configure_logging, request_id_middleware
 
 configure_logging()
@@ -18,3 +18,5 @@ app.include_router(channels.router)
 app.include_router(tools.router)
 app.include_router(contacts.router)
 app.include_router(conversations.router)
+app.include_router(webchat.router)
+app.include_router(dev.router)
