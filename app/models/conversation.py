@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, Text, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -40,6 +40,9 @@ class Conversation(Base, TenantScoped):
         default=ConversationState.ACTIVE_AI,
     )
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Count of messages already folded into `summary` (see migration 0003 and
+    # app/conversations/summary.py). NULL == nothing summarized yet.
+    summary_cursor: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

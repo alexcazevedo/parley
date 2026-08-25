@@ -4,12 +4,14 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant, get_db
+from app.memory.service import MemoryService
+from app.models.memory import Memory, MemoryType
 from app.models.tenant import Tenant
 from app.repositories.contacts import ContactsRepository
 
@@ -108,4 +110,109 @@ async def delete_contact(
     deleted = await _repo(db).delete(tenant.id, contact_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="contact not found")
+    await db.commit()
+
+
+# --- Long-term memory CRUD (ticket 07) --------------------------------------
+
+
+class MemoryCreate(BaseModel):
+    type: MemoryType
+    content: str
+    importance: int = Field(default=3, ge=1, le=5)
+    expires_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryOut(BaseModel):
+    id: uuid.UUID
+    contact_id: uuid.UUID
+    type: MemoryType
+    content: str
+    importance: int
+    metadata: dict[str, Any]
+    last_accessed_at: datetime | None
+    expires_at: datetime | None
+    created_at: datetime
+
+    @classmethod
+    def from_model(cls, memory: Memory) -> "MemoryOut":
+        # `Memory.metadata` is exposed on the model as `.meta` (`metadata` is
+        # reserved by SQLAlchemy's declarative Base) — built explicitly rather
+        # than via `model_validate(memory, from_attributes=True)` so the field
+        # rename doesn't depend on alias-vs-attribute lookup nuances.
+        return cls(
+            id=memory.id,
+            contact_id=memory.contact_id,
+            type=memory.type,
+            content=memory.content,
+            importance=memory.importance,
+            metadata=memory.meta,
+            last_accessed_at=memory.last_accessed_at,
+            expires_at=memory.expires_at,
+            created_at=memory.created_at,
+        )
+
+
+async def _get_contact_or_404(db: AsyncSession, tenant: Tenant, contact_id: uuid.UUID):
+    contact = await _repo(db).get(tenant.id, contact_id)
+    if contact is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="contact not found")
+    return contact
+
+
+@router.get("/{contact_id}/memories", response_model=list[MemoryOut])
+async def list_contact_memories(
+    contact_id: uuid.UUID,
+    query: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+) -> list[MemoryOut]:
+    await _get_contact_or_404(db, tenant, contact_id)
+    service = MemoryService(db)
+    if query:
+        memories = await service.search(tenant.id, contact_id, query, limit=limit)
+    else:
+        memories = await service.get_contact_memories(tenant.id, contact_id, limit=limit)
+    await db.commit()  # persists the `last_accessed_at` bump from a plain listing
+    return [MemoryOut.from_model(m) for m in memories]
+
+
+@router.post(
+    "/{contact_id}/memories", response_model=MemoryOut, status_code=status.HTTP_201_CREATED
+)
+async def create_contact_memory(
+    contact_id: uuid.UUID,
+    payload: MemoryCreate,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+) -> MemoryOut:
+    await _get_contact_or_404(db, tenant, contact_id)
+    memory = await MemoryService(db).store(
+        tenant.id,
+        contact_id,
+        type=payload.type,
+        content=payload.content,
+        importance=payload.importance,
+        expires_at=payload.expires_at,
+        metadata=payload.metadata,
+    )
+    await db.commit()
+    await db.refresh(memory)
+    return MemoryOut.from_model(memory)
+
+
+@router.delete("/{contact_id}/memories/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_contact_memory(
+    contact_id: uuid.UUID,
+    memory_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    await _get_contact_or_404(db, tenant, contact_id)
+    memory = await db.get(Memory, memory_id)
+    if memory is None or memory.tenant_id != tenant.id or memory.contact_id != contact_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="memory not found")
+    await MemoryService(db).forget(tenant.id, memory_id)
     await db.commit()

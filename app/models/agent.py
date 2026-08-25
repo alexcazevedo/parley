@@ -30,6 +30,14 @@ class Agent(Base, TenantScoped):
     # core value prop (memory + handoff) should be opt-out, not opt-in.
     memory_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     handoff_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Sent to the user in place of another LLM turn once `handoff_to_human`
+    # runs (see app/tools/builtin.py, app/agents/runtime.py). Migration 0004.
+    handoff_message: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="Vou te transferir para um atendente humano.",
+        server_default="Vou te transferir para um atendente humano.",
+    )
     tool_names: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     context_message_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     summary_threshold: Mapped[int] = mapped_column(Integer, nullable=False, default=40)
