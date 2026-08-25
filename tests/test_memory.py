@@ -230,7 +230,12 @@ async def test_expired_memories_are_excluded(client, fake_redis, db_session):
 async def test_memory_disabled_agent_does_not_advertise_or_execute_remember(
     client, fake_redis, db_session
 ):
-    headers, channel_id, agent_id = await _setup(client, memory_enabled=False)
+    # `handoff_enabled=False` too: ticket 08 adds a second built-in tool
+    # (`handoff_to_human`), gated independently — without this the agent would
+    # still advertise it and `tools == []` below would no longer hold.
+    headers, channel_id, agent_id = await _setup(
+        client, memory_enabled=False, handoff_enabled=False
+    )
     conversation_id = await _send(client, headers, channel_id, "oi")
     await _drain_jobs(fake_redis)
 

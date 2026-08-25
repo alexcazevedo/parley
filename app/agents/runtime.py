@@ -170,6 +170,7 @@ class AgentRuntime:
             )
             self._persist_tool_calls(session, conversation, run, response.tool_calls)
 
+            terminal_text: str | None = None
             for call in response.tool_calls:
                 result = await self._registry.execute(call.name, call.arguments, ctx)
                 run.tool_calls += 1
@@ -184,7 +185,16 @@ class AgentRuntime:
                 messages.append(
                     LLMMessage(role=ROLE_TOOL, content=content, tool_call_id=call.id)
                 )
+                # A tool (e.g. `handoff_to_human`) can end the loop on the spot
+                # instead of handing control back to the model — see
+                # app/tools/builtin.py and app/tools/base.py's `ToolResult`.
+                if result.ok and result.meta.get("terminal"):
+                    terminal_text = result.meta.get("final_text") or EMPTY_REPLY_MESSAGE
             await session.flush()
+
+            if terminal_text is not None:
+                run.status = AgentRunStatus.SUCCESS
+                return terminal_text
 
         run.status = AgentRunStatus.ERROR
         run.error = MAX_ITERATIONS_ERROR
