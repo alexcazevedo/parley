@@ -17,9 +17,10 @@ import time
 import structlog
 from redis.asyncio import Redis
 
+from app.agents.runtime import AgentRuntime
 from app.config import get_settings
 from app.conversations import debounce
-from app.conversations.turn import EchoRuntime, TurnRuntime
+from app.conversations.turn import AnyTurnRuntime
 
 # The worker runs outside FastAPI, so it owns its own session factory rather
 # than going through `app.api.deps.get_db`.
@@ -27,6 +28,7 @@ from app.db import async_session_maker
 from app.observability.logging import configure_logging
 from app.queue.base import Job, Queue
 from app.queue.redis_queue import RedisQueue
+from app.tools.registry import ToolRegistry
 from app.workers.scheduler import run_scheduler
 
 configure_logging()
@@ -79,7 +81,10 @@ async def main() -> None:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     queue = RedisQueue(redis)
 
-    runtime: TurnRuntime = EchoRuntime()
+    # The real agent loop. Tool executors are registered here as they land:
+    # ticket 06 adds the HTTP executor, 07 the built-ins — `ToolRegistry([...])`
+    # takes them in priority order.
+    runtime: AnyTurnRuntime = AgentRuntime(registry=ToolRegistry(), settings=settings)
     logger.info("worker.starting")
     scheduler_task = asyncio.create_task(run_scheduler(redis, async_session_maker, runtime))
     try:

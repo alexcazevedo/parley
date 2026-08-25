@@ -1,10 +1,16 @@
 """Turn execution: one debounced batch of inbound messages -> one reply.
 
 `process_turn` is deliberately runtime-agnostic: it joins the batch into a
-single `input_text`, hands it to a `TurnRuntime`, then persists the answer as
-an outbound assistant message and pushes it through the channel adapter.
-Ticket 04 ships `EchoRuntime`; the real LLM/tool runtime plugs into the same
-protocol later.
+single `input_text`, hands it to a runtime, then persists the answer as an
+outbound assistant message and pushes it through the channel adapter.
+
+Two runtime shapes are accepted. `TurnRuntime` is text-in/text-out and needs
+nothing from the database (`EchoRuntime`, test doubles).
+`SessionAwareTurnRuntime` additionally receives the turn's session, because it
+writes its own rows — `app.agents.runtime.AgentRuntime` persists an `AgentRun`
+plus the tool-call/tool-result messages and must land in the same transaction
+as the reply. The worker injects `AgentRuntime`; `EchoRuntime` stays the
+default so nothing accidentally calls a live model.
 """
 
 import uuid
@@ -31,6 +37,18 @@ class TurnRuntime(Protocol):
     async def run(self, conversation: Conversation, input_text: str) -> str: ...
 
 
+@runtime_checkable
+class SessionAwareTurnRuntime(Protocol):
+    """A runtime that persists rows of its own and so needs the turn's session."""
+
+    async def run_turn(
+        self, session: AsyncSession, conversation: Conversation, input_text: str
+    ) -> str: ...
+
+
+AnyTurnRuntime = TurnRuntime | SessionAwareTurnRuntime
+
+
 class EchoRuntime:
     """Default runtime until the LLM runtime lands — echoes the input back."""
 
@@ -42,7 +60,7 @@ async def process_turn(
     session: AsyncSession,
     conversation_id: uuid.UUID,
     messages: list[Message],
-    runtime: TurnRuntime | None = None,
+    runtime: AnyTurnRuntime | None = None,
 ) -> Message | None:
     """Run one turn for `conversation_id` over `messages` (arrival order).
 
@@ -68,7 +86,10 @@ async def process_turn(
 
     input_text = "\n".join(message.content for message in messages)
     runtime = runtime or EchoRuntime()
-    reply_text = await runtime.run(conversation, input_text)
+    if isinstance(runtime, SessionAwareTurnRuntime):
+        reply_text = await runtime.run_turn(session, conversation, input_text)
+    else:
+        reply_text = await runtime.run(conversation, input_text)
 
     reply = Message(
         id=uuid.uuid4(),
@@ -79,6 +100,10 @@ async def process_turn(
         role=MessageRole.ASSISTANT,
         type="text",
         content=reply_text,
+        # Explicit timestamp: Postgres `now()` is the transaction timestamp, so
+        # a server default would order the reply *before* the tool messages the
+        # runtime just wrote inside this same transaction.
+        created_at=datetime.now(UTC),
     )
     session.add(reply)
     await session.flush()

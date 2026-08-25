@@ -1,0 +1,151 @@
+"""OpenAI-compatible chat-completions provider.
+
+One implementation covers OpenAI, OpenRouter, Ollama, vLLM and friends: they
+all speak `POST {base_url}/chat/completions` with the same tools payload. The
+only knobs are `base_url` and `api_key` (PRODUCT.md).
+"""
+
+import json
+import time
+from typing import Any
+
+import httpx
+import structlog
+
+from app.llm.base import LLMError, LLMMessage, LLMResponse, LLMUsage, ToolCall, ToolSpec
+
+logger = structlog.get_logger(__name__)
+
+DEFAULT_TIMEOUT_SECONDS = 30.0
+
+
+def _message_to_wire(message: LLMMessage) -> dict[str, Any]:
+    payload: dict[str, Any] = {"role": message.role, "content": message.content}
+    if message.tool_calls:
+        payload["tool_calls"] = [
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {"name": call.name, "arguments": json.dumps(call.arguments)},
+            }
+            for call in message.tool_calls
+        ]
+    if message.tool_call_id is not None:
+        payload["tool_call_id"] = message.tool_call_id
+    return payload
+
+
+def _tool_to_wire(spec: ToolSpec) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": spec.name,
+            "description": spec.description,
+            "parameters": spec.parameters or {"type": "object", "properties": {}},
+        },
+    }
+
+
+def _parse_tool_calls(raw_calls: list[dict[str, Any]] | None) -> list[ToolCall]:
+    calls: list[ToolCall] = []
+    for raw in raw_calls or []:
+        function = raw.get("function") or {}
+        raw_arguments = function.get("arguments") or "{}"
+        try:
+            arguments = json.loads(raw_arguments)
+        except (TypeError, ValueError):
+            # Models do emit malformed JSON. Don't kill the turn: hand the tool
+            # an empty argument set and let it report the failure.
+            logger.warning("llm.bad_tool_arguments", raw=str(raw_arguments)[:500])
+            arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        calls.append(
+            ToolCall(
+                id=str(raw.get("id") or ""),
+                name=str(function.get("name") or ""),
+                arguments=arguments,
+            )
+        )
+    return calls
+
+
+class OpenAICompatibleProvider:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        *,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._api_key = api_key
+        self._timeout = timeout
+        self._client = client
+        self._owns_client = client is None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self._timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None and self._owns_client:
+            await self._client.aclose()
+            self._client = None
+
+    async def complete(
+        self,
+        messages: list[LLMMessage],
+        tools: list[ToolSpec] | None = None,
+        *,
+        model: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+    ) -> LLMResponse:
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [_message_to_wire(message) for message in messages],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            payload["tools"] = [_tool_to_wire(spec) for spec in tools]
+            payload["tool_choice"] = "auto"
+
+        started = time.perf_counter()
+        try:
+            response = await self._get_client().post(
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            response.raise_for_status()
+            body = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise LLMError(
+                f"{exc.response.status_code} from {self.base_url}: {exc.response.text[:500]}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise LLMError(f"transport error talking to {self.base_url}: {exc}") from exc
+        latency_ms = int((time.perf_counter() - started) * 1000)
+
+        try:
+            message = body["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise LLMError(f"unexpected completion body: {str(body)[:500]}") from exc
+
+        usage_body = body.get("usage") or {}
+        return LLMResponse(
+            content=message.get("content"),
+            tool_calls=_parse_tool_calls(message.get("tool_calls")),
+            usage=LLMUsage(
+                prompt_tokens=int(usage_body.get("prompt_tokens") or 0),
+                completion_tokens=int(usage_body.get("completion_tokens") or 0),
+            ),
+            latency_ms=latency_ms,
+        )

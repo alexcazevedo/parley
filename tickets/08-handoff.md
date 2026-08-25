@@ -28,6 +28,8 @@ Endpoints (tenant key):
 - `POST /conversations/{id}/resume`
 - `POST /conversations/{id}/close`
 
+Also: `GET /conversations/{id}/messages` currently returns tool_call/tool_result rows; add `?include_tools=false` default that filters to user/assistant/human_operator roles.
+
 `turn.py` already skips agent when state ≠ ACTIVE_AI (ticket 04) — verify inbound persisted.
 
 ## Checks (run in order — cheapest first)
