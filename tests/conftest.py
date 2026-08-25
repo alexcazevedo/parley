@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator
 
 import asyncpg
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from fakeredis import FakeAsyncRedis
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -25,6 +26,24 @@ _TEST_DB_NAME = TEST_DATABASE_URL.rsplit("/", 1)[1]
 
 os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
 os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
+
+
+def _ensure_valid_secrets_key() -> None:
+    """`.env`'s SECRETS_KEY is a human-readable placeholder, not a real Fernet
+    key. Environment variables take priority over `.env` in pydantic-settings,
+    so setting a generated key here overrides it for the whole test session.
+    """
+    key = os.environ.get("SECRETS_KEY")
+    if key:
+        try:
+            Fernet(key.encode("utf-8"))
+            return  # already a valid Fernet key (e.g. set explicitly for CI)
+        except Exception:
+            pass
+    os.environ["SECRETS_KEY"] = Fernet.generate_key().decode("utf-8")
+
+
+_ensure_valid_secrets_key()
 
 from app.api.deps import get_db, get_redis  # noqa: E402
 from app.main import app  # noqa: E402
