@@ -5,6 +5,10 @@ True owns the name, and `NoopExecutor` is always the terminal fallback. Adding
 a source is one line at construction time:
 
     ToolRegistry([BuiltinToolExecutor(), HttpToolExecutor()])
+
+`ToolRegistry()` with no argument builds `default_executors()` — that is what
+the worker constructs, so a real run gets the customer's HTTP tools. Pass an
+explicit list (including `[]`) to opt out; tests do.
 """
 
 from collections.abc import Sequence
@@ -16,13 +20,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.llm.base import ToolSpec
 from app.models.agent import Agent
 from app.tools.base import NoopExecutor, ToolContext, ToolExecutor, ToolResult
+from app.tools.http import HttpToolExecutor
 
 logger = structlog.get_logger(__name__)
 
 
+def default_executors() -> list[ToolExecutor]:
+    """What a production run gets, in priority order.
+
+    `HttpToolExecutor.can_handle` claims every name, so it stays last: ticket
+    07's built-ins (`remember`, `handoff_to_human`) must be *prepended* here,
+    not appended, or they will never be reached.
+    """
+    return [HttpToolExecutor()]
+
+
 class ToolRegistry:
     def __init__(self, executors: Sequence[ToolExecutor] | None = None) -> None:
-        self._executors: list[ToolExecutor] = list(executors or [])
+        self._executors: list[ToolExecutor] = list(
+            default_executors() if executors is None else executors
+        )
         # Never part of `_executors`: it handles everything, so it must stay last.
         self._fallback = NoopExecutor()
 

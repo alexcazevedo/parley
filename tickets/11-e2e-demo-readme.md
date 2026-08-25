@@ -18,7 +18,7 @@ Prove the PRODUCT.md success demo end-to-end (automated + scripted) and document
 ## Context
 `tests/test_e2e_demo.py`: fake LLM scripted; Fake HTTP tool via respx; run ingest ×3 within debounce → one turn → `get_order` called with `order_id="12345"` → reply persisted; then "Quero falar com uma pessoa" → `handoff_to_human` → HUMAN_HANDOFF; next user msg → no reply; operator POST; `/resume`; next msg → reply. Asserts on DB rows + AgentRun/ToolExecution.
 
-`scripts/mock_tool_server.py`: tiny FastAPI on :9000 with `GET /orders?order_id=` returning fake status. Add as compose service `mock-tools`. Set `TOOL_ALLOWED_HOSTS=mock-tools` in compose env for api/worker.
+`scripts/mock_tool_server.py`: tiny FastAPI on :9000 with `GET /orders?order_id=` returning fake status. Add as compose service `mock-tools`. Promote `TOOL_ALLOWED_HOSTS` / `TOOL_SSRF_DISABLED` into `Settings` + `.env.example` (ssrf.py reads os.environ today; keep that working) and set `TOOL_ALLOWED_HOSTS=mock-tools` in compose env for api/worker. Add `app/config.py` and `.env.example` to your touch set.
 
 `scripts/demo.py`: against running compose + real `LLM_API_KEY`: create tenant, agent (instructions in Portuguese, tools `[get_order]`, memory+handoff enabled), webchat channel, `get_order` tool pointing at `http://mock-tools:9000/orders`; send the 3 messages via `/dev/messages`; poll `GET /conversations/{id}/messages`; print transcript; then handoff flow; exit non-zero if expectations unmet.
 
