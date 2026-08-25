@@ -1,0 +1,48 @@
+[project]
+name = "conversational-harness"
+version = "0.1.0"
+description = "Headless, multi-tenant infrastructure for AI-powered conversational apps."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy[asyncio]>=2",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "pydantic-settings>=2.5",
+    "redis>=5",
+    "structlog>=24",
+    "httpx>=0.27",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "fakeredis>=2.24",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# B008: FastAPI's Depends()-in-default-argument is the documented idiom.
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# test_engine is session-scoped; keep the event loop session-scoped too so
+# its asyncpg connections aren't reused across different loops per test.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
