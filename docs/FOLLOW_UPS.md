@@ -1,0 +1,46 @@
+# Follow-ups
+
+Known gaps and next candidates, collected across forge runs. Each is a
+plausible `/forge:idea` starting point. Not ordered by priority.
+
+## From the inbound-media run (2026-08-25)
+
+- **Order-ID normalization for real tools.** Whisper renders pt-BR numbers
+  with a thousands separator ("12.345"), so the agent may call customer
+  tools with `order_id="12.345"`. Only the demo mock
+  (`scripts/mock_tool_server.py`) normalizes digits today. Options: a
+  per-tool "normalize digits" flag on tool parameters, or a default agent
+  instruction to strip separators from identifiers before tool calls.
+- **Outbound media.** TTS voice replies, operator/agent sending images
+  (needs per-adapter send-media and an upload path on `/operator`).
+- **Media retention/cleanup.** `MEDIA_ROOT` grows forever; no TTL, no
+  orphan sweep, no size accounting per tenant.
+- **Remote storage.** `LocalMediaStorage` is disk-only; S3-compatible
+  backend behind the same `put/get/path` interface.
+- **Live Evolution media probe.** Ticket 29 is test-proven only; no real
+  Evolution instance was available.
+
+## Older known MVP limitations (README)
+
+- **SSRF DNS-rebinding TOCTOU.** The allowed-IP check resolves once;
+  `httpx` re-resolves on connect. Fix: pin the validated IP via a custom
+  transport/resolver.
+- **`max_iterations` as a real `AgentRunStatus` member.** Still recorded
+  as `ERROR` + `error="max_iterations"`. Migration pattern now exists
+  (`0007_agent_run_superseded.py`), so this is a small ticket.
+- **Semantic long-term memory.** `MemoryService.search()` is `ILIKE`;
+  interface ready for vector similarity (pgvector).
+- **Background memory extraction.** `remember` only fires when the model
+  calls it; nothing summarizes a conversation into memories afterwards.
+- **REST-poll only.** No WebSocket/SSE for `/chat` and `/operator`.
+
+## Product-surface gaps left out of scope by recent runs
+
+- Sentiment: per-tenant/channel threshold, cooldown, score persistence.
+- Humanizer: per-channel pacing settings (global only today).
+- Barge-in: "user is typing" as pre-emptive pause; retracting sent
+  bubbles.
+- Operator UI: accounts/roles/assignment, notifications, unread counters,
+  run/tool/sentiment supervision view.
+- Production hardening: real auth (static API keys today), metrics/
+  tracing, CI, deploy (see `deploying-plugu-projects` skill for Dokploy).
