@@ -12,6 +12,10 @@ class FakeLLMProvider:
 
     With `repeat_last=True` the final scripted response is returned forever,
     which is how the "model loops on tool calls" case is exercised.
+
+    Messages are recorded verbatim — including multimodal `content` lists — so
+    tests can assert on the exact `ImagePart`/`TextPart` objects that a real
+    provider would have serialized.
     """
 
     def __init__(self, scripted: list[LLMResponse], *, repeat_last: bool = False) -> None:

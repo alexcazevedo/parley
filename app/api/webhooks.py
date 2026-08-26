@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db, get_redis
 from app.channels.evolution import EvolutionAdapter, IgnoredEvent
 from app.config import get_settings
-from app.messages.ingest import ingest
+from app.messages.ingest import MediaRejected, ingest
 from app.models.channel import Channel
 from app.queue.redis_queue import RedisQueue
 from app.security import secrets as secrets_crypto
@@ -69,6 +69,19 @@ async def whatsapp_webhook(
         redis, "user", user_key, settings.rate_limit_user_per_min
     )
 
+    if incoming.type in ("image", "audio"):
+        try:
+            incoming.media = await adapter.fetch_media(incoming, channel)
+        except Exception:
+            logger.exception(
+                "webhook.media_fetch_failed: channel_id=%s, external_message_id=%s",
+                channel_id,
+                incoming.external_message_id,
+            )
+            incoming.type = "unsupported"
+            incoming.content = "[mídia não recebida]"
+            incoming.media = None
+
     # Size limit: silently truncate and log for webhooks
     within_limit, message_to_store = check_message_size(
         incoming.content, enforce_strict=False
@@ -81,6 +94,18 @@ async def whatsapp_webhook(
         )
         incoming.content = message_to_store
 
-    await ingest(db, RedisQueue(redis), incoming)
+    try:
+        await ingest(db, RedisQueue(redis), incoming)
+    except MediaRejected as exc:
+        logger.warning(
+            "webhook.media_fetch_failed: channel_id=%s, external_message_id=%s, reason=%s",
+            channel_id,
+            incoming.external_message_id,
+            exc.reason,
+        )
+        incoming.type = "unsupported"
+        incoming.content = "[mídia não recebida]"
+        incoming.media = None
+        await ingest(db, RedisQueue(redis), incoming)
     await db.commit()
     return {"status": "ok"}

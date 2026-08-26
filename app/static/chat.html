@@ -106,6 +106,54 @@
     color: #888;
     padding: 6px;
   }
+  #media-status {
+    text-align: center;
+    font-size: 12px;
+    color: #d67b1c;
+    padding: 0 6px 6px;
+    min-height: 14px;
+  }
+  .icon-btn {
+    flex: none;
+    width: 40px;
+    height: 40px;
+    border: 1px solid #ccc;
+    border-radius: 50%;
+    background: #fff;
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .icon-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  #mic.recording {
+    background: #d64545;
+    color: #fff;
+    border-color: #d64545;
+  }
+  .media-thumb {
+    display: block;
+    max-width: 240px;
+    max-height: 240px;
+    border-radius: 10px;
+    cursor: pointer;
+    margin-bottom: 4px;
+  }
+  .media-caption {
+    display: block;
+  }
+  audio.media-audio {
+    display: block;
+    max-width: 240px;
+  }
+  .media-transcript {
+    display: block;
+    margin-top: 4px;
+  }
 </style>
 </head>
 <body>
@@ -113,7 +161,11 @@
 <div id="status">Conectando…</div>
 <div id="messages"></div>
 <div id="typing">Agente está digitando…</div>
+<div id="media-status"></div>
 <div id="composer">
+  <input id="file-input" type="file" accept="image/*,audio/*" style="display:none" />
+  <button id="attach" class="icon-btn" type="button" title="Anexar foto ou áudio" disabled>📎</button>
+  <button id="mic" class="icon-btn" type="button" title="Gravar áudio" disabled>🎤</button>
   <input id="input" type="text" placeholder="Digite sua mensagem…" autocomplete="off" disabled />
   <button id="send" disabled>Enviar</button>
 </div>
@@ -127,6 +179,10 @@
   const inputEl = document.getElementById("input");
   const sendEl = document.getElementById("send");
   const statusEl = document.getElementById("status");
+  const mediaStatusEl = document.getElementById("media-status");
+  const attachEl = document.getElementById("attach");
+  const fileInputEl = document.getElementById("file-input");
+  const micEl = document.getElementById("mic");
 
   let apiKey = null;
   let channelId = null;
@@ -135,6 +191,69 @@
   let pollTimer = null;
   let awaitingReply = false;
   let lastRenderedCount = 0;
+
+  // Object URLs for fetched media, cached once per message id (see the
+  // ticket note: <img>/<audio> can't set request headers, so we fetch the
+  // bytes ourselves and hand the browser a blob: URL instead).
+  const mediaUrlCache = new Map();
+
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let recording = false;
+
+  function setMediaStatus(text) {
+    mediaStatusEl.textContent = text || "";
+  }
+
+  async function getMediaObjectUrl(message) {
+    if (mediaUrlCache.has(message.id)) return mediaUrlCache.get(message.id);
+    try {
+      const res = await fetch(message.media_url, { headers: { "X-API-Key": apiKey } });
+      if (!res.ok) return null;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      mediaUrlCache.set(message.id, url);
+      return url;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function renderMediaBubble(m, el) {
+    if (m.type === "image") {
+      const img = document.createElement("img");
+      img.className = "media-thumb";
+      img.alt = "imagem enviada";
+      img.addEventListener("click", () => {
+        if (img.dataset.fullUrl) window.open(img.dataset.fullUrl, "_blank");
+      });
+      el.appendChild(img);
+      if (m.content) {
+        const caption = document.createElement("span");
+        caption.className = "media-caption";
+        caption.textContent = m.content;
+        el.appendChild(caption);
+      }
+      getMediaObjectUrl(m).then((url) => {
+        if (url) {
+          img.src = url;
+          img.dataset.fullUrl = url;
+        }
+      });
+    } else if (m.type === "audio") {
+      const audio = document.createElement("audio");
+      audio.className = "media-audio";
+      audio.controls = true;
+      el.appendChild(audio);
+      const transcript = document.createElement("span");
+      transcript.className = "media-transcript";
+      transcript.textContent = m.content;
+      el.appendChild(transcript);
+      getMediaObjectUrl(m).then((url) => {
+        if (url) audio.src = url;
+      });
+    }
+  }
 
   function getUserId() {
     let id = localStorage.getItem("acme_webchat_user_id");
@@ -149,9 +268,16 @@
     messagesEl.innerHTML = "";
     for (const m of messages) {
       const el = document.createElement("div");
-      if (m.role === "user") {
-        el.className = "bubble user";
+      if (m.type === "unsupported") {
+        el.className = "chip";
         el.textContent = m.content;
+      } else if (m.role === "user") {
+        el.className = "bubble user";
+        if (m.type === "image" || m.type === "audio") {
+          renderMediaBubble(m, el);
+        } else {
+          el.textContent = m.content;
+        }
       } else if (m.role === "assistant") {
         el.className = "bubble assistant";
         el.textContent = m.content;
@@ -223,6 +349,110 @@
     await pollMessages();
   }
 
+  async function uploadMedia(file, caption) {
+    const form = new FormData();
+    form.append("channel_id", channelId);
+    form.append("user_id", userId);
+    form.append("file", file, file.name);
+    if (caption) form.append("caption", caption);
+
+    try {
+      const res = await fetch("/channels/webchat/media", {
+        method: "POST",
+        headers: { "X-API-Key": apiKey },
+        body: form,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        conversationId = data.conversation_id;
+        awaitingReply = true;
+        setMediaStatus("");
+      } else {
+        setMediaStatus("Falha ao enviar mídia.");
+      }
+    } catch (err) {
+      setMediaStatus("Falha ao enviar mídia.");
+    }
+    await pollMessages();
+  }
+
+  fileInputEl.addEventListener("change", async () => {
+    const file = fileInputEl.files && fileInputEl.files[0];
+    fileInputEl.value = "";
+    if (!file) return;
+    const caption = inputEl.value.trim();
+    inputEl.value = "";
+    attachEl.disabled = true;
+    await uploadMedia(file, caption);
+    attachEl.disabled = false;
+  });
+
+  attachEl.addEventListener("click", () => fileInputEl.click());
+
+  function stopRecording() {
+    recording = false;
+    micEl.classList.remove("recording");
+    micEl.title = "Gravar áudio";
+    setMediaStatus("");
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      mediaRecorder.stop();
+    }
+  }
+
+  async function startRecording() {
+    if (typeof MediaRecorder === "undefined" || !navigator.mediaDevices) {
+      setMediaStatus("Gravação de áudio não é suportada neste navegador.");
+      return;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      setMediaStatus("Permissão de microfone negada.");
+      return;
+    }
+
+    let mimeType = "audio/webm";
+    if (
+      typeof MediaRecorder.isTypeSupported === "function" &&
+      MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ) {
+      mimeType = "audio/webm;codecs=opus";
+    }
+
+    recordedChunks = [];
+    try {
+      mediaRecorder = new MediaRecorder(stream, { mimeType });
+    } catch (err) {
+      setMediaStatus("Não foi possível iniciar a gravação.");
+      return;
+    }
+    mediaRecorder.addEventListener("dataavailable", (e) => {
+      if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+    });
+    mediaRecorder.addEventListener("stop", async () => {
+      stream.getTracks().forEach((track) => track.stop());
+      const blob = new Blob(recordedChunks, { type: mimeType });
+      recordedChunks = [];
+      const file = new File([blob], "voice.webm", { type: mimeType });
+      await uploadMedia(file, null);
+    });
+
+    mediaRecorder.start();
+    recording = true;
+    micEl.classList.add("recording");
+    micEl.title = "Gravando…";
+    setMediaStatus("Gravando… (clique para enviar)");
+  }
+
+  micEl.addEventListener("click", () => {
+    if (recording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  });
+
   async function bootstrap() {
     try {
       const res = await fetch("/chat/bootstrap", { method: "POST" });
@@ -235,6 +465,8 @@
       statusEl.textContent = "Conectado. Envie uma mensagem para começar.";
       inputEl.disabled = false;
       sendEl.disabled = false;
+      attachEl.disabled = false;
+      micEl.disabled = false;
       inputEl.focus();
 
       pollTimer = setInterval(pollMessages, 1000);

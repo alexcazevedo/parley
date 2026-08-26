@@ -15,6 +15,28 @@ from typing import Any
 from app.models.channel import Channel
 from app.models.contact import Contact
 
+# Media MIME types accepted for each `IncomingMessage.type`; a mime with a
+# `;codecs=` suffix is matched on the part before `;` (see
+# `app/messages/ingest.py`).
+MEDIA_TYPES = {"image", "audio"}
+IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp"}
+AUDIO_MIMES = {
+    "audio/ogg",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/webm",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/mp3",
+}
+
+
+@dataclass
+class IncomingMedia:
+    data: bytes
+    mime: str
+    filename: str | None = None
+
 
 @dataclass
 class IncomingMessage:
@@ -26,6 +48,7 @@ class IncomingMessage:
     content: str
     timestamp: datetime
     raw: dict[str, Any] = field(default_factory=dict)
+    media: IncomingMedia | None = None
 
 
 @dataclass
@@ -47,9 +70,6 @@ class ChannelAdapter(abc.ABC):
         self, message: OutgoingMessage, contact: Contact, channel: Channel
     ) -> None:
         """Deliver an outbound message through this channel's transport."""
-
-    async def download_media(self, *args: Any, **kwargs: Any) -> bytes:
-        raise NotImplementedError("media is out of scope — text only (see PRODUCT.md)")
 
     async def mark_read(
         self, external_message_id: str, contact: Contact, channel: Channel

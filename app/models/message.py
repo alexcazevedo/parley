@@ -61,6 +61,8 @@ class Message(Base, TenantScoped):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     external_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     raw_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    media_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    media_mime: Mapped[str | None] = mapped_column(String(100), nullable=True)
     agent_run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True
     )

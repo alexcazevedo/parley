@@ -99,6 +99,12 @@ docker compose up -d --build
 # operator page: http://localhost:8001/operator (paste the tenant API key;
 # the demo key is prefilled)
 
+# web chat page: http://localhost:8001/chat — besides typing, the composer
+# has a 📎 button (attach a photo or audio file) and a 🎤 button (record a
+# voice note in the browser via MediaRecorder, click again to send it).
+# Both pages (/chat and /operator) render image messages as thumbnails and
+# audio messages as a player plus the transcript text underneath.
+
 uv run scripts/demo.py
 # scripts the PRODUCT.md "success demo" against the running stack over
 # plain HTTP: creates a tenant/agent/tool/channel, sends "Oi" / "Queria
@@ -110,6 +116,14 @@ uv run scripts/demo.py
 # Exits 0 on success, 2 if LLM_API_KEY in .env is still the placeholder
 # (the pipeline itself is still proven by `pytest`'s scripted-LLM e2e test,
 # no live key needed for that), 1 if an expectation wasn't met.
+
+uv run scripts/demo_media.py
+# scripts the PRODUCT.md media success demo: bootstraps the same /chat demo
+# tenant, uploads tests/fixtures/order_label.png (shows "PEDIDO 12345") with
+# a caption, then tests/fixtures/voice_note.mp3 (a real voice note asking
+# about the order) within the debounce window so both land in one turn,
+# waits for the agent's reply, and asserts it mentions the order after
+# reading the image and transcribing the audio. Same exit codes as demo.py.
 ```
 
 Host ports: Postgres `5434`, Redis `6380`, API `8001` (overridable via
@@ -145,6 +159,8 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
 | `POST /tenants` | admin-only; returns the tenant's `api_key` (shown once) |
 | `POST /agents`, `/channels`, `/tools` | configure an agent, a channel, a business tool |
 | `POST /channels/webchat/messages` | Web Chat ingestion (the only channel a customer's own widget talks to) |
+| `POST /channels/webchat/media` | Web Chat media upload (multipart: `channel_id`, `user_id`, `file`, optional `caption`/`message_id`) — a photo or voice note, same pipeline as text |
+| `GET /media/{message_id}` | tenant-scoped media download (`X-API-Key` required) — serves the file behind an image/audio message, used by `/chat` and `/operator` to render thumbnails/players |
 | `POST /dev/messages` | dev simulator — same pipeline as Web Chat, for scripting demos |
 | `POST /webhooks/whatsapp/{channel_id}` | Evolution API inbound webhook |
 | `GET /conversations/{id}/messages` | poll for replies (`?include_tools=false` by default; `?after=<timestamp>`) |

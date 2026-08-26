@@ -19,9 +19,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.context import ContextBuilder
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.llm.base import ROLE_ASSISTANT, ROLE_TOOL, ROLE_USER, LLMMessage, LLMProvider, ToolCall
 from app.llm.factory import get_provider, resolve_model
+from app.media.storage import get_media_storage
 from app.memory.service import MemoryService
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun, AgentRunStatus
@@ -57,6 +58,13 @@ HUMANIZE_STYLE_HINT = (
 )
 
 
+async def _load_message_image(message: Message) -> bytes | None:
+    """`ContextBuilder`'s image loader: the bytes ingest stored for a message."""
+    if not message.media_key:
+        return None
+    return await get_media_storage().get(message.media_key)
+
+
 class AgentRuntime:
     """A `SessionAwareTurnRuntime` (see app/conversations/turn.py).
 
@@ -76,7 +84,10 @@ class AgentRuntime:
         self._provider = provider
         self._registry = registry or ToolRegistry()
         self._settings = settings
-        self._context_builder = context_builder or ContextBuilder()
+        # Left None on purpose: the default builder is created per turn so it
+        # picks up the current `llm_vision_enabled`/`vision_max_images` and the
+        # media root in force at that moment.
+        self._context_builder = context_builder
         self._timeout_seconds = timeout_seconds
 
     async def run_turn(
@@ -135,7 +146,8 @@ class AgentRuntime:
         tool_specs = await self._registry.specs(agent, session)
         memories = await self._load_memories(session, agent, conversation)
         history = await self._recent_messages(session, agent, conversation)
-        messages = self._context_builder.build(
+        builder = self._context_builder or self._default_context_builder()
+        messages = await builder.build(
             agent,
             conversation,
             history,
@@ -219,6 +231,13 @@ class AgentRuntime:
             max_tool_iterations=agent.max_tool_iterations,
         )
         return MAX_ITERATIONS_MESSAGE
+
+    def _default_context_builder(self) -> ContextBuilder:
+        settings = self._settings or get_settings()
+        return ContextBuilder(
+            image_loader=_load_message_image,
+            vision_enabled=settings.llm_vision_enabled,
+        )
 
     async def _style_hint(
         self, session: AsyncSession, conversation: Conversation

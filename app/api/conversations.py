@@ -73,8 +73,20 @@ class MessageOut(BaseModel):
     content: str
     external_message_id: str | None
     created_at: datetime
+    media_url: str | None = None
+    media_mime: str | None = None
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_message(cls, message: Message) -> "MessageOut":
+        """`media_url` is derived (not a column) — `/media/{id}` when the
+        message has a stored file, `None` (text/tool messages) otherwise.
+        """
+        out = cls.model_validate(message)
+        if message.media_key:
+            out.media_url = f"/media/{message.id}"
+        return out
 
 
 class MessageCreate(BaseModel):
@@ -221,7 +233,7 @@ async def list_conversation_messages(
             for m in messages
             if m.role != MessageRole.TOOL and m.type not in _TOOL_MESSAGE_TYPES
         ]
-    return [MessageOut.model_validate(m) for m in messages]
+    return [MessageOut.from_message(m) for m in messages]
 
 
 @router.post(
@@ -263,7 +275,7 @@ async def post_operator_message(
     conversation.last_message_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(message)
-    return MessageOut.model_validate(message)
+    return MessageOut.from_message(message)
 
 
 @router.post("/{conversation_id}/handoff", response_model=ConversationOut)

@@ -18,6 +18,10 @@ plus the tool-call/tool-result messages and must land in the same transaction
 as the reply. The worker injects `AgentRuntime`; `EchoRuntime` stays the
 default so nothing accidentally calls a live model.
 
+A batch made entirely of `unsupported` media (video, documents, stickers)
+never reaches a runtime: there is nothing to reason about, so the turn
+delivers `UNSUPPORTED_MEDIA_REPLY` directly. Mixed batches run normally.
+
 Barge-in (PRODUCT.md): callers may inject a `supersede_check` — "did a newer
 inbound message arrive for this conversation?". It is consulted at exactly two
 safe checkpoints, never mid-LLM/mid-tool: once after the runtime returns and
@@ -38,6 +42,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.context import render_message_text
 from app.agents.sentiment import score_frustration
 from app.channels.base import ChannelAdapter, OutgoingMessage
 from app.channels.registry import get_adapter
@@ -46,6 +51,7 @@ from app.conversations.humanize import split_reply, typing_delay_seconds
 from app.conversations.summary import maybe_summarize
 from app.handoff.summarizer import handoff_with_summary
 from app.llm.factory import get_provider
+from app.media.prepare import prepare_media_messages
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun, AgentRunStatus
 from app.models.channel import Channel
@@ -55,6 +61,13 @@ from app.models.handoff import HandoffRequestedBy
 from app.models.message import Message, MessageDirection, MessageRole
 
 logger = structlog.get_logger(__name__)
+
+# What the customer hears when the whole batch is media we cannot handle
+# (video, documents, stickers): a fixed reply, no model call — there is
+# nothing for the agent to reason about, and PRODUCT.md forbids silence.
+UNSUPPORTED_MEDIA_REPLY = (
+    "Por enquanto só consigo entender texto, áudios e imagens. Pode me mandar em texto?"
+)
 
 
 @runtime_checkable
@@ -141,6 +154,11 @@ async def process_turn(
         )
         return None
 
+    # Voice notes are transcribed before anything else touches the batch, so
+    # the read receipt, sentiment scoring and the joined `input_text` all see
+    # the transcript rather than an empty audio message.
+    await prepare_media_messages(session, messages)
+
     # Loaded before the runtime runs: `humanize` decides whether the inbound
     # batch gets a read receipt *before* we start "typing".
     channel = await session.get(Channel, conversation.channel_id)
@@ -152,7 +170,15 @@ async def process_turn(
     if humanized:
         await _mark_read(adapter, messages, contact, channel)
 
-    input_text = "\n".join(message.content for message in messages)
+    if all(message.type == "unsupported" for message in messages):
+        return await _reply_unsupported_media(
+            session, conversation, adapter, contact, channel, humanized, len(messages)
+        )
+
+    # Media messages render as readable placeholders (a photo's caption, an
+    # audio transcript), so the joined input matches the prompt transcript the
+    # context builder produces from the same rows.
+    input_text = "\n".join(render_message_text(message) for message in messages)
 
     agent = await session.get(Agent, conversation.agent_id)
     if agent is not None and agent.sentiment_escalation_enabled:
@@ -198,6 +224,29 @@ async def process_turn(
         message_count=len(messages),
     )
     return reply
+
+
+async def _reply_unsupported_media(
+    session: AsyncSession,
+    conversation: Conversation,
+    adapter: ChannelAdapter,
+    contact: Contact,
+    channel: Channel,
+    humanized: bool,
+    message_count: int,
+) -> Message | None:
+    """Answer a batch made entirely of unsupported media, without an LLM call."""
+    delivery = await _deliver(
+        session, conversation, adapter, contact, channel, humanized, UNSUPPORTED_MEDIA_REPLY
+    )
+    conversation.last_message_at = datetime.now(UTC)
+    await session.commit()
+    logger.info(
+        "turn.unsupported_media_only",
+        conversation_id=str(conversation.id),
+        message_count=message_count,
+    )
+    return delivery.message
 
 
 async def _maybe_escalate_on_sentiment(

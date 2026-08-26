@@ -38,6 +38,25 @@ class Settings(BaseSettings):
     # Sentiment escalation classifier (see app/agents/sentiment.py, ticket 20).
     sentiment_threshold: float = 0.7
     sentiment_timeout_seconds: float = 5.0
+    # Media storage (see app/media/storage.py, ticket 26): local filesystem
+    # root for uploaded images/audio, and the max accepted file size.
+    media_root: str = "./media"
+    media_max_bytes: int = 16 * 1024 * 1024
+    # Vision (see app/agents/context.py, ticket 27): turn this off for a
+    # deployment whose model has no image support — images then reach the
+    # model as a text placeholder instead. `vision_max_images` caps how many
+    # of the newest images in the context window carry actual bytes; older
+    # ones degrade to text, because every image costs tokens.
+    llm_vision_enabled: bool = True
+    vision_max_images: int = 3
+    # Speech-to-text (see app/media/stt.py, ticket 28): defaults to the LLM
+    # provider's own base URL/key (one OpenAI key covers chat + Whisper);
+    # override either to point transcription at a different backend.
+    stt_base_url: str | None = None
+    stt_api_key: str | None = None
+    stt_model: str = "whisper-1"
+    stt_language: str = "pt"
+    stt_timeout_seconds: float = 20.0
 
 
 @lru_cache

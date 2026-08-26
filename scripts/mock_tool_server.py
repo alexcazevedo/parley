@@ -13,6 +13,8 @@ allowlists that hostname past the SSRF guard (see app/tools/ssrf.py).
 Standalone: `uv run uvicorn scripts.mock_tool_server:app --port 9000`.
 """
 
+import re
+
 from fastapi import FastAPI, Query
 
 app = FastAPI(title="Mock Tool Server")
@@ -25,9 +27,21 @@ _FAKE_ORDERS: dict[str, dict[str, str]] = {
 }
 
 
+def _normalize_order_id(order_id: str) -> str:
+    """Strip everything but digits so "12.345", "12 345", "#12345" and
+    "12345" all resolve to the same order — Whisper transcribes pt-BR
+    numbers with a thousands separator (e.g. "12.345"), see ticket 30.
+    """
+    return re.sub(r"\D", "", order_id)
+
+
 @app.get("/orders")
 async def get_order(order_id: str = Query(...)) -> dict[str, str]:
-    return _FAKE_ORDERS.get(order_id, {"order_id": order_id, "status": "not_found"})
+    normalized = _normalize_order_id(order_id)
+    order = _FAKE_ORDERS.get(normalized)
+    if order is not None:
+        return order
+    return {"order_id": order_id, "status": "not_found"}
 
 
 @app.get("/health")

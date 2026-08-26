@@ -40,6 +40,11 @@ services:
       # SSRF guard (see app/tools/ssrf.py) — scripts/demo.py registers
       # `get_order` at http://mock-tools:9000/orders.
       TOOL_ALLOWED_HOSTS: mock-tools
+      # Media ingest (ticket 26): both api (upload/serve) and worker (future
+      # STT/vision) need the same files, hence the shared named volume below.
+      MEDIA_ROOT: /srv/media
+    volumes:
+      - media_data:/srv/media
     command: >
       sh -c "uv run alembic upgrade head && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:
@@ -61,6 +66,9 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-harness}:${POSTGRES_PASSWORD:-harness}@postgres:5432/${POSTGRES_DB:-harness}
       REDIS_URL: redis://redis:6379/0
       TOOL_ALLOWED_HOSTS: mock-tools
+      MEDIA_ROOT: /srv/media
+    volumes:
+      - media_data:/srv/media
     command: uv run python -m app.workers.main
     depends_on:
       postgres:
@@ -85,3 +93,4 @@ services:
 
 volumes:
   postgres_data:
+  media_data:

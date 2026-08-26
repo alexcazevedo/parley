@@ -19,6 +19,42 @@ ROLE_TOOL = "tool"
 
 
 @dataclass(slots=True)
+class TextPart:
+    """A text chunk of a multimodal message."""
+
+    text: str
+
+
+@dataclass(slots=True)
+class ImagePart:
+    """An image chunk of a multimodal message.
+
+    `data` is the raw file content: keeping it as bytes up here means nothing
+    above the providers package deals with base64 or data URLs (the wire
+    encoding is `_message_to_wire`'s business).
+    """
+
+    mime: str
+    data: bytes
+
+
+ContentPart = TextPart | ImagePart
+
+
+def text_of(content: "str | list[ContentPart] | None") -> str:
+    """The readable text of any message content — for logging and measuring.
+
+    Image parts contribute nothing; a multimodal message reads as its text
+    parts joined by a space.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    return " ".join(part.text for part in content if isinstance(part, TextPart))
+
+
+@dataclass(slots=True)
 class ToolCall:
     """A single tool invocation requested by the model."""
 
@@ -32,7 +68,9 @@ class LLMMessage:
     """One entry of the prompt transcript sent to the model."""
 
     role: str
-    content: str | None = None
+    # A plain `str` for text-only messages; a list of parts when the message
+    # carries images (see `ContentPart`). Providers serialize both.
+    content: str | list[ContentPart] | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     # Set on `role="tool"` messages: which call this is the result of.
     tool_call_id: str | None = None

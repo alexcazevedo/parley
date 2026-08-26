@@ -136,7 +136,9 @@ async def test_non_text_message_is_ignored_with_200(client, fake_redis):
     channel_id = await _create_evolution_channel(client, headers)
 
     payload = copy.deepcopy(_fixture())
-    payload["data"]["message"] = {"imageMessage": {"caption": "look"}}
+    payload["data"]["message"] = {
+        "reactionMessage": {"text": "👍", "key": {"id": "3EB0C767D26A1D5F9E1A"}}
+    }
 
     response = await client.post(
         f"/webhooks/whatsapp/{channel_id}",

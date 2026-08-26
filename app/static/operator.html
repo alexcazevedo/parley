@@ -43,6 +43,10 @@
   .bubble.human_operator { align-self: flex-end; background: #4a6cf7; color: #fff; border-bottom-right-radius: 4px; }
   .bubble .label { display: block; font-size: 10px; opacity: 0.75; margin-bottom: 2px; }
   .chip { align-self: center; background: #e0e0e0; color: #555; font-size: 12px; padding: 4px 10px; border-radius: 999px; }
+  .media-thumb { display: block; max-width: 240px; max-height: 240px; border-radius: 10px; cursor: pointer; margin-bottom: 4px; }
+  .media-caption { display: block; }
+  audio.media-audio { display: block; max-width: 240px; }
+  .media-transcript { display: block; margin-top: 4px; }
   #actions { flex: none; border-top: 1px solid #e0e0e0; padding: 10px 16px; background: #fff; }
   #actions textarea { width: 100%; resize: none; padding: 8px 12px; border: 1px solid #ccc; border-radius: 10px; font-size: 14px; font-family: inherit; min-height: 44px; }
   #action-buttons { display: flex; gap: 8px; margin-top: 8px; }
@@ -129,6 +133,61 @@
   let listTimer = null;
   let messagesTimer = null;
   let sending = false;
+
+  // Object URLs for fetched media, cached once per message id — <img>/
+  // <audio> can't set request headers, so we fetch the bytes ourselves and
+  // hand the browser a blob: URL instead.
+  const mediaUrlCache = new Map();
+
+  async function getMediaObjectUrl(message) {
+    if (mediaUrlCache.has(message.id)) return mediaUrlCache.get(message.id);
+    try {
+      const res = await fetch(message.media_url, { headers: { "X-API-Key": apiKey } });
+      if (!res.ok) return null;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      mediaUrlCache.set(message.id, url);
+      return url;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function renderMediaBubble(m, el) {
+    if (m.type === "image") {
+      const img = document.createElement("img");
+      img.className = "media-thumb";
+      img.alt = "imagem enviada";
+      img.addEventListener("click", () => {
+        if (img.dataset.fullUrl) window.open(img.dataset.fullUrl, "_blank");
+      });
+      el.appendChild(img);
+      if (m.content) {
+        const caption = document.createElement("span");
+        caption.className = "media-caption";
+        caption.textContent = m.content;
+        el.appendChild(caption);
+      }
+      getMediaObjectUrl(m).then((url) => {
+        if (url) {
+          img.src = url;
+          img.dataset.fullUrl = url;
+        }
+      });
+    } else if (m.type === "audio") {
+      const audio = document.createElement("audio");
+      audio.className = "media-audio";
+      audio.controls = true;
+      el.appendChild(audio);
+      const transcript = document.createElement("span");
+      transcript.className = "media-transcript";
+      transcript.textContent = m.content;
+      el.appendChild(transcript);
+      getMediaObjectUrl(m).then((url) => {
+        if (url) audio.src = url;
+      });
+    }
+  }
 
   function showGate(errorText) {
     stopTimers();
@@ -309,9 +368,16 @@
     el.innerHTML = "";
     for (const m of messages) {
       const bubble = document.createElement("div");
-      if (m.role === "user") {
-        bubble.className = "bubble user";
+      if (m.type === "unsupported") {
+        bubble.className = "chip";
         bubble.textContent = m.content;
+      } else if (m.role === "user") {
+        bubble.className = "bubble user";
+        if (m.type === "image" || m.type === "audio") {
+          renderMediaBubble(m, bubble);
+        } else {
+          bubble.textContent = m.content;
+        }
       } else if (m.role === "assistant") {
         bubble.className = "bubble assistant";
         bubble.textContent = m.content;

@@ -16,7 +16,9 @@ app/
                    operator.py serves the self-contained operator inbox page
                    (app/static/operator.html) at GET /operator — no API auth
                    on the route itself, since the page gates on X-API-Key in
-                   JS against the endpoints below.
+                   JS against the endpoints below. media.py serves
+                   GET /media/{message_id} (tenant-scoped file download for
+                   image/audio messages).
   channels/       ChannelAdapter interface + two implementations: webchat
                    (REST only) and evolution (WhatsApp). parse_incoming/
                    send_message is the whole seam.
@@ -39,6 +41,11 @@ app/
                    builtin.py (remember, handoff_to_human — harness-provided),
                    http.py (the tenant's own HTTP tools), ssrf.py (outbound
                    URL guard), validation.py (JSON Schema arg validation).
+  media/          Channel-independent media pipeline: storage.py (local
+                   filesystem, tenant-scoped), stt.py (Whisper-compatible
+                   transcription), prepare.py (prepare_media_messages — runs
+                   STT on freshly-ingested audio before the turn joins the
+                   batch into text).
   handoff/        HandoffService — the only place conversation state moves
                    in/out of HUMAN_HANDOFF.
   memory/         MemoryService — long-term facts about a contact.
@@ -309,6 +316,64 @@ off; the `/chat` demo agent on).
    unparseable answer scores `None`, which is treated as "no signal" and the
    normal agent turn proceeds. Only `ACTIVE_AI` conversations are scored, so
    an already handed-off conversation can't double-escalate.
+
+## Inbound media
+
+Voice notes and photos go through one channel-independent pipeline in core
+— no channel or downstream stage (agent loop, humanizer, sentiment, summary,
+barge-in) gets special-cased media behavior (PRODUCT.md).
+
+1. **Adapter -> `IncomingMedia`**: each `ChannelAdapter.parse_incoming` maps
+   its own payload into an `IncomingMedia` (bytes + mime + filename) on the
+   `IncomingMessage`, exactly like it already maps text — the webchat
+   adapter takes it from `POST /channels/webchat/media`'s multipart upload
+   (`app/api/webchat.py`), the Evolution adapter fetches the bytes via
+   `POST {base_url}/chat/getBase64FromMediaMessage/{instance}` when a
+   webhook's `audioMessage`/`imageMessage` arrives.
+2. **Storage -> `Message.type`**: `app/messages/ingest.py` writes the file
+   through `app.media.storage` (tenant-scoped local filesystem under
+   `MEDIA_ROOT`, one `media_key` per file) and persists a `Message` with
+   `type` `image` or `audio` (content empty except a webchat caption).
+   Oversize or disallowed-mime uploads raise `MediaRejected` (413/415) before
+   anything is written. Video, documents, stickers, locations, contacts get
+   a persisted `unsupported` message instead of being dropped.
+3. **Worker STT** (`app.media.prepare.prepare_media_messages`): before a
+   debounced batch joins into the turn's input, every freshly-ingested audio
+   message with empty `content` is transcribed (`app.media.stt.transcribe`,
+   one OpenAI-compatible Whisper call) and its transcript becomes
+   `Message.content` — idempotent by construction (a message with content
+   already set, including a placeholder, is never re-transcribed), so
+   downstream code (sentiment, rolling summary, the operator page) treats it
+   exactly like a text message.
+4. **`ContextBuilder` image parts**: image messages are handed to the LLM as
+   multimodal content (image + the customer's caption as text) when
+   `LLM_VISION_ENABLED` is on, capped at the newest `VISION_MAX_IMAGES` in
+   the prompt window; older images and any image when vision is off/the
+   model can't see it degrade to the text placeholder
+   `"[imagem enviada pelo cliente]"` so the turn still answers.
+5. **Degradation**: STT failure (or empty transcript) keeps the message as
+   `audio` with a fixed placeholder content (`"[áudio não compreendido]"` /
+   `"[áudio sem fala detectada]"`) instead of costing the customer a reply.
+   Unsupported types get a fixed polite reply
+   (`app.conversations.turn.UNSUPPORTED_MEDIA_REPLY`) when a batch is
+   unsupported-only; mixed batches (e.g. a photo + an unsupported sticker)
+   run normally, with the unsupported item recorded as its own message.
+6. **Rendering**: `/chat` and `/operator` render `type=="image"` as an
+   `<img>` thumbnail (click to open full-size) plus any caption, and
+   `type=="audio"` as an `<audio>` player plus the transcript text below.
+   Both fetch `GET /media/{message_id}` (tenant-scoped, `X-API-Key`
+   required) client-side and turn the response into an object URL, since
+   `<img>`/`<audio>` tags can't set request headers.
+
+Settings (`app/config.py`): `MEDIA_ROOT` (storage root, a shared Docker
+volume between `api` and `worker` in compose), `LLM_VISION_ENABLED`,
+`VISION_MAX_IMAGES`, `STT_BASE_URL`/`STT_API_KEY` (default to the LLM
+provider's own base URL/key), `STT_MODEL`, `STT_LANGUAGE`,
+`STT_TIMEOUT_SECONDS`.
+
+Out of scope (PRODUCT.md): outbound media, video/documents/stickers beyond
+the polite fallback, retention/cleanup, OCR as a separate step (vision reads
+text in images), long-audio/streaming transcription.
 
 ## Operator UI
 

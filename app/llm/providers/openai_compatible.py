@@ -5,6 +5,7 @@ all speak `POST {base_url}/chat/completions` with the same tools payload. The
 only knobs are `base_url` and `api_key` (PRODUCT.md).
 """
 
+import base64
 import json
 import time
 from typing import Any
@@ -12,15 +13,53 @@ from typing import Any
 import httpx
 import structlog
 
-from app.llm.base import LLMError, LLMMessage, LLMResponse, LLMUsage, ToolCall, ToolSpec
+from app.llm.base import (
+    ContentPart,
+    ImagePart,
+    LLMError,
+    LLMMessage,
+    LLMResponse,
+    LLMUsage,
+    TextPart,
+    ToolCall,
+    ToolSpec,
+)
 
 logger = structlog.get_logger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
 
+def _content_to_wire(
+    content: str | list[ContentPart] | None,
+) -> str | list[dict[str, Any]] | None:
+    """Text content passes through; multimodal content becomes OpenAI parts.
+
+    Images travel inline as `data:` URLs — no upload step, no public URL to
+    host, and the bytes are already in memory from the media storage.
+    """
+    if not isinstance(content, list):
+        return content
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if isinstance(part, ImagePart):
+            encoded = base64.b64encode(part.data).decode("ascii")
+            parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{part.mime};base64,{encoded}"},
+                }
+            )
+        elif isinstance(part, TextPart):
+            parts.append({"type": "text", "text": part.text})
+    return parts
+
+
 def _message_to_wire(message: LLMMessage) -> dict[str, Any]:
-    payload: dict[str, Any] = {"role": message.role, "content": message.content}
+    payload: dict[str, Any] = {
+        "role": message.role,
+        "content": _content_to_wire(message.content),
+    }
     if message.tool_calls:
         payload["tool_calls"] = [
             {
