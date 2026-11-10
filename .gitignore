@@ -14,3 +14,9 @@ build/
 htmlcov/
 .coverage
 media/
+
+# local tooling
+graphify-out/
+.claude/
+STATE.md
+tickets/
