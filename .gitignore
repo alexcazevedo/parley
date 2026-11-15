@@ -13,10 +13,11 @@ dist/
 build/
 htmlcov/
 .coverage
-media/
+/media/
 
 # local tooling
 graphify-out/
 .claude/
 STATE.md
 tickets/
+.codegraph/
