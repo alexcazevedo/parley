@@ -2,6 +2,7 @@
 
 from fastapi import FastAPI
 
+from app.agents.boundaries import load_floor
 from app.api import (
     agents,
     channels,
@@ -30,6 +31,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """
     settings = settings if settings is not None else get_settings()
     assert_secure_settings(settings)
+    load_floor(settings.boundary_floor_file)
 
     app = FastAPI(title="Conversational Agent Harness")
 

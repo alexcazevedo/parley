@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable, Sequence
 
 import structlog
 
+from app.agents.boundaries import effective_boundaries, render_boundaries
 from app.config import get_settings
 from app.llm.base import (
     ROLE_ASSISTANT,
@@ -153,6 +154,9 @@ class ContextBuilder:
             parts.append(SUMMARY_HEADER + "\n" + summary)
         if style_hint and style_hint.strip():
             parts.append(style_hint.strip())
+        boundaries = effective_boundaries(agent)
+        if boundaries is not None:
+            parts.append(render_boundaries(boundaries))
         return "\n\n".join(parts)
 
     async def _history(self, window: Sequence[Message]) -> list[LLMMessage]:
@@ -180,9 +184,7 @@ class ContextBuilder:
             tool_calls = _tool_calls_from(message) if role == ROLE_ASSISTANT else []
             if tool_calls:
                 open_call_ids.update(call.id for call in tool_calls)
-                built.append(
-                    LLMMessage(role=ROLE_ASSISTANT, content=None, tool_calls=tool_calls)
-                )
+                built.append(LLMMessage(role=ROLE_ASSISTANT, content=None, tool_calls=tool_calls))
                 continue
             built.append(
                 LLMMessage(role=role, content=await self._content_for(message, with_bytes))

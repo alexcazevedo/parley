@@ -34,6 +34,25 @@ plausible `/forge:idea` starting point. Not ordered by priority.
 - **Live Evolution media probe.** Ticket 29 is test-proven only; no real
   Evolution instance was available.
 
+## From the boundaries run
+
+- **Inbound screening.** The customer's message is not checked before the
+  agent runs, so an off-topic or "ignore your instructions" message still
+  reaches the model. A cheap pre-check on the debounced batch, shaped like
+  the sentiment classifier, would catch these earlier.
+- **One retry before refusing.** A blocked reply is replaced by the refusal
+  at once. Asking the agent once more, with the block reason, could recover
+  replies that were only slightly out of line.
+- **Handoff after repeated blocks.** Several blocked replies in one
+  conversation should hand off to a human through `handoff_with_summary`.
+- **Tenant-wide boundaries.** Boundaries exist per agent and as the server
+  floor only. A tenant cannot define one set shared by all its agents.
+- **Operator page screens.** No UI to edit boundaries or browse blocked
+  replies. Both are API and database only (`agent_runs.blocked_text`).
+- **Measure block and false-block rates on a real model.** The tests use a
+  scripted model, so it is unknown how often a real model breaks a boundary
+  and how often the check blocks a fine reply.
+
 ## Older known MVP limitations (README)
 
 - **SSRF DNS-rebinding TOCTOU.** The allowed-IP check resolves once;

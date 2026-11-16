@@ -17,6 +17,7 @@ import time
 import structlog
 from redis.asyncio import Redis
 
+from app.agents.boundaries import load_floor
 from app.agents.runtime import AgentRuntime
 from app.config import assert_secure_settings, get_settings
 from app.conversations import debounce
@@ -79,6 +80,7 @@ async def run_once(
 async def main() -> None:
     settings = get_settings()
     assert_secure_settings(settings)
+    load_floor(settings.boundary_floor_file)
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     queue = RedisQueue(redis)
 

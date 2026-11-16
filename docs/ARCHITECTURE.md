@@ -186,6 +186,22 @@ same conversation.
    way, with a fixed "technical problem" message — a broken turn must not
    cost the user a reply.
 
+### Boundaries in a turn
+
+Boundaries (see README "Agent boundaries") sit at two points of a turn:
+
+1. **Prompt**: `effective_boundaries` (`app/agents/boundaries.py`) merges the
+   operator floor with the agent's own boundaries, and `render_boundaries`
+   writes them into the system prompt as a `## Boundaries` block.
+2. **Check before delivery**: when the loop reaches a model-written final
+   answer, `AgentRuntime._enforce_boundaries` (`app/agents/runtime.py`) runs
+   `check_reply`, one extra LLM call. It is skipped when there are no
+   boundaries or the check is off. A `BLOCK` (or an error, timeout or
+   unparseable answer) swaps the reply for the refusal message; the original
+   text goes to `agent_runs.blocked_text`. Only the checked text, or the
+   refusal, reaches the send path, so the humanizer and barge-in never see
+   the blocked reply.
+
 ## Memory
 
 Two kinds, deliberately different:

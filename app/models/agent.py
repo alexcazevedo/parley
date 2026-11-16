@@ -14,9 +14,7 @@ from app.models.base import Base, TenantScoped
 class Agent(Base, TenantScoped):
     __tablename__ = "agents"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     instructions: Mapped[str] = mapped_column(Text, nullable=False)
     provider: Mapped[str] = mapped_column(
@@ -46,6 +44,15 @@ class Agent(Base, TenantScoped):
     # app/agents/sentiment.py, migration 0006). Default off; demo agent on.
     sentiment_escalation_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=sa.false()
+    )
+    # Boundaries (migration 0009): see app/agents/boundaries.py.
+    boundary_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    boundary_never: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=sa.text("'[]'::jsonb")
+    )
+    boundary_refusal_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    boundary_check_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=sa.true()
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

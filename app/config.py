@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     stt_model: str = "whisper-1"
     stt_language: str = "pt"
     stt_timeout_seconds: float = 20.0
+    # Reply check (see app/agents/boundaries.py `check_reply`): past this the
+    # check counts as failed and the reply is blocked.
+    boundary_check_timeout_seconds: float = 8.0
+    # Operator boundary floor: path to a JSON file applied to every agent of
+    # every tenant (see app/agents/boundaries.py `load_floor`). Empty = none.
+    boundary_floor_file: str = ""
 
 
 class InsecureSettingsError(RuntimeError):
@@ -89,8 +95,8 @@ def assert_secure_settings(settings: Settings) -> None:
     except Exception:
         raise InsecureSettingsError(
             "SECRETS_KEY is not a valid Fernet key; generate one with "
-            "`python -c \"from cryptography.fernet import Fernet; "
-            "print(Fernet.generate_key().decode())\"` "
+            '`python -c "from cryptography.fernet import Fernet; '
+            'print(Fernet.generate_key().decode())"` '
             "(placeholders are only accepted with DEMO_MODE=true)"
         ) from None
 

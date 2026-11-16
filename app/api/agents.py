@@ -2,9 +2,10 @@
 
 import uuid
 from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant, get_db
@@ -12,6 +13,18 @@ from app.models.tenant import Tenant
 from app.repositories.agents import AgentsRepository
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+
+def _strip_never_item(value: str) -> str:
+    value = value.strip()
+    if not 1 <= len(value) <= 300:
+        raise ValueError("each never item must be 1-300 characters")
+    return value
+
+
+Scope = Annotated[str, Field(max_length=2000)]
+NeverList = Annotated[list[Annotated[str, AfterValidator(_strip_never_item)]], Field(max_length=50)]
+RefusalMessage = Annotated[str, Field(min_length=1, max_length=1000)]
 
 
 class AgentCreate(BaseModel):
@@ -27,6 +40,10 @@ class AgentCreate(BaseModel):
     tool_names: list[str] = Field(default_factory=list)
     context_message_limit: int = 20
     summary_threshold: int = 40
+    boundary_scope: Scope | None = None
+    boundary_never: NeverList = Field(default_factory=list)
+    boundary_refusal_message: RefusalMessage | None = None
+    boundary_check_enabled: bool = True
 
 
 class AgentUpdate(BaseModel):
@@ -42,6 +59,10 @@ class AgentUpdate(BaseModel):
     tool_names: list[str] | None = None
     context_message_limit: int | None = None
     summary_threshold: int | None = None
+    boundary_scope: Scope | None = None
+    boundary_never: NeverList | None = None
+    boundary_refusal_message: RefusalMessage | None = None
+    boundary_check_enabled: bool | None = None
 
 
 class AgentOut(BaseModel):
@@ -58,6 +79,10 @@ class AgentOut(BaseModel):
     tool_names: list[str]
     context_message_limit: int
     summary_threshold: int
+    boundary_scope: str | None
+    boundary_never: list[str]
+    boundary_refusal_message: str | None
+    boundary_check_enabled: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -108,6 +133,10 @@ async def update_agent(
     db: AsyncSession = Depends(get_db),
 ) -> AgentOut:
     changes = payload.model_dump(exclude_unset=True)
+    # Non-nullable columns: an explicit null means "leave as is".
+    for key in ("boundary_never", "boundary_check_enabled"):
+        if key in changes and changes[key] is None:
+            del changes[key]
     agent = await _repo(db).update(tenant.id, agent_id, **changes)
     if agent is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="agent not found")

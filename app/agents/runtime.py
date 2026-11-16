@@ -18,6 +18,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.boundaries import check_reply, effective_boundaries
 from app.agents.context import ContextBuilder
 from app.config import Settings, get_settings
 from app.llm.base import ROLE_ASSISTANT, ROLE_TOOL, ROLE_USER, LLMMessage, LLMProvider, ToolCall
@@ -187,8 +188,15 @@ class AgentRuntime:
                 run.completion_tokens = completion_tokens
 
             if not response.tool_calls:
+                reply = (response.content or "").strip()
+                if not reply:
+                    run.status = AgentRunStatus.SUCCESS
+                    return EMPTY_REPLY_MESSAGE
+                reply = await self._enforce_boundaries(
+                    provider, model, agent, conversation, run, input_text, reply
+                )
                 run.status = AgentRunStatus.SUCCESS
-                return (response.content or "").strip() or EMPTY_REPLY_MESSAGE
+                return reply
 
             messages.append(
                 LLMMessage(
@@ -209,9 +217,7 @@ class AgentRuntime:
                     ok=result.ok,
                 )
                 self._persist_tool_result(session, conversation, run, call, content)
-                messages.append(
-                    LLMMessage(role=ROLE_TOOL, content=content, tool_call_id=call.id)
-                )
+                messages.append(LLMMessage(role=ROLE_TOOL, content=content, tool_call_id=call.id))
                 # A tool (e.g. `handoff_to_human`) can end the loop on the spot
                 # instead of handing control back to the model — see
                 # app/tools/builtin.py and app/tools/base.py's `ToolResult`.
@@ -232,6 +238,41 @@ class AgentRuntime:
         )
         return MAX_ITERATIONS_MESSAGE
 
+    async def _enforce_boundaries(
+        self,
+        provider: LLMProvider,
+        model: str,
+        agent: Agent,
+        conversation: Conversation,
+        run: AgentRun,
+        input_text: str,
+        reply: str,
+    ) -> str:
+        """The reply to send: `reply` itself, or the refusal if the check blocks it.
+
+        Only model-written final replies come through here; canned messages and
+        a tool's terminal text are not checked. No boundaries, or the check
+        switched off, means no extra model call.
+        """
+        boundaries = effective_boundaries(agent, self._settings)
+        if boundaries is None or not boundaries.check_enabled:
+            return reply
+        verdict = await check_reply(
+            provider, model=model, boundaries=boundaries, user_text=input_text, reply_text=reply
+        )
+        run.llm_calls += 1
+        if verdict.allowed:
+            return reply
+        run.blocked_text = reply
+        run.boundary_reason = verdict.reason
+        logger.warning(
+            "boundary.reply_blocked",
+            conversation_id=str(conversation.id),
+            agent_run_id=str(run.id),
+            reason=verdict.reason,
+        )
+        return boundaries.refusal_message
+
     def _default_context_builder(self) -> ContextBuilder:
         settings = self._settings or get_settings()
         return ContextBuilder(
@@ -239,9 +280,7 @@ class AgentRuntime:
             vision_enabled=settings.llm_vision_enabled,
         )
 
-    async def _style_hint(
-        self, session: AsyncSession, conversation: Conversation
-    ) -> str | None:
+    async def _style_hint(self, session: AsyncSession, conversation: Conversation) -> str | None:
         """The humanizer's prompt hint, when this conversation's channel wants it."""
         channel = await session.get(Channel, conversation.channel_id)
         if channel is None or not bool((channel.config or {}).get("humanize")):

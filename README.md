@@ -195,6 +195,97 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
 4. Outbound replies go back out through Evolution's `sendText` REST endpoint
    using that same `apikey`, `base_url` and `instance`.
 
+## Agent boundaries
+
+An agent can carry its own limits next to `instructions`: what it is for
+(`boundary_scope`), what it must never say (`boundary_never`) and the text
+sent instead of a blocked reply (`boundary_refusal_message`). Set them with
+`POST /agents` or `PATCH /agents/{id}`. All four fields are optional:
+
+| Field | Limits | Default |
+|---|---|---|
+| `boundary_scope` | text, up to 2000 characters | none |
+| `boundary_never` | list, up to 50 items, each 1-300 characters (trimmed) | `[]` |
+| `boundary_refusal_message` | text, 1-1000 characters | `Desculpe, não posso ajudar com esse assunto.` |
+| `boundary_check_enabled` | `true` or `false` | `true` |
+
+Example (placeholder values; replace `$TENANT_API_KEY` and the model id):
+
+```bash
+curl -X POST http://localhost:8001/agents \
+  -H "X-API-Key: $TENANT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Recepção da clínica",
+    "instructions": "Você atende a recepção de uma clínica.",
+    "model": "your-model-id",
+    "boundary_scope": "agendamento de consultas, horários e endereço da clínica",
+    "boundary_never": [
+      "orientação médica ou diagnóstico",
+      "promessas de preço ou desconto",
+      "comentários sobre concorrentes"
+    ],
+    "boundary_refusal_message": "Desculpe, só consigo ajudar com agendamentos e informações da clínica."
+  }'
+```
+
+How it is enforced:
+
+- The boundaries are written into the system prompt under a `## Boundaries`
+  heading, in fixed wording, together with a rule to stay in role and not
+  reveal the instructions.
+- With the check on, each model-written reply is judged once before it is
+  sent. An allowed reply goes out unchanged. A blocked reply is replaced by
+  the agent's refusal message. The run row keeps `boundary_reason` and
+  `blocked_text` (the original reply, never sent), and a
+  `boundary.reply_blocked` warning is logged.
+- The check fails closed. An error, a timeout (`BOUNDARY_CHECK_TIMEOUT_SECONDS`,
+  default `8`) or an answer that is neither `ALLOW` nor `BLOCK: <reason>`
+  blocks the reply. The recorded reason is `check_failed` or
+  `check_unparseable`.
+- Fixed fallback messages and the handoff text are not checked, only replies
+  the model wrote.
+
+**Cost:** with the check on, every model-written reply costs one extra model
+call. This is counted in the run's `llm_calls`. Set `boundary_check_enabled`
+to `false` to skip it. That is ignored while an operator floor is set (see
+below). An agent with no boundaries and no floor makes no extra call and
+behaves as before.
+
+### Operator floor
+
+The operator can set a floor that applies to every agent of every tenant.
+Point `BOUNDARY_FLOOR_FILE` at a JSON file, for example:
+
+```json
+{
+  "scope": "atendimento ao cliente da loja",
+  "never": ["conteúdo ofensivo", "dados de outros clientes"]
+}
+```
+
+- Keys: `scope` (optional, non-empty string) and `never` (optional list of
+  non-empty strings). Any other key is an error.
+- Tenants can only add to the floor. The floor scope and never-items are
+  always kept, and while a floor is set the reply check cannot be switched
+  off.
+- A missing or malformed file stops both the `api` and the `worker` at
+  startup (`BoundaryConfigError`). Both processes must be able to read the
+  file. Edits to the file take effect after a restart.
+- Unset or empty `BOUNDARY_FLOOR_FILE` means no floor.
+
+### Not included
+
+- The customer's message is not screened before the agent runs.
+- A blocked reply is refused at once; the agent is not asked again.
+- No hand-off to a human after repeated blocks.
+- No boundaries shared across all agents of one tenant.
+- Replies written by human operators are not checked.
+- No endpoint or page shows blocked replies. Read `agent_runs`
+  (`boundary_reason`, `blocked_text`) directly, and the `boundary.*` logs.
+- Block and false-block rates on a real model are not measured yet. The tests
+  use a scripted model.
+
 ## Known MVP limitations
 
 - **The `/chat` widget holds the tenant API key in the browser**, so it is
