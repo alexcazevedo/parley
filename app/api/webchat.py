@@ -8,27 +8,90 @@ path (see PRODUCT.md: "it never bypasses the pipeline").
 
 import logging
 import uuid
+from collections.abc import Callable, Coroutine
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.types import Message
 
 from app.api.deps import get_current_tenant, get_db, get_redis
 from app.channels.base import IncomingMedia
 from app.channels.registry import get_adapter
+from app.config import get_settings
+from app.media.sniff import sniff_mime
 from app.messages.ingest import MediaRejected, ingest
 from app.models.channel import Channel
 from app.models.tenant import Tenant
 from app.queue.redis_queue import RedisQueue
 from app.repositories.channels import ChannelsRepository
 from app.security.limits import check_message_size
-from app.security.ratelimit import check_rate_limit
+from app.security.ratelimit import enforce_inbound_limits
 
 logger = logging.getLogger(__name__)
 
+_CHUNK_SIZE = 64 * 1024
+_MULTIPART_OVERHEAD = 1_048_576
+
+
+class CappedBodyRoute(APIRoute):
+    """Cap the request body of one route by bytes actually received. A
+    `Content-Length` over the media cap plus multipart overhead is a 413
+    before the body is read; regardless of the header, the bytes of every
+    `http.request` message are counted and the request is cut off with a 413
+    once the total passes the cap.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        original = super().get_route_handler()
+
+        async def handler(request: Request) -> Response:
+            limit = get_settings().media_max_bytes + _MULTIPART_OVERHEAD
+            if request.method == "POST":
+                raw = request.headers.get("content-length")
+                if raw is not None and raw.strip().isdigit() and int(raw) > limit:
+                    raise _too_large()
+
+            inner = request.receive
+            received = 0
+
+            async def counting_receive() -> Message:
+                nonlocal received
+                message = await inner()
+                if message["type"] == "http.request":
+                    received += len(message.get("body", b""))
+                    if received > limit:
+                        raise _too_large()
+                return message
+
+            request._receive = counting_receive
+            return await original(request)
+
+        return handler
+
+
+def _too_large() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        detail="request body too large",
+    )
+
+
 router = APIRouter(prefix="/channels/webchat", tags=["webchat"])
+media_router = APIRouter(route_class=CappedBodyRoute)
 
 
 class WebChatMessageIn(BaseModel):
@@ -107,11 +170,7 @@ async def post_webchat_message(
 ) -> IngestOut:
     channel = await resolve_channel(db, tenant, payload.channel_id)
 
-    # Rate limit: channel_id:user_id
-    from app.config import get_settings
-    settings = get_settings()
-    user_key = f"{payload.channel_id}:{payload.user_id}"
-    await check_rate_limit(redis, "user", user_key, settings.rate_limit_user_per_min)
+    await enforce_inbound_limits(redis, tenant.id, channel.id, payload.user_id)
 
     # Size limit: strict enforcement (413 if exceeded)
     within_limit, _message = check_message_size(
@@ -127,7 +186,11 @@ async def post_webchat_message(
     )
 
 
-@router.post("/media", response_model=IngestOut, status_code=status.HTTP_201_CREATED)
+@media_router.post(
+    "/media",
+    response_model=IngestOut,
+    status_code=status.HTTP_201_CREATED,
+)
 async def post_webchat_media(
     channel_id: uuid.UUID = Form(...),
     user_id: str = Form(...),
@@ -138,36 +201,38 @@ async def post_webchat_media(
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ) -> IngestOut:
-    """Upload path for `/chat`'s attach-a-photo/voice-note flow. Type is
-    derived from the file's content-type, not client-supplied — `image/*` /
-    `audio/*` map to `image`/`audio`, anything else is a 415.
+    """Upload path for `/chat`'s attach-a-photo/voice-note flow. The type and
+    stored mime are decided from the file's content (magic bytes); the client's
+    content type is ignored. Unknown content is a 415, oversize a 413.
     """
     channel = await resolve_channel(db, tenant, channel_id)
 
-    # Rate limit: channel_id:user_id (same scope as the text endpoint)
-    from app.config import get_settings
-    settings = get_settings()
-    user_key = f"{channel_id}:{user_id}"
-    await check_rate_limit(redis, "user", user_key, settings.rate_limit_user_per_min)
-
-    content_type = (file.content_type or "").split(";", 1)[0].strip()
-    if content_type.startswith("image/"):
-        media_type = "image"
-    elif content_type.startswith("audio/"):
-        media_type = "audio"
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"unsupported content type: {content_type!r}",
-        )
+    await enforce_inbound_limits(redis, tenant.id, channel.id, user_id)
 
     caption_text = caption or ""
     within_limit, _message = check_message_size(caption_text, enforce_strict=True)
     if not within_limit:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
 
-    data = await file.read()
-    media = IncomingMedia(data=data, mime=content_type, filename=file.filename)
+    max_bytes = get_settings().media_max_bytes
+    buffer = bytearray()
+    while chunk := await file.read(_CHUNK_SIZE):
+        buffer.extend(chunk)
+        if len(buffer) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="media exceeds max size",
+            )
+    data = bytes(buffer)
+
+    sniffed = sniff_mime(data)
+    if sniffed is None:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="unsupported media content",
+        )
+    media_type = sniffed.split("/", 1)[0]
+    media = IncomingMedia(data=data, mime=sniffed, filename=file.filename)
 
     return await ingest_message(
         db,
@@ -180,3 +245,6 @@ async def post_webchat_media(
         media=media,
         media_type=media_type,
     )
+
+
+router.include_router(media_router)

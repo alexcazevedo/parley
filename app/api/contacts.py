@@ -13,6 +13,7 @@ from app.api.deps import get_current_tenant, get_db
 from app.memory.service import MemoryService
 from app.models.memory import Memory, MemoryType
 from app.models.tenant import Tenant
+from app.repositories.channels import ChannelsRepository
 from app.repositories.contacts import ContactsRepository
 
 router = APIRouter(prefix="/contacts", tags=["contacts"])
@@ -51,6 +52,10 @@ async def create_contact(
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> ContactOut:
+    if await ChannelsRepository(db).get(tenant.id, payload.channel_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="channel not found"
+        )
     try:
         contact = await _repo(db).create(tenant.id, **payload.model_dump())
         await db.commit()

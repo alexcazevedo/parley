@@ -81,7 +81,7 @@ async def test_image_payload_stores_media_and_enqueues_job(client, fake_redis, m
     message = await _first_message(client, headers)
     assert message["type"] == "image"
     assert message["content"] == "olha isso"
-    assert message["media_mime"] == "image/jpeg"
+    assert message["media_mime"] == "image/png"  # sniffed, not the declared jpeg
 
     assert await fake_redis.llen(JOBS_KEY) == 1
 
@@ -113,7 +113,7 @@ async def test_audio_payload_normalizes_mime_and_stores_media(client, fake_redis
     message = await _first_message(client, headers)
     assert message["type"] == "audio"
     assert message["content"] == ""
-    assert message["media_mime"] == "audio/ogg"
+    assert message["media_mime"] == "audio/mpeg"  # sniffed, not the declared ogg
 
     assert await fake_redis.llen(JOBS_KEY) == 1
 

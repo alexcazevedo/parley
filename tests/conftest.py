@@ -26,6 +26,8 @@ _TEST_DB_NAME = TEST_DATABASE_URL.rsplit("/", 1)[1]
 
 os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
 os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
+# Existing tests use the demo surface (/chat/bootstrap, /dev/messages).
+os.environ.setdefault("DEMO_MODE", "true")
 
 
 def _ensure_valid_secrets_key() -> None:

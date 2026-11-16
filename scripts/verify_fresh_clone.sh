@@ -23,7 +23,7 @@ git add -A
 uv sync
 
 echo "step 5: import app.main"
-uv run python -c "import app.main"
+DEMO_MODE=true uv run python -c "import app.main"
 
 echo "step 6: guard test passes on clean tree"
 uv run pytest tests/test_repo_tracked.py -q

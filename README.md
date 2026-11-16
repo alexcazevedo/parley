@@ -87,7 +87,19 @@ checkpoints; the conversation re-runs with the full batch.
 
 ```bash
 cp .env.example .env
-# then edit .env: set a real LLM_API_KEY (OpenAI or any OpenAI-compatible
+# then edit .env. Before first boot you MUST set real values for
+# ADMIN_API_KEY and SECRETS_KEY (a Fernet key; generate one with
+# `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`).
+# The api and worker refuse to start while either still has the shipped
+# placeholder, unless DEMO_MODE=true. With DEMO_MODE=true the placeholder
+# SECRETS_KEY lets the app boot, but it cannot encrypt: creating a channel
+# with a `secret` or a tool with `auth_config` then returns 500. Demo users
+# who need those features must set a real SECRETS_KEY (same command as above).
+#
+# For the local demo set DEMO_MODE=true as well. It mounts /chat,
+# POST /chat/bootstrap and POST /dev/messages, which are what /chat,
+# scripts/demo.py and scripts/demo_media.py use; it is off by default.
+# Also set a real LLM_API_KEY (OpenAI or any OpenAI-compatible
 # endpoint — OpenRouter, Ollama, vLLM, ...) for the live demo. Everything
 # else in .env.example has a working default for local Docker Compose.
 
@@ -97,9 +109,9 @@ docker compose up -d --build
 # fake business endpoint).
 
 # operator page: http://localhost:8001/operator (paste the tenant API key;
-# the demo key is prefilled)
+# the key is prefilled only in demo mode — otherwise you paste it yourself)
 
-# web chat page: http://localhost:8001/chat — besides typing, the composer
+# web chat page (DEMO_MODE=true only): http://localhost:8001/chat — besides typing, the composer
 # has a 📎 button (attach a photo or audio file) and a 🎤 button (record a
 # voice note in the browser via MediaRecorder, click again to send it).
 # Both pages (/chat and /operator) render image messages as thumbnails and
@@ -157,12 +169,13 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
 | Route | Purpose |
 |---|---|
 | `POST /tenants` | admin-only; returns the tenant's `api_key` (shown once) |
-| `POST /agents`, `/channels`, `/tools` | configure an agent, a channel, a business tool |
-| `POST /channels/webchat/messages` | Web Chat ingestion (the only channel a customer's own widget talks to) |
-| `POST /channels/webchat/media` | Web Chat media upload (multipart: `channel_id`, `user_id`, `file`, optional `caption`/`message_id`) — a photo or voice note, same pipeline as text |
+| `POST /agents`, `/channels`, `/tools` | configure an agent, a channel, a business tool. Ids in the body (`agent_id`, `channel_id`) must belong to the caller's tenant, otherwise 422 (`agent not found` / `channel not found`). On create and update a tool `endpoint` is rejected with 422 `invalid endpoint: ...` when its host is `localhost`, `*.localhost`, `*.local`, `*.internal`, or an IP literal in any IPv4 notation (`127.1`, `0x7f000001`, ...) or IPv6 that is not globally routable (e.g. `http://100.64.0.1/x`). Other hostnames pass at create; DNS resolution and the check of every returned address happen only at call time, where a host resolving to a private IP is refused. Tool requests send `Accept-Encoding: identity`; a response with any other `Content-Encoding` is a failed result (`unsupported response encoding`) |
+| `POST /channels/webchat/messages` | Web Chat ingestion for server-side callers holding a tenant key. Per-user then per-tenant rate limits apply (fixed one-minute windows; a user already over their own limit does not count toward the tenant limit): over the limit -> 429 |
+| `POST /channels/webchat/media` | Web Chat media upload (multipart: `channel_id`, `user_id`, `file`, optional `caption`/`message_id`) — a photo or voice note, same pipeline as text. No `Content-Length` is required. The cap counts bytes actually received: a body over `MEDIA_MAX_BYTES` + 1 MiB -> 413 `request body too large`, a file over `MEDIA_MAX_BYTES` -> 413 `media exceeds max size`; the media type is decided from the file content, not the client header (unknown content -> 415) |
 | `GET /media/{message_id}` | tenant-scoped media download (`X-API-Key` required) — serves the file behind an image/audio message, used by `/chat` and `/operator` to render thumbnails/players |
-| `POST /dev/messages` | dev simulator — same pipeline as Web Chat, for scripting demos |
-| `POST /webhooks/whatsapp/{channel_id}` | Evolution API inbound webhook |
+| `POST /chat/bootstrap`, `GET /chat` | **demo-only** (`DEMO_MODE=true`; 404 otherwise): unauthenticated tenant bootstrap and the built-in chat page. Outside demo mode the demo tenant key (`WEBCHAT_DEMO_API_KEY`) is refused with 401 like any unknown key |
+| `POST /dev/messages` | **demo-only** (`DEMO_MODE=true`; 404 otherwise): dev simulator — same pipeline as Web Chat, for scripting demos |
+| `POST /webhooks/whatsapp/{channel_id}` | Evolution API inbound webhook. Tenant and channel come from the authenticated channel, never from the payload. When the user or tenant rate limit is exceeded it still answers 200 `{"status": "rate_limited"}`: the message is stored (media as `[mídia não recebida]`) and visible to operators, but no agent turn runs, and a warning is logged |
 | `GET /conversations/{id}/messages` | poll for replies (`?include_tools=false` by default; `?after=<timestamp>`) |
 | `POST /conversations/{id}/messages` | operator reply (typically while `HUMAN_HANDOFF`) |
 | `POST /conversations/{id}/handoff` / `/resume` / `/close` | conversation state transitions |
@@ -184,6 +197,15 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
 
 ## Known MVP limitations
 
+- **The `/chat` widget holds the tenant API key in the browser**, so it is
+  demo-only (`DEMO_MODE=true`) and not mounted by default. For real end
+  customers, call the webchat channel API from your own server with the
+  tenant key. An end-user-scoped token is tracked in `docs/FOLLOW_UPS.md`
+  (PRD E2.6).
+- **`TOOL_ALLOWED_HOSTS` in `docker-compose.yml`**: the compose file sets
+  `TOOL_ALLOWED_HOSTS: mock-tools` for `api` and `worker`. The allowlist is
+  authoritative, so with the default compose file every other tool endpoint
+  gets 422 at create. Remove or extend the variable for real tools.
 - **DNS-rebinding TOCTOU on the SSRF guard**: the allowed-IP check resolves
   the tool endpoint's hostname once before the request; `httpx` re-resolves
   it when it actually connects, so a DNS-rebinding attacker could in theory

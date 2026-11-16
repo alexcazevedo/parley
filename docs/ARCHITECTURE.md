@@ -10,7 +10,8 @@ how to run it.
 app/
   api/            REST routers (tenants, agents, channels, tools, contacts,
                    conversations, webchat, dev, webhooks, health, chat,
-                   operator). Every router is thin: parse/validate ->
+                   operator). `chat` and `dev` are mounted only when
+                   `DEMO_MODE=true` (`create_app`); otherwise they 404. Every router is thin: parse/validate ->
                    repository or service -> commit -> response model. Auth
                    deps live in app/security/auth.py (X-Admin-Key, X-API-Key).
                    operator.py serves the self-contained operator inbox page
@@ -50,7 +51,11 @@ app/
                    in/out of HUMAN_HANDOFF.
   memory/         MemoryService — long-term facts about a contact.
   security/       auth (API key hashing/lookup), secrets (Fernet encryption
-                   for tool auth_config / channel secrets), ratelimit,
+                   for tool auth_config / channel secrets), ratelimit
+                   (Redis counters, atomic; per-user then tenant-wide limits
+                   via enforce_inbound_limits — webchat answers 429, the
+                   WhatsApp webhook answers 200 `rate_limited` and stores
+                   the message without enqueuing a turn),
                    limits (message size).
   queue/          Queue Protocol + RedisQueue (BRPOPLPUSH-alike job list +
                    a dead-letter list).
@@ -214,10 +219,17 @@ Two sources merged by `ToolRegistry`, in priority order:
    claims every name (it needs a `ToolContext`/session to know what actually
    exists), so it is always registered last. Schema-validates arguments
    (`app/tools/validation.py`) before ever making a request, guards the
-   endpoint against SSRF (`app/tools/ssrf.py` — blocks private/loopback/
-   link-local/reserved addresses and disallows redirects; a
-   `TOOL_ALLOWED_HOSTS` allowlist bypasses the IP check for known-safe
-   internal hosts, e.g. the demo's `mock-tools`), and records a
+   endpoint against SSRF (`app/tools/ssrf.py` — only globally routable
+   addresses are allowed and redirects are disallowed; the endpoint is also
+   validated, without DNS, when a tool is created or updated — that create-time
+   check rejects `localhost`/`*.localhost`/`*.local`/`*.internal` names and
+   non-global IP literals in any IPv4 notation; other hostnames are checked
+   only at call time, when every resolved address must be global. Requests
+   send `Accept-Encoding: identity` and a response with another
+   `Content-Encoding` fails as `unsupported response encoding`. Settings come
+   from `get_settings()`: when `TOOL_ALLOWED_HOSTS` is set it is
+   authoritative — listed hosts skip the IP check, e.g. the demo's
+   `mock-tools`, and all other hosts are refused), and records a
    `ToolExecution` row (arguments, result, status, latency, error) whether it
    succeeds or fails. Every failure mode — invalid arguments, SSRF block,
    timeout, HTTP error, non-2xx response — comes back as
@@ -334,7 +346,7 @@ barge-in) gets special-cased media behavior (PRODUCT.md).
    through `app.media.storage` (tenant-scoped local filesystem under
    `MEDIA_ROOT`, one `media_key` per file) and persists a `Message` with
    `type` `image` or `audio` (content empty except a webchat caption).
-   Oversize or disallowed-mime uploads raise `MediaRejected` (413/415) before
+   Oversize uploads (bytes counted as received, no `Content-Length` needed) and content that sniffs as an unsupported type (`app/media/sniff.py`, not the client header) raise `MediaRejected` (413/415) before
    anything is written. Video, documents, stickers, locations, contacts get
    a persisted `unsupported` message instead of being dropped.
 3. **Worker STT** (`app.media.prepare.prepare_media_messages`): before a
@@ -383,7 +395,8 @@ surface `/chat` gives an end user — see PRODUCT.md "Operator UI".
 
 - **Key gate**: on load the page reads the tenant `X-API-Key` from
   `localStorage["harness_operator_api_key"]`; if absent it shows a small
-  form (prefilled with the demo key) instead of any page content. Every
+  form (prefilled with the demo key only when `/chat/bootstrap` answers,
+  i.e. in demo mode) instead of any page content. Every
   fetch sends the stored key; a `401`/`403` from any call clears it and
   re-shows the gate — there is no separate login/session endpoint.
 - **Inbox / Ativas**: two tabs over the same `GET /conversations` list —

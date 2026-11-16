@@ -18,7 +18,7 @@ import structlog
 from redis.asyncio import Redis
 
 from app.agents.runtime import AgentRuntime
-from app.config import get_settings
+from app.config import assert_secure_settings, get_settings
 from app.conversations import debounce
 from app.conversations.turn import AnyTurnRuntime
 
@@ -78,6 +78,7 @@ async def run_once(
 
 async def main() -> None:
     settings = get_settings()
+    assert_secure_settings(settings)
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     queue = RedisQueue(redis)
 

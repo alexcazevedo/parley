@@ -3,6 +3,20 @@
 Known gaps and next candidates, collected across forge runs. Each is a
 plausible `/forge:idea` starting point. Not ordered by priority.
 
+## From the security run
+
+- **End-user-scoped webchat token (PRD E2.6).** The built-in `/chat`
+  widget keeps the tenant API key in the browser, so it is demo-only
+  (`DEMO_MODE=true`). A real browser widget needs a short-lived token
+  scoped to one end user/contact and channel (minted server-side with the
+  tenant key), accepted only by the webchat message/media/poll routes.
+- **Evolution `base_url` has no SSRF check and `fetch_media` reads the
+  whole response into memory** (`app/channels/evolution.py`). Apply the
+  tool SSRF guard to the channel `base_url` and cap the bytes read.
+- **Agent loaded without tenant scope** in `app/agents/runtime.py`,
+  `app/conversations/turn.py`, `app/handoff/summarizer.py`. Rows linked
+  across tenants before the E2.5 fix keep working until audited.
+
 ## From the inbound-media run (2026-08-25)
 
 - **Order-ID normalization for real tools.** Whisper renders pt-BR numbers

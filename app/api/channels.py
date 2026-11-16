@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_tenant, get_db
 from app.models.channel import ChannelType
 from app.models.tenant import Tenant
+from app.repositories.agents import AgentsRepository
 from app.repositories.channels import ChannelsRepository
 from app.security import secrets as secrets_crypto
 
@@ -49,12 +50,21 @@ def _repo(db: AsyncSession) -> ChannelsRepository:
     return ChannelsRepository(db)
 
 
+async def _require_agent(db: AsyncSession, tenant: Tenant, agent_id: uuid.UUID) -> None:
+    # Same answer for missing and foreign ids: no existence oracle.
+    if await AgentsRepository(db).get(tenant.id, agent_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="agent not found"
+        )
+
+
 @router.post("", response_model=ChannelOut, status_code=status.HTTP_201_CREATED)
 async def create_channel(
     payload: ChannelCreate,
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> ChannelOut:
+    await _require_agent(db, tenant, payload.agent_id)
     data = payload.model_dump()
     secret = data.pop("secret")
     if secret is not None:
@@ -93,7 +103,16 @@ async def update_channel(
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> ChannelOut:
+    if await _repo(db).get(tenant.id, channel_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="channel not found")
     changes = payload.model_dump(exclude_unset=True)
+    if "agent_id" in changes:
+        if changes["agent_id"] is None:
+            # A null agent_id is ignored: the column is non-null, so the
+            # channel keeps its current agent.
+            changes.pop("agent_id")
+        else:
+            await _require_agent(db, tenant, changes["agent_id"])
     if "secret" in changes:
         secret = changes.pop("secret")
         changes["secret_encrypted"] = secrets_crypto.encrypt(secret) if secret is not None else None

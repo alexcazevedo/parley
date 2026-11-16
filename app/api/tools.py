@@ -17,6 +17,7 @@ from app.api.deps import get_current_tenant, get_db
 from app.models.tenant import Tenant
 from app.repositories.tools import ToolsRepository
 from app.security import secrets as secrets_crypto
+from app.tools.ssrf import SSRFError, validate_tool_endpoint
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
@@ -58,6 +59,18 @@ def _repo(db: AsyncSession) -> ToolsRepository:
     return ToolsRepository(db)
 
 
+def _validate_endpoint(endpoint: str) -> None:
+    """Static SSRF check (no DNS) before anything is written; the full check,
+    with DNS, still runs on every call."""
+    try:
+        validate_tool_endpoint(endpoint)
+    except SSRFError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"invalid endpoint: {exc}",
+        ) from exc
+
+
 def _encode_auth_config(auth_config: dict[str, Any] | None) -> str | None:
     if auth_config is None:
         return None
@@ -70,6 +83,7 @@ async def create_tool(
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> ToolOut:
+    _validate_endpoint(payload.endpoint)
     data = payload.model_dump()
     auth_config = data.pop("auth_config")
     data["auth_config_encrypted"] = _encode_auth_config(auth_config)
@@ -114,6 +128,8 @@ async def update_tool(
     db: AsyncSession = Depends(get_db),
 ) -> ToolOut:
     changes = payload.model_dump(exclude_unset=True)
+    if "endpoint" in changes:
+        _validate_endpoint(changes["endpoint"] or "")
     if "auth_config" in changes:
         changes["auth_config_encrypted"] = _encode_auth_config(changes.pop("auth_config"))
     try:

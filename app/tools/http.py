@@ -17,6 +17,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.llm.base import ToolSpec
 from app.models.agent import Agent
 from app.models.tool import Tool
@@ -28,9 +29,6 @@ from app.tools.validation import validate_arguments
 
 logger = structlog.get_logger(__name__)
 
-# Non-JSON bodies are handed to the model as {"text": ...}; anything past this
-# is dead weight in the prompt.
-MAX_TEXT_BYTES = 8 * 1024
 # How much of an error body we quote back. Small on purpose: it goes into the
 # transcript and may contain the customer's internals.
 MAX_ERROR_BODY_CHARS = 500
@@ -103,8 +101,13 @@ class HttpToolExecutor:
 
     async def _call(self, tool: Tool, arguments: dict[str, Any]) -> ToolResult:
         await assert_safe_url(tool.endpoint)
+        cap = get_settings().tool_max_response_bytes
         method = (tool.method or "POST").upper()
-        headers = {"Accept": "application/json"} | self._auth_headers(tool)
+        # `identity`: a compressed body could expand far past the cap in memory.
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+        } | self._auth_headers(tool)
         params = None if method in BODY_METHODS else arguments
         body = arguments if method in BODY_METHODS else None
 
@@ -113,23 +116,35 @@ class HttpToolExecutor:
             # Redirects are the cheap way around the SSRF check (see ssrf.py).
             follow_redirects=False,
         ) as client:
-            response = await client.request(
+            async with client.stream(
                 method, tool.endpoint, params=params, json=body, headers=headers
-            )
+            ) as response:
+                status_code = response.status_code
+                encoding = response.headers.get("content-encoding", "identity")
+                if encoding.strip().lower() not in ("", "identity"):
+                    return ToolResult.failure(
+                        "unsupported response encoding", status_code=status_code
+                    )
+                raw, truncated = await _read_capped(response, cap)
+                is_success = response.is_success
 
-        payload = self._parse(response)
-        meta = {"status_code": response.status_code}
-        if response.is_success:
-            return ToolResult.success(payload, **meta)
-        detail = response.text[:MAX_ERROR_BODY_CHARS]
-        return ToolResult.failure(f"HTTP {response.status_code}: {detail}".strip(), **meta)
+        meta: dict[str, Any] = {"status_code": status_code}
+        if truncated:
+            meta["truncated"] = True
+            logger.warning("tools.http.response_truncated", tool=tool.name, cap=cap)
+        if is_success:
+            return ToolResult.success(self._parse(raw, truncated), **meta)
+        detail = raw.decode("utf-8", errors="replace")[:MAX_ERROR_BODY_CHARS]
+        return ToolResult.failure(f"HTTP {status_code}: {detail}".strip(), **meta)
 
-    def _parse(self, response: httpx.Response) -> Any:
+    def _parse(self, raw: bytes, truncated: bool) -> Any:
+        if truncated:
+            # Never parse cut JSON.
+            return {"text": raw.decode("utf-8", errors="replace"), "truncated": True}
         try:
-            return response.json()
+            return json.loads(raw)
         except ValueError:
-            text = response.content[:MAX_TEXT_BYTES].decode("utf-8", errors="replace")
-            return {"text": text}
+            return {"text": raw.decode("utf-8", errors="replace")}
 
     def _auth_headers(self, tool: Tool) -> dict[str, str]:
         """Decrypt `auth_config` at call time. The token is never logged."""
@@ -211,6 +226,20 @@ class HttpToolExecutor:
         return ToolResult.failure(
             error or "tool execution failed", latency_ms=latency_ms, **(meta or {})
         )
+
+
+async def _read_capped(response: httpx.Response, cap: int) -> tuple[bytes, bool]:
+    """Read at most `cap` bytes; stop reading once more than `cap` arrived.
+
+    `aiter_raw` (not `aiter_bytes`): the cap applies to what is held in memory,
+    so nothing may be decompressed on the way.
+    """
+    buf = bytearray()
+    async for chunk in response.aiter_raw():
+        buf.extend(chunk)
+        if len(buf) > cap:
+            return bytes(buf[:cap]), True
+    return bytes(buf), False
 
 
 def _jsonable(value: Any) -> dict[str, Any] | None:

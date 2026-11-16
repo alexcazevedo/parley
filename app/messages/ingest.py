@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.channels.base import AUDIO_MIMES, IMAGE_MIMES, IncomingMessage
 from app.config import get_settings
 from app.conversations.resolver import resolve_contact_and_conversation
+from app.media.sniff import sniff_mime
 from app.media.storage import get_media_storage
 from app.models.message import Message, MessageDirection, MessageRole
 from app.queue.base import Job, Queue
@@ -53,7 +54,13 @@ async def _find_existing(
     return result.scalar_one_or_none()
 
 
-async def ingest(session: AsyncSession, queue: Queue, incoming: IncomingMessage) -> IngestResult:
+async def ingest(
+    session: AsyncSession, queue: Queue, incoming: IncomingMessage, *, enqueue: bool = True
+) -> IngestResult:
+    """Persist `incoming` idempotently. With `enqueue=False` the message row
+    is written (visible to operators) but no job is produced, so no agent
+    turn runs — used for rate-limited webhooks.
+    """
     _contact, conversation = await resolve_contact_and_conversation(session, incoming)
 
     media_key: str | None = None
@@ -68,6 +75,11 @@ async def ingest(session: AsyncSession, queue: Queue, incoming: IncomingMessage)
         settings = get_settings()
         if len(incoming.media.data) > settings.media_max_bytes:
             raise MediaRejected("media exceeds max size")
+
+        sniffed = sniff_mime(incoming.media.data)
+        if sniffed is None or sniffed.split("/", 1)[0] != incoming.type:
+            raise MediaRejected("unsupported media content")
+        mime = sniffed
 
         # Look up a duplicate before storing anything — no orphan file gets
         # written if this exact delivery was already ingested.
@@ -115,5 +127,8 @@ async def ingest(session: AsyncSession, queue: Queue, incoming: IncomingMessage)
             conversation_id=conversation.id, message_id=existing_id, duplicate=True
         )
 
-    await queue.enqueue(Job(conversation_id=conversation.id, message_id=inserted_id, attempt=0))
+    if enqueue:
+        await queue.enqueue(
+            Job(conversation_id=conversation.id, message_id=inserted_id, attempt=0)
+        )
     return IngestResult(conversation_id=conversation.id, message_id=inserted_id, duplicate=False)

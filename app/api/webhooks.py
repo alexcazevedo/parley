@@ -19,13 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_redis
 from app.channels.evolution import EvolutionAdapter, IgnoredEvent
-from app.config import get_settings
 from app.messages.ingest import MediaRejected, ingest
 from app.models.channel import Channel
 from app.queue.redis_queue import RedisQueue
 from app.security import secrets as secrets_crypto
 from app.security.limits import check_message_size
-from app.security.ratelimit import check_rate_limit
+from app.security.ratelimit import inbound_over_limit
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 logger = logging.getLogger(__name__)
@@ -51,10 +50,12 @@ async def whatsapp_webhook(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid apikey")
 
     adapter = EvolutionAdapter()
+    # Identity always comes from the authenticated channel row; payload keys
+    # are spread first so they can never override it.
     raw: dict[str, Any] = {
+        **payload,
         "tenant_id": str(channel.tenant_id),
         "channel_id": str(channel.id),
-        **payload,
     }
     try:
         incoming = adapter.parse_incoming(raw)
@@ -62,14 +63,18 @@ async def whatsapp_webhook(
         logger.info("ignoring evolution webhook event: %s", exc)
         return {"status": "ignored"}
 
-    # Rate limit: channel_id:external_user_id
-    settings = get_settings()
-    user_key = f"{channel_id}:{incoming.external_user_id}"
-    await check_rate_limit(
-        redis, "user", user_key, settings.rate_limit_user_per_min
+    # Over the inbound limit: never 429 (Evolution would drop or retry the
+    # message). Store it so operators see it, but skip media download and
+    # enqueue no job, so no agent turn runs.
+    rate_limited = await inbound_over_limit(
+        redis, channel.tenant_id, channel.id, incoming.external_user_id
     )
-
-    if incoming.type in ("image", "audio"):
+    if rate_limited:
+        if incoming.type in ("image", "audio"):
+            incoming.type = "unsupported"
+            incoming.content = "[mídia não recebida]"
+            incoming.media = None
+    elif incoming.type in ("image", "audio"):
         try:
             incoming.media = await adapter.fetch_media(incoming, channel)
         except Exception:
@@ -93,6 +98,17 @@ async def whatsapp_webhook(
             incoming.external_user_id,
         )
         incoming.content = message_to_store
+
+    if rate_limited:
+        await ingest(db, RedisQueue(redis), incoming, enqueue=False)
+        await db.commit()
+        logger.warning(
+            "webhook.rate_limited: tenant_id=%s, channel_id=%s, external_message_id=%s",
+            channel.tenant_id,
+            channel_id,
+            incoming.external_message_id,
+        )
+        return {"status": "rate_limited"}
 
     try:
         await ingest(db, RedisQueue(redis), incoming)

@@ -2,7 +2,11 @@
 
 from functools import lru_cache
 
+from cryptography.fernet import Fernet
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Shipped default for ADMIN_API_KEY; only accepted when DEMO_MODE is true.
+PLACEHOLDER_ADMIN_API_KEY = "changeme-admin-key"
 
 
 class Settings(BaseSettings):
@@ -10,7 +14,10 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://harness:harness@postgres:5432/harness"
     redis_url: str = "redis://redis:6379/0"
-    admin_api_key: str = "changeme-admin-key"
+    # Demo mode mounts the demo surface (`/chat` page, `/chat/bootstrap`,
+    # `/dev/*`) and is the only mode that boots on placeholder secrets.
+    demo_mode: bool = False
+    admin_api_key: str = PLACEHOLDER_ADMIN_API_KEY
     secrets_key: str = "changeme-fernet-key-base64=="
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = "changeme-llm-key"
@@ -27,6 +34,8 @@ class Settings(BaseSettings):
     tool_allowed_hosts: str = ""
     # Disables the SSRF guard entirely. Development only.
     tool_ssrf_disabled: bool = False
+    # Cap on bytes read from a customer-tool HTTP response.
+    tool_max_response_bytes: int = 32768
     # Fixed plaintext key for the seeded webchat demo tenant (ticket 12).
     # Dev/demo shortcut only — never rotated, never per-tenant.
     webchat_demo_api_key: str = "demo-webchat-key"
@@ -57,6 +66,33 @@ class Settings(BaseSettings):
     stt_model: str = "whisper-1"
     stt_language: str = "pt"
     stt_timeout_seconds: float = 20.0
+
+
+class InsecureSettingsError(RuntimeError):
+    """Raised at boot when non-demo settings still carry placeholder secrets."""
+
+
+def assert_secure_settings(settings: Settings) -> None:
+    """Refuse placeholder/invalid secrets unless demo mode is on.
+
+    Error messages name the env var but never include the value.
+    """
+    if settings.demo_mode:
+        return
+    if not settings.admin_api_key or settings.admin_api_key == PLACEHOLDER_ADMIN_API_KEY:
+        raise InsecureSettingsError(
+            "ADMIN_API_KEY is empty or the shipped placeholder; set a real value "
+            "(placeholders are only accepted with DEMO_MODE=true)"
+        )
+    try:
+        Fernet(settings.secrets_key.encode())
+    except Exception:
+        raise InsecureSettingsError(
+            "SECRETS_KEY is not a valid Fernet key; generate one with "
+            "`python -c \"from cryptography.fernet import Fernet; "
+            "print(Fernet.generate_key().decode())\"` "
+            "(placeholders are only accepted with DEMO_MODE=true)"
+        ) from None
 
 
 @lru_cache

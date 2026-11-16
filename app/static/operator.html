@@ -122,7 +122,14 @@
   const convColEl = document.getElementById("conv-col");
   const tabEls = document.querySelectorAll(".tab");
 
-  gateInput.value = "demo-webchat-key";
+  // Demo mode only: the server hands out a key at /chat/bootstrap; elsewhere it is 404.
+  fetch("/chat/bootstrap", { method: "POST" })
+    .then(async (res) => {
+      if (!res.ok) return;
+      const body = await res.json();
+      if (!gateInput.value && body && body.api_key) gateInput.value = body.api_key;
+    })
+    .catch(() => {});
 
   let apiKey = null;
   let activeTab = "inbox";
@@ -300,15 +307,6 @@
   function renderConversationPane() {
     const c = selectedConversation;
     const isInbox = c.state === "HUMAN_HANDOFF";
-    let briefHtml = "";
-    if (c.latest_handoff) {
-      const by = REQUESTED_BY_LABEL[c.latest_handoff.requested_by] || c.latest_handoff.requested_by;
-      const summary = c.latest_handoff.summary || "Resumo indisponível";
-      briefHtml =
-        '<div id="brief"><b>Handoff solicitado por ' + by + '</b>' +
-        (c.latest_handoff.reason ? " — " + c.latest_handoff.reason : "") +
-        "<br>" + summary + "</div>";
-    }
     let actionsHtml;
     if (isInbox) {
       actionsHtml =
@@ -326,8 +324,23 @@
         '<button id="assumir-btn">Assumir</button>' +
         "</div></div>";
     }
-    convColEl.innerHTML =
-      briefHtml + '<div id="messages"></div>' + actionsHtml;
+    convColEl.innerHTML = '<div id="messages"></div>' + actionsHtml;
+    if (c.latest_handoff) {
+      const by = REQUESTED_BY_LABEL[c.latest_handoff.requested_by] || c.latest_handoff.requested_by;
+      const brief = document.createElement("div");
+      brief.id = "brief";
+      const bold = document.createElement("b");
+      bold.textContent = "Handoff solicitado por " + by;
+      brief.appendChild(bold);
+      if (c.latest_handoff.reason) {
+        brief.appendChild(document.createTextNode(" — " + c.latest_handoff.reason));
+      }
+      brief.appendChild(document.createElement("br"));
+      brief.appendChild(
+        document.createTextNode(c.latest_handoff.summary || "Resumo indisponível")
+      );
+      convColEl.prepend(brief);
+    }
 
     if (isInbox) {
       const input = document.getElementById("reply-input");
