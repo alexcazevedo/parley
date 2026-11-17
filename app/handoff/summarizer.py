@@ -18,6 +18,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.loading import load_conversation_agent
 from app.handoff.service import HandoffService
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage
 from app.llm.factory import get_provider, resolve_model
@@ -82,7 +83,8 @@ async def generate_handoff_summary(
 async def _generate(
     session: AsyncSession, conversation: Conversation, reason: str | None
 ) -> str | None:
-    agent = await session.get(Agent, conversation.agent_id)
+    # Missing or another tenant's agent: no brief (the loader logs a mismatch).
+    agent = await load_conversation_agent(session, conversation)
     if agent is None:
         logger.warning(
             "handoff.summary_skipped_missing_agent", conversation_id=str(conversation.id)

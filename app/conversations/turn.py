@@ -43,6 +43,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.context import render_message_text
+from app.agents.loading import load_conversation_agent
 from app.agents.sentiment import score_frustration
 from app.channels.base import ChannelAdapter, OutgoingMessage
 from app.channels.registry import get_adapter
@@ -59,6 +60,7 @@ from app.models.contact import Contact
 from app.models.conversation import Conversation, ConversationState
 from app.models.handoff import HandoffRequestedBy
 from app.models.message import Message, MessageDirection, MessageRole
+from app.tools.ssrf import SSRFError
 
 logger = structlog.get_logger(__name__)
 
@@ -131,8 +133,10 @@ async def process_turn(
     """Run one turn for `conversation_id` over `messages` (arrival order).
 
     Returns the persisted assistant message, or `None` when no reply was
-    produced (unknown conversation, empty batch, or a conversation that is not
-    `ACTIVE_AI` — a human is driving it, so the AI stays quiet).
+    produced (unknown conversation, empty batch, a conversation that is not
+    `ACTIVE_AI` — a human is driving it, so the AI stays quiet — or one whose
+    agent is missing or belongs to another tenant, or whose channel endpoint
+    the SSRF check refuses: the turn is refused, nothing is sent or written).
 
     Returns `Superseded` instead when `supersede_check` reported a newer
     inbound message at one of the two checkpoints: the reply (or its remaining
@@ -154,17 +158,37 @@ async def process_turn(
         )
         return None
 
-    # Voice notes are transcribed before anything else touches the batch, so
-    # the read receipt, sentiment scoring and the joined `input_text` all see
-    # the transcript rather than an empty audio message.
-    await prepare_media_messages(session, messages)
+    # Refusals come first, before any model, tool, speech-to-text or outbound
+    # call, so a refused turn costs nothing and writes nothing.
+    #
+    # Tenant-scoped agent (PRODUCT.md F3): a conversation whose agent is
+    # missing or belongs to another tenant (a row left by an older version)
+    # gets no read receipt, no reply and no AgentRun, whatever the runtime —
+    # EchoRuntime included.
+    agent = await load_conversation_agent(session, conversation)
+    if agent is None:
+        logger.warning("turn.refused_agent_unavailable", conversation_id=str(conversation_id))
+        return None
 
     # Loaded before the runtime runs: `humanize` decides whether the inbound
     # batch gets a read receipt *before* we start "typing".
     channel = await session.get(Channel, conversation.channel_id)
     contact = await session.get(Contact, conversation.contact_id)
     assert channel is not None and contact is not None, "conversation has dangling FKs"
+
     adapter = get_adapter(channel.type)
+    # Channel endpoint (PRODUCT.md F1): a stored `base_url` the SSRF check
+    # refuses would only fail at `send_message`, after the model and tools ran,
+    # and the exception would hold up the rest of the scheduler tick. Ask up
+    # front and return quietly instead.
+    if not await _channel_endpoint_ok(adapter, channel, conversation_id):
+        return None
+
+    # Voice notes are transcribed before anything else touches the batch, so
+    # the read receipt, sentiment scoring and the joined `input_text` all see
+    # the transcript rather than an empty audio message.
+    await prepare_media_messages(session, messages)
+
     humanized = bool((channel.config or {}).get("humanize"))
 
     if humanized:
@@ -180,8 +204,7 @@ async def process_turn(
     # context builder produces from the same rows.
     input_text = "\n".join(render_message_text(message) for message in messages)
 
-    agent = await session.get(Agent, conversation.agent_id)
-    if agent is not None and agent.sentiment_escalation_enabled:
+    if agent.sentiment_escalation_enabled:
         escalation = await _maybe_escalate_on_sentiment(
             session, conversation, agent, adapter, contact, channel, humanized, input_text
         )
@@ -224,6 +247,31 @@ async def process_turn(
         message_count=len(messages),
     )
     return reply
+
+
+async def _channel_endpoint_ok(
+    adapter: ChannelAdapter, channel: Channel, conversation_id: uuid.UUID
+) -> bool:
+    """False (and a warning) when the channel's outbound endpoint is refused.
+
+    Every registered adapter subclasses `ChannelAdapter` and so has
+    `check_endpoint`; the `getattr` only spares duck-typed test doubles
+    (recording adapters swapped in for `get_adapter`), which have no endpoint.
+    The adapter's own outbound calls re-check regardless.
+    """
+    check_endpoint = getattr(adapter, "check_endpoint", None)
+    if check_endpoint is None:
+        return True
+    try:
+        await check_endpoint(channel)
+    except SSRFError:
+        logger.warning(
+            "turn.refused_channel_endpoint",
+            conversation_id=str(conversation_id),
+            channel_id=str(channel.id),
+        )
+        return False
+    return True
 
 
 async def _reply_unsupported_media(
@@ -481,7 +529,7 @@ async def _maybe_summarize(
     `EchoRuntime`) are simply skipped.
     """
     try:
-        agent = await session.get(Agent, conversation.agent_id)
+        agent = await load_conversation_agent(session, conversation)
         if agent is None:
             return
         provider_for = getattr(runtime, "llm_provider", None)

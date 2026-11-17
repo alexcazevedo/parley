@@ -186,6 +186,21 @@ same conversation.
    way, with a fixed "technical problem" message — a broken turn must not
    cost the user a reply.
 
+### Tenant-scoped agent loading
+
+Every place that needs the agent of a conversation (`process_turn`,
+`AgentRuntime.run_turn`, the rolling summary in `app/conversations/turn.py`
+and `generate_handoff_summary` in `app/handoff/summarizer.py`) goes through
+`load_conversation_agent` (`app/agents/loading.py`). It returns the agent only
+when it belongs to the conversation's tenant. Otherwise it logs
+`agent.tenant_mismatch` (conversation, agent and both tenant ids) and returns
+`None`. Then `process_turn` logs `turn.refused_agent_unavailable` and returns
+`None`: nothing is sent (not even a read receipt), no `AgentRun` is written
+and nothing is committed. `run_turn` raises `RuntimeError`, and the rolling
+summary and the handoff brief are skipped without a model call. The API
+refuses to create such links; they can only exist in rows written by an older
+version. `python -m app.audit` lists them (see README, "After upgrading").
+
 ### Boundaries in a turn
 
 Boundaries (see README "Agent boundaries") sit at two points of a turn:
@@ -392,6 +407,29 @@ barge-in) gets special-cased media behavior (PRODUCT.md).
    Both fetch `GET /media/{message_id}` (tenant-scoped, `X-API-Key`
    required) client-side and turn the response into an object URL, since
    `<img>`/`<audio>` tags can't set request headers.
+
+**Channel endpoint guard.** The Evolution `config.base_url` is tenant input,
+so it gets the same address rules as tool endpoints
+(`validate_channel_base_url` and `assert_safe_channel_url` in
+`app/tools/ssrf.py`). `app/api/channels.py` runs the static check, without
+DNS, on create and update (422 `invalid base_url: ...`).
+`EvolutionAdapter._connection` runs the full check, with DNS, before every
+outbound call (media download, send, read receipt, typing): a refusal logs
+`channel.endpoint_refused` and raises `SSRFError`, and every client in the
+adapter has `follow_redirects=False`. An operator reply through a refused
+channel answers 502 `channel endpoint refused`. The one operator override is
+`CHANNEL_ALLOWED_HOSTS` (`Settings.channel_allowed_hosts`): listed hosts skip
+the address check, all others must still be public. `TOOL_ALLOWED_HOSTS` and
+`TOOL_SSRF_DISABLED` do not apply to channels. The DNS-rebinding gap noted
+for tools applies here too (see `docs/FOLLOW_UPS.md`).
+
+**Capped media download.** `EvolutionAdapter.fetch_media` reads the response
+in chunks and stops at `media_max_bytes * 4 // 3 + 65_536` raw bytes (base64
+overhead plus headroom). A response with a non-identity `Content-Encoding`,
+or decoded media over `MEDIA_MAX_BYTES`, is refused too. Each case raises
+`MediaTooLarge`; the webhook logs `webhook.media_fetch_failed`, stores an
+`unsupported` message with content `[mídia não recebida]`, writes no file and
+still answers 200.
 
 Settings (`app/config.py`): `MEDIA_ROOT` (storage root, a shared Docker
 volume between `api` and `worker` in compose), `LLM_VISION_ENABLED`,

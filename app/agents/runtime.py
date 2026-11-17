@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.boundaries import check_reply, effective_boundaries
 from app.agents.context import ContextBuilder
+from app.agents.loading import load_conversation_agent
 from app.config import Settings, get_settings
 from app.llm.base import ROLE_ASSISTANT, ROLE_TOOL, ROLE_USER, LLMMessage, LLMProvider, ToolCall
 from app.llm.factory import get_provider, resolve_model
@@ -94,9 +95,12 @@ class AgentRuntime:
     async def run_turn(
         self, session: AsyncSession, conversation: Conversation, input_text: str
     ) -> str:
-        agent = await session.get(Agent, conversation.agent_id)
+        # Tenant-scoped: another tenant's agent is as unavailable as a missing one.
+        agent = await load_conversation_agent(session, conversation)
         if agent is None:
-            raise RuntimeError(f"conversation {conversation.id} points at a missing agent")
+            raise RuntimeError(
+                f"conversation {conversation.id} has no agent available in its tenant"
+            )
 
         run = AgentRun(
             id=uuid.uuid4(),

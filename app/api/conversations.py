@@ -25,6 +25,7 @@ from app.models.message import Message, MessageDirection, MessageRole
 from app.models.tenant import Tenant
 from app.repositories.conversations import ConversationsRepository
 from app.repositories.messages import MessagesRepository
+from app.tools.ssrf import SSRFError
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -268,9 +269,19 @@ async def post_operator_message(
     contact = await db.get(Contact, conversation.contact_id)
     assert channel is not None and contact is not None, "conversation has dangling FKs"
     adapter = get_adapter(channel.type)
-    await adapter.send_message(
-        OutgoingMessage(conversation_id=conversation.id, content=payload.content), contact, channel
-    )
+    try:
+        await adapter.send_message(
+            OutgoingMessage(conversation_id=conversation.id, content=payload.content),
+            contact,
+            channel,
+        )
+    except SSRFError as exc:
+        # The channel's base_url is refused (logged as `channel.endpoint_refused`
+        # by the adapter); nothing was sent, so the operator message is dropped.
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="channel endpoint refused"
+        ) from exc
 
     conversation.last_message_at = datetime.now(UTC)
     await db.commit()

@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     # Operator boundary floor: path to a JSON file applied to every agent of
     # every tenant (see app/agents/boundaries.py `load_floor`). Empty = none.
     boundary_floor_file: str = ""
+    # Channel endpoint SSRF guard (see app/tools/ssrf.py "channel endpoints"):
+    # comma-separated hostnames an Evolution channel `base_url` may use even
+    # though they are private. Additive: every other host must be public.
+    # Separate from (and unaffected by) the TOOL_* settings above.
+    channel_allowed_hosts: str = ""
 
 
 class InsecureSettingsError(RuntimeError):

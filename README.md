@@ -175,7 +175,7 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
 | `GET /media/{message_id}` | tenant-scoped media download (`X-API-Key` required) — serves the file behind an image/audio message, used by `/chat` and `/operator` to render thumbnails/players |
 | `POST /chat/bootstrap`, `GET /chat` | **demo-only** (`DEMO_MODE=true`; 404 otherwise): unauthenticated tenant bootstrap and the built-in chat page. Outside demo mode the demo tenant key (`WEBCHAT_DEMO_API_KEY`) is refused with 401 like any unknown key |
 | `POST /dev/messages` | **demo-only** (`DEMO_MODE=true`; 404 otherwise): dev simulator — same pipeline as Web Chat, for scripting demos |
-| `POST /webhooks/whatsapp/{channel_id}` | Evolution API inbound webhook. Tenant and channel come from the authenticated channel, never from the payload. When the user or tenant rate limit is exceeded it still answers 200 `{"status": "rate_limited"}`: the message is stored (media as `[mídia não recebida]`) and visible to operators, but no agent turn runs, and a warning is logged |
+| `POST /webhooks/whatsapp/{channel_id}` | Evolution API inbound webhook. Tenant and channel come from the authenticated channel, never from the payload. When the user or tenant rate limit is exceeded it still answers 200 `{"status": "rate_limited"}`: the message is stored (media as `[mídia não recebida]`) and visible to operators, but no agent turn runs, and a warning is logged. An Evolution media download over the size limit is cut off and stored the same way (`unsupported`, `[mídia não recebida]`) |
 | `GET /conversations/{id}/messages` | poll for replies (`?include_tools=false` by default; `?after=<timestamp>`) |
 | `POST /conversations/{id}/messages` | operator reply (typically while `HUMAN_HANDOFF`) |
 | `POST /conversations/{id}/handoff` / `/resume` / `/close` | conversation state transitions |
@@ -194,6 +194,75 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
    channel's stored secret and returns `401` on a mismatch.
 4. Outbound replies go back out through Evolution's `sendText` REST endpoint
    using that same `apikey`, `base_url` and `instance`.
+5. `base_url` must be a public address. On create and update, a channel of
+   type `whatsapp_evolution` whose `config.base_url` is not globally routable
+   gets 422 `invalid base_url: ...`. The address is checked again on every
+   outbound call (redirects are not followed). A refused call is logged as
+   `channel.endpoint_refused`; an operator reply through such a channel
+   returns 502 `channel endpoint refused`, and a media download that is
+   refused is stored as an `unsupported` message.
+6. To use a private host (for example an Evolution container in the same
+   Compose network), the operator lists it in `CHANNEL_ALLOWED_HOSTS`, a
+   comma-separated list of hostnames, in `.env` for both `api` and `worker`:
+
+   ```
+   CHANNEL_ALLOWED_HOSTS=evolution
+   ```
+
+   With that set, `base_url` may be `http://evolution:8080`. The list is
+   set by the operator only; tenants cannot change it. It is additive: a
+   listed host skips the address check and every other `base_url` must still
+   be public. It is separate from `TOOL_ALLOWED_HOSTS`: a host listed for
+   tools is not thereby allowed for channels, and the other way round.
+7. Media downloaded from Evolution is read up to a cap derived from
+   `MEDIA_MAX_BYTES`. A longer download, a compressed response or decoded
+   media over `MEDIA_MAX_BYTES` is cut off and stored as an `unsupported`
+   message with the content `[mídia não recebida]`. The whole download must
+   finish within 30 seconds (request and body); a slower one is stored the
+   same way. A server that escapes `/` as `\/` in its base64 makes the
+   response larger, so media close to the limit can be refused.
+
+### After upgrading
+
+Existing channels with a private `base_url` (for example
+`http://10.0.0.5:8080` or `http://evolution:8080`) stop sending after the
+upgrade until the operator lists the host in `CHANNEL_ALLOWED_HOSTS`. Older
+versions also allowed a channel or conversation to point at another tenant's
+agent; such a conversation now gets no turn and no summary.
+
+To list the affected rows, run once after upgrading:
+
+```bash
+docker compose run --rm api python -m app.audit
+# or, outside Compose: python -m app.audit
+```
+
+This plain command checks `base_url` addresses without DNS, so a private
+hostname such as `http://evolution:8080` is not listed by it. To list those
+too, add `--resolve`, which looks each hostname up and lists channels that
+resolve to a private address or do not resolve:
+
+```bash
+docker compose run --rm api python -m app.audit --resolve
+# or, outside Compose: python -m app.audit --resolve
+```
+
+Run `--resolve` where the server runs, so it uses the same DNS.
+
+It prints one line per finding, `<kind> <row_id> tenant=<tenant_id> <detail>`,
+then a last line `N offending rows`. The exit code is 1 when N is above 0,
+otherwise 0. The kinds:
+
+- `channel_foreign_agent`: a channel whose `agent_id` belongs to another
+  tenant (`detail` is `agent=<id>`).
+- `conversation_foreign_agent`: a conversation whose `agent_id` belongs to
+  another tenant (same `detail`).
+- `channel_refused_base_url`: an Evolution channel whose `base_url` the check
+  refuses (`detail` is the reason). Listing the host in
+  `CHANNEL_ALLOWED_HOSTS` removes it from the report.
+
+The command only reads. It changes nothing and prints no secrets. Without
+`--resolve` it makes no network or DNS call. Fixing the rows is up to the operator.
 
 ## Agent boundaries
 

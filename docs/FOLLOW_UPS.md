@@ -10,12 +10,9 @@ plausible `/forge:idea` starting point. Not ordered by priority.
   (`DEMO_MODE=true`). A real browser widget needs a short-lived token
   scoped to one end user/contact and channel (minted server-side with the
   tenant key), accepted only by the webchat message/media/poll routes.
-- **Evolution `base_url` has no SSRF check and `fetch_media` reads the
-  whole response into memory** (`app/channels/evolution.py`). Apply the
-  tool SSRF guard to the channel `base_url` and cap the bytes read.
-- **Agent loaded without tenant scope** in `app/agents/runtime.py`,
-  `app/conversations/turn.py`, `app/handoff/summarizer.py`. Rows linked
-  across tenants before the E2.5 fix keep working until audited.
+- **Tool endpoint check accepts trailing-dot hosts at create time
+  (`http://10.0.0.5.`).** The call-time check refuses them. Channels are
+  fixed; tools were out of scope.
 
 ## From the inbound-media run (2026-08-25)
 
@@ -56,7 +53,8 @@ plausible `/forge:idea` starting point. Not ordered by priority.
 ## Older known MVP limitations (README)
 
 - **SSRF DNS-rebinding TOCTOU.** The allowed-IP check resolves once;
-  `httpx` re-resolves on connect. Fix: pin the validated IP via a custom
+  `httpx` re-resolves on connect. It now also applies to channel endpoints
+  (Evolution `base_url`). Fix: pin the validated IP via a custom
   transport/resolver.
 - **`max_iterations` as a real `AgentRunStatus` member.** Still recorded
   as `ERROR` + `error="max_iterations"`. Migration pattern now exists

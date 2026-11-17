@@ -1,4 +1,7 @@
-"""SSRF guard for outbound customer-tool HTTP calls.
+"""SSRF guard for outbound customer-tool HTTP calls and channel endpoints.
+
+Channel `base_url`s use the same address rules with their own operator list;
+see "channel endpoints" below.
 
 A tenant controls the `endpoint` of every one of its tools, so an endpoint is
 attacker-controlled input from the harness's point of view: without this check
@@ -101,12 +104,8 @@ def _assert_public_ip(host: str, raw: str) -> None:
         raise SSRFError(f"blocked internal address for host {host}: {ip}")
 
 
-def _static_check(url: str) -> tuple[SplitResult, str, bool]:
-    """Scheme/host/config/IP-literal checks shared by both entry points.
-
-    Returns `(parsed, host, done)`; `done` means the URL is accepted without
-    DNS (guard disabled, allowlisted host or public IP literal).
-    """
+def _parse(url: str) -> tuple[SplitResult, str]:
+    """Scheme and host checks every URL gets, whatever the configuration."""
     parsed = urlsplit(url)
     scheme = parsed.scheme.lower()
     if scheme not in ALLOWED_SCHEMES:
@@ -115,6 +114,16 @@ def _static_check(url: str) -> tuple[SplitResult, str, bool]:
     host = (parsed.hostname or "").lower()
     if not host:
         raise SSRFError("URL has no host")
+    return parsed, host
+
+
+def _static_check(url: str) -> tuple[SplitResult, str, bool]:
+    """Scheme/host/config/IP-literal checks shared by both tool entry points.
+
+    Returns `(parsed, host, done)`; `done` means the URL is accepted without
+    DNS (guard disabled, allowlisted host or public IP literal).
+    """
+    parsed, host = _parse(url)
 
     if _guard_disabled():
         logger.warning(
@@ -130,6 +139,13 @@ def _static_check(url: str) -> tuple[SplitResult, str, bool]:
             return parsed, host, True
         raise SSRFError(f"host is not in {ALLOWED_HOSTS_ENV}: {host}")
 
+    return parsed, host, _address_check(host)
+
+
+def _address_check(host: str) -> bool:
+    """Internal-name and IP-literal rules. Returns True when `host` is an
+    address (already judged), False when it is a name that needs DNS.
+    """
     if host == "localhost" or host.endswith(_INTERNAL_SUFFIXES):
         raise SSRFError(f"blocked internal host: {host}")
 
@@ -140,7 +156,7 @@ def _static_check(url: str) -> tuple[SplitResult, str, bool]:
         pass
     else:
         _assert_public_ip(host, host)
-        return parsed, host, True
+        return True
 
     # Short, hex, octal and integer IPv4 forms (`127.1`, `0x7f000001`,
     # `2130706433`) are not `ipaddress` literals but resolvers and HTTP
@@ -148,9 +164,9 @@ def _static_check(url: str) -> tuple[SplitResult, str, bool]:
     try:
         dotted = socket.inet_ntoa(socket.inet_aton(host))
     except (OSError, UnicodeError):
-        return parsed, host, False
+        return False
     _assert_public_ip(host, dotted)
-    return parsed, host, True
+    return True
 
 
 def validate_tool_endpoint(url: str) -> None:
@@ -189,7 +205,69 @@ async def assert_safe_url(url: str) -> None:
     parsed, host, done = _static_check(url)
     if done:
         return
+    await _assert_resolves_public(parsed, host)
 
+
+async def _assert_resolves_public(parsed: SplitResult, host: str) -> None:
     port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
     for address in await _resolve(host, port):
         _assert_public_ip(host, address)
+
+
+# --- channel endpoints -----------------------------------------------------
+#
+# A tenant also controls the `base_url` of its Evolution channels (PRODUCT.md
+# F1). Same address rules, different configuration:
+#
+# - `CHANNEL_ALLOWED_HOSTS` (`Settings.channel_allowed_hosts`) is additive:
+#   a listed host skips the address checks (how an operator points a channel
+#   at a private Evolution server on purpose); every other host still gets
+#   the full checks.
+# - `TOOL_ALLOWED_HOSTS` and `TOOL_SSRF_DISABLED` have no effect here.
+
+
+def _channel_allowed_hosts() -> set[str]:
+    raw = get_settings().channel_allowed_hosts
+    return {host.strip().lower() for host in raw.split(",") if host.strip()}
+
+
+def _channel_static_check(url: str) -> tuple[SplitResult, str, bool]:
+    """Static checks for a channel `base_url`. Returns `(parsed, host, done)`
+    like `_static_check`; `host` is the name as written (what DNS resolves).
+    """
+    parsed, host = _parse(url)
+    try:
+        parsed.port  # noqa: B018 - raises on an out-of-range or non-numeric port
+    except ValueError as exc:
+        raise SSRFError("URL has an invalid port") from exc
+    # `localhost.`, `10.0.0.5.` and `metadata.google.internal.` name the same
+    # targets as without the dot, so the rules judge the name without it (and
+    # a listed `evolution` matches `evolution.`). Channel path only: the tool
+    # checks keep their behaviour (PRODUCT.md, out of scope).
+    judged = host.rstrip(".")
+    if not judged:
+        raise SSRFError("URL has no host")
+    if judged in _channel_allowed_hosts():
+        return parsed, host, True
+    return parsed, host, _address_check(judged)
+
+
+def validate_channel_base_url(url: str) -> None:
+    """Raise `SSRFError` unless a channel `base_url` passes the static checks.
+
+    No DNS. Used when a channel is created or updated; a hostname is accepted
+    here and resolved and checked by `assert_safe_channel_url` on every call.
+    """
+    _channel_static_check(url)
+
+
+async def assert_safe_channel_url(url: str) -> None:
+    """Raise `SSRFError` unless a channel `base_url` is safe to call now.
+
+    Static checks plus every resolved address must be public (same TOCTOU
+    limitation as `assert_safe_url`; callers disable redirects).
+    """
+    parsed, host, done = _channel_static_check(url)
+    if done:
+        return
+    await _assert_resolves_public(parsed, host)

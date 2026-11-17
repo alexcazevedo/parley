@@ -3,9 +3,11 @@ with app dependencies overridden to use both.
 """
 
 import os
+import socket
 from collections.abc import AsyncGenerator
 
 import asyncpg
+import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
 from fakeredis import FakeAsyncRedis
@@ -62,6 +64,31 @@ async def _ensure_test_database_exists() -> None:
             await conn.execute(f'CREATE DATABASE "{_TEST_DB_NAME}"')
     finally:
         await conn.close()
+
+
+_STABLE_DNS_SUFFIX = ".example.com"
+_STABLE_DNS_ADDRESS = "93.184.216.34"
+
+
+@pytest.fixture(autouse=True)
+def _stable_dns(monkeypatch):
+    """Channel calls resolve their `base_url` before every request (SSRF
+    check). Make `*.example.com` (what Evolution tests use) resolve to a
+    public address without any real DNS; every other host goes to the real
+    `socket.getaddrinfo`. Tests that need other answers patch it themselves.
+    """
+    real_getaddrinfo = socket.getaddrinfo
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        if isinstance(host, bytes):
+            host = host.decode()
+        if isinstance(host, str) and host.lower().endswith(_STABLE_DNS_SUFFIX):
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", (_STABLE_DNS_ADDRESS, port or 0))
+            ]
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
 
 
 @pytest_asyncio.fixture(scope="session")
