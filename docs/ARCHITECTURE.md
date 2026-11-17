@@ -27,9 +27,11 @@ app/
                    and turned into a queue Job. Every entry point (webchat,
                    dev, whatsapp webhook) calls this, never bypasses it.
   conversations/  resolver (contact+conversation lookup/creation), debounce
-                   (Redis pending list + due ZSET), lock (per-conversation
-                   advisory lock), turn (process_turn: one debounced batch ->
-                   one reply), summary (rolling conversation summary).
+                   (Redis pending list + due ZSET + claim + in-flight list),
+                   lock (per-conversation lock, renewed while a turn runs),
+                   retry (failed-turn counter, turn dead-letter list),
+                   turn (process_turn: one debounced batch -> one reply),
+                   summary (rolling conversation summary).
   agents/         context.py (ContextBuilder: system prompt + history ->
                    LLMMessage[]), runtime.py (AgentRuntime: the tool-call
                    loop, one AgentRun per turn).
@@ -57,11 +59,15 @@ app/
                    WhatsApp webhook answers 200 `rate_limited` and stores
                    the message without enqueuing a turn),
                    limits (message size).
-  queue/          Queue Protocol + RedisQueue (BRPOPLPUSH-alike job list +
-                   a dead-letter list).
+  queue/          Queue Protocol + RedisQueue (job list; a dequeued job moves
+                   with BLMOVE into the worker's own processing list and
+                   stays there until acked; dead workers' lists are put
+                   back; plus a dead-letter list).
   workers/        main.py (job loop: dequeue -> push onto the conversation's
-                   debounce batch -> ack), scheduler.py (tick: drains due
-                   conversations into turns; run_scheduler runs it forever).
+                   debounce batch -> ack; housekeeping loop; shutdown),
+                   scheduler.py (run_scheduler: keeps a pool of turn tasks, up to
+                   WORKER_CONCURRENCY at once, and fills free slots every
+                   250 ms; tick is the run-to-completion variant tests use).
   models/         SQLAlchemy 2 declarative models, one file per table.
   repositories/   BaseRepository (get/list/create/update/delete, tenant_id
                    first) + per-model subclasses.
@@ -130,32 +136,79 @@ same conversation.
 1. `ingest()` persists the message (idempotent on
    `(tenant_id, channel_id, external_message_id)`) and pushes a `Job` onto
    `RedisQueue` (`harness:jobs`, with `harness:dlq` for exhausted retries).
-2. The worker's job loop (`app/workers/main.py::run_once`) dequeues one `Job`
-   at a time, appends its `message_id` to
-   `harness:pending:{conversation_id}` (a Redis LIST), and (re)writes
-   `harness:due` (a ZSET) with `conversation_id -> now + DEBOUNCE_SECONDS`.
+2. The worker's job loop (`app/workers/main.py::run_once`) takes one `Job` at
+   a time. `dequeue` uses `BLMOVE` to move it from `harness:jobs` into the
+   worker's own list `harness:processing:{worker_id}` in one step, so a job
+   is always in exactly one list. The loop appends the `message_id` to
+   `harness:pending:{conversation_id}` (a Redis LIST), (re)writes
+   `harness:due` (a ZSET) with `conversation_id -> now + DEBOUNCE_SECONDS`,
+   and only then `ack`s the job (removes it from the processing list).
    Every new message in the burst pushes the due score further out, so the
    window keeps sliding until messages stop arriving.
-3. The scheduler task (`app.workers.scheduler.run_scheduler`, a 250ms loop
-   calling `tick`) pops every conversation whose due score has elapsed
-   (`ZRANGEBYSCORE ... -inf now`), and for each one:
-   - `ZREM`s it from `harness:due` (claim — only one worker wins the race);
-   - acquires `harness:lock:{conversation_id}` (`SET NX PX`, compare-and-
-     delete release via WATCH/MULTI); if another worker already holds it,
-     the conversation is re-armed a second out instead of dropped;
-   - atomically drains `harness:pending:{conversation_id}` (`LRANGE` +
-     `DEL` in one `MULTI/EXEC`, so nothing arriving mid-drain is lost);
+   Each worker also refreshes `harness:worker:{id}` (TTL 30 s) and is listed
+   in `harness:workers`. `housekeeping_loop` does this every 10 s and calls
+   `reap_dead_workers`, which moves every job in the processing list of a
+   worker whose alive key has expired back onto `harness:jobs` (oldest
+   first). A worker that was only slow may be reaped and its job handled
+   twice; `drain_pending` returns each message id once, so that is harmless.
+3. The scheduler task (`app.workers.scheduler.run_scheduler`) keeps a pool
+   of turn tasks. Every 250 ms it fills the free slots: it looks at every
+   conversation whose due score has elapsed (`ZRANGEBYSCORE ... -inf now`)
+   and starts a turn for each it claims, without waiting for the turns
+   already running. (`tick` is the run-to-completion variant, used by most
+   tests; the worker does not call it.) Up to `WORKER_CONCURRENCY` conversations
+   (default 4) run at once, each as its own task with its own database
+   session; a conversation is claimed only when a slot is free. For each:
+   - **claim**: `debounce.claim` takes the key `harness:claim:{id}` with
+     `SET NX PX` (60 s, `CLAIM_TIMEOUT_SECONDS`) and moves the due score to
+     `now + 60 s`; only the worker that gets the key wins. The
+     entry is not removed, so a worker that dies from here on leaves the
+     conversation due again after the timeout;
+   - acquires `harness:lock:{conversation_id}` (`SET NX PX`, 60 s TTL,
+     compare-and-delete release via WATCH/MULTI); if another worker already
+     holds it, the conversation is re-armed a second out instead of dropped.
+     The same conversation therefore never runs twice at once;
+   - **in-flight list**: `debounce.drain_pending` moves
+     `harness:pending:{conversation_id}` onto `harness:inflight:{conversation_id}`
+     in one `MULTI/EXEC` (nothing arriving mid-drain is lost) and returns the
+     whole in-flight list, so a batch a dead worker left behind comes back
+     ahead of newer messages;
+   - **lock heartbeat**: while the turn runs, a task renews the lock and
+     pushes the claim out every 20 s (`LOCK_RENEW_INTERVAL_SECONDS`). Before
+     every send and before its commit the turn asks whether the lock is still
+     its own. If not, it rolls back, sends nothing more and returns
+     `LockLost`; the scheduler then writes no debounce state at all, because
+     whoever holds the lock now owns the batch (and if nobody does, the claim
+     timeout brings it back);
    - loads those messages, joins their content, and calls
      `process_turn(session, conversation_id, messages, runtime,
-     supersede_check=check)`, where `check` probes
+     supersede_check=check, ownership_check=...)`, where `check` probes
      `debounce.has_pending(redis, conversation_id)` — has a newer message
      landed on the pending list since the drain? If the turn comes back
-     `Superseded`, the just-drained batch is put back on the pending list
-     via `debounce.requeue_pending` (ahead of whatever interrupted it) instead
-     of being counted as processed — see "Barge-in" below;
-   - releases the lock; if more messages arrived on the pending list while
-     the lock was held (including a requeued superseded batch), re-schedules
-     the conversation immediately for another turn.
+     `Superseded`, the in-flight batch is put back at the head of the pending
+     list via `debounce.return_inflight` (ahead of whatever interrupted it)
+     instead of being counted as processed — see "Barge-in" below;
+   - **retry**: if the turn fails (`TurnFailed`, or an error from the session
+     or the batch load), `_settle_failure` counts it in
+     `harness:turn_attempts:{conversation_id}`. Below `MAX_TURN_ATTEMPTS` (3)
+     it calls `return_inflight` and schedules the conversation after the
+     backoff (`RETRY_BACKOFF_SECONDS`: 2 s, then 8 s). At the limit it appends
+     an entry to `harness:dlq:turns`, calls `finish`, and then stores and
+     sends `TURN_FAILED_MESSAGE` once. If part of the reply was already
+     delivered it dead-letters the batch at once (`partly_delivered` true),
+     with no retry and no error message;
+   - **finish**: `debounce.finish` drops the in-flight list and removes the
+     due entry, or makes the conversation due now if more messages arrived on
+     the pending list meanwhile (including a returned superseded batch). It
+     runs under the lock; then the lock is released. An error from the Redis
+     bookkeeping itself skips `finish`: the batch stays in flight and comes
+     back after the claim timeout.
+
+   `tick` runs the conversations side by side and waits for all of them;
+   `run_scheduler` keeps its pool across intervals. When its `stop` event is set
+   (on `SIGTERM`/`SIGINT`) it claims nothing new and waits for the running
+   turns; `main` gives them `SHUTDOWN_GRACE_SECONDS` (90) and then cancels
+   what is left.
 4. `process_turn` persists the assistant's reply in the same transaction the
    runtime used, sends it through the `ChannelAdapter`, updates
    `last_message_at`, and best-effort-advances the rolling summary.
@@ -323,7 +376,7 @@ side effects in flight.
 - **Requeue -> one merged reply**: `app/workers/scheduler.py::tick` passes a
   probe backed by `debounce.has_pending(redis, conversation_id)` (the
   existing pending list — no new transport) and, on `Superseded`, calls
-  `debounce.requeue_pending` to put the drained batch back at the head of the
+  `debounce.return_inflight` to put the in-flight batch back at the head of the
   pending list, ahead of whatever interrupted it. The scheduler's normal
   re-arm (see "Queue / debounce algorithm" step 3) fires the very next tick,
   which drains old + new together and answers them as one reply.

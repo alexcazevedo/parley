@@ -355,6 +355,117 @@ Point `BOUNDARY_FLOOR_FILE` at a JSON file, for example:
 - Block and false-block rates on a real model are not measured yet. The tests
   use a scripted model.
 
+## Reliability
+
+What happens to a customer's message when a worker dies or a turn fails.
+The tests are in `tests/test_e3_reliability.py` (one per case below) and in
+the per-feature files `tests/test_queue_recovery.py`,
+`tests/test_claim_recovery.py`, `tests/test_lock_heartbeat.py`,
+`tests/test_turn_retry.py` and `tests/test_scheduler_concurrency.py`.
+
+**Delivery is at-least-once, not exactly-once.** A worker that dies after it
+sent a reply and before it marked the turn done repeats that reply after
+recovery (about 60 s later). A send that raised an error but did reach the
+customer is retried and can repeat. See "Limits" below.
+
+### A worker crashes
+
+- **Before the message is in the debounce batch.** A worker moves a job from
+  `harness:jobs` to its own list `harness:processing:{worker_id}` in one step
+  and removes it only after the message is in the batch. Every worker
+  refreshes an alive key (`harness:worker:{id}`, 30 s TTL) and runs a
+  housekeeping pass every 10 s. A pass puts the jobs of any worker whose alive
+  key has expired back on `harness:jobs` (log event `worker.jobs_reaped`).
+  A message that reaches the batch twice is answered once.
+- **After a conversation was claimed.** The scheduler does not remove a due
+  conversation. It takes a claim, the key `harness:claim:{conversation_id}`
+  (set only if absent, 60 s TTL), and moves the due score 60 s out
+  (`CLAIM_TIMEOUT_SECONDS`); only the worker that gets the key runs the turn.
+  The messages
+  being answered wait in `harness:inflight:{conversation_id}` until the turn
+  is finished. If the worker dies in between, the conversation is due again
+  after 60 s and the next turn answers the same messages.
+- **During a long turn.** The conversation lock (`harness:lock:{id}`, 60 s) is
+  renewed every 20 s while the turn runs, and so is the claim. A turn longer
+  than the lock's lifetime is never run twice in parallel. A turn that finds
+  the lock is no longer its own stops before it sends or saves anything else,
+  and leaves its messages to the current holder.
+
+### A turn fails
+
+Anything that escapes the turn (a send that fails, a database error, a
+speech-to-text failure) puts the messages back for another attempt:
+
+- Up to 3 attempts (`MAX_TURN_ATTEMPTS`), 2 s after the first failure and 8 s
+  after the second (`RETRY_BACKOFF_SECONDS`). The wait is counted from the
+  moment the turn failed, not from when it started. Messages that arrive in the
+  meantime join the next attempt. Log event `scheduler.turn_retry`.
+- After the third failure the batch goes to the dead-letter list
+  `harness:dlq:turns`, and the customer gets one error message
+  (`TURN_FAILED_MESSAGE`). Log event `scheduler.turn_dead_lettered`.
+- If part of a reply was already delivered (the first bubble went out, the
+  second failed), there is no retry: what was sent stays, the rest is dropped,
+  the batch is dead-lettered with `partly_delivered` true and no error message
+  is added.
+
+Read the dead-letter list with Redis:
+
+```bash
+docker compose exec redis redis-cli LRANGE harness:dlq:turns 0 -1
+```
+
+Each entry is a JSON object: `conversation_id`, `message_ids`, `error`
+(`"Type: message"`), `partly_delivered`, `attempts` and `failed_at` (unix
+seconds). Oldest first. Nothing reads the list or removes entries: there is no
+API or page for it and no replay (see `docs/FOLLOW_UPS.md`). `harness:dlq`
+is a different list, the job queue's own (`RedisQueue.fail`); the worker does
+not call it today.
+
+### Redis errors in the worker
+
+An error in the job loop (Redis down or restarting, a job that cannot be
+handled) is logged as `worker.job_loop_error`; the loop waits 1 s
+(`JOB_LOOP_ERROR_PAUSE_SECONDS`) and tries again. The worker does not exit.
+The housekeeping pass and the scheduler loop also log their errors and go on.
+
+### Concurrency
+
+One worker runs up to `WORKER_CONCURRENCY` conversations at the same time
+(default 4, minimum 1). One conversation never runs twice at once. Each running
+turn holds one database connection for as long as it runs, including model
+calls and paced bubbles. The app's engine uses SQLAlchemy's default pool (5
+connections, up to 10 more on demand), so keep `WORKER_CONCURRENCY` well under
+that.
+
+### Graceful shutdown
+
+On `SIGTERM` or `SIGINT` the worker takes no new job and no new turn, and
+waits up to 90 s (`SHUTDOWN_GRACE_SECONDS`) for the running turns to finish.
+After that it cancels what is left: those turns release their lock, their
+uncommitted work is rolled back, and their messages come back after the claim
+timeout. The shipped `docker-compose.yml` sets `stop_grace_period: 100s` on
+the `worker` service (Docker's default is 10 s) and `restart: unless-stopped`.
+Log events: `worker.stopping`, `scheduler.stopping`, `scheduler.stopped`,
+`worker.shutdown_grace_expired`, `scheduler.turns_cancelled`.
+
+### Limits
+
+- Delivery is at-least-once. A worker that dies after sending and before the
+  turn is marked done repeats the reply after recovery (about 60 s later).
+- A retried turn runs the model and its tools again. A tool with a side
+  effect can run twice.
+- A send that errored but did reach the customer is retried and can repeat.
+- Model errors are answered with the runtime's own error text and are not
+  retried. Retries cover what escapes the turn: a send failure, a database
+  error, a speech-to-text failure.
+- The error message after the last attempt is stored first and then sent on
+  a best-effort basis. On a broken channel the customer may not receive it.
+- A turn cancelled after the shutdown grace period may resend bubbles it
+  already sent.
+- Not done in this run: the database transaction is still held across model
+  calls (E3.6), tool side effects are not de-duplicated (E3.7), HTTP clients
+  are not shared and 429/5xx are not retried (E3.8). See `docs/FOLLOW_UPS.md`.
+
 ## Known MVP limitations
 
 - **The `/chat` widget holds the tenant API key in the browser**, so it is

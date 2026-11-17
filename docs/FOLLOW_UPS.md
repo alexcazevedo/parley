@@ -50,6 +50,42 @@ plausible `/forge:idea` starting point. Not ordered by priority.
   scripted model, so it is unknown how often a real model breaks a boundary
   and how often the check blocks a fine reply.
 
+## From the reliability run
+
+- **E3.6: database transaction held across model calls and sleeps.** A turn
+  keeps one session (and one pooled connection) open while the model runs and
+  while humanized bubbles wait. That is why `WORKER_CONCURRENCY` has to stay
+  under the pool size. Doing the slow work outside the transaction would free
+  the connection.
+- **E3.7: repeated or orphaned tool side effects.** A retried turn runs the
+  model and its tools again, so a tool with a side effect can run twice, and
+  a failed attempt can leave the effects of its tools behind. Needs
+  idempotency keys or a record of tool calls per batch.
+- **E3.8: shared HTTP clients, retry on 429/5xx, token-limit parameter
+  name.** Not done in the reliability run: HTTP clients are not shared, 429
+  and 5xx answers are not retried, and the token-limit parameter name is
+  part of the same item.
+- **Resend only the missing bubbles.** A reply with a failed bubble is
+  dead-lettered as partly delivered and the rest is dropped. Sending only the
+  undelivered bubbles would finish the reply without repeating the first.
+- **API or page for the dead-letter list, and replay.** `harness:dlq:turns`
+  is only readable with `redis-cli LRANGE`. Nothing lists it, removes
+  entries or puts a batch back for another turn.
+
+- **A failed turn that lost its lock can be answered again.** If a turn
+  failed after it delivered bubbles and then found its lock gone, it is not
+  dead-lettered; the current holder of the batch can answer it again.
+- **A crash while dead-lettering can double the entry.** A crash between
+  writing the dead-letter entry and finishing the batch can produce a second
+  entry and a second error message.
+- **Test seams in the scheduler.** `_pause` and `_exclusive_sessions` in
+  `app/workers/scheduler.py` exist only because tests patch `asyncio.sleep`
+  and share one database session. The tests should be changed so these can
+  go.
+- **The production scheduler path is thinly tested.** Most tests drive
+  `tick`; `run_scheduler`, which the worker runs, is covered only in
+  `tests/test_scheduler_concurrency.py`.
+
 ## Older known MVP limitations (README)
 
 - **SSRF DNS-rebinding TOCTOU.** The allowed-IP check resolves once;

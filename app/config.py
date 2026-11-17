@@ -3,6 +3,7 @@
 from functools import lru_cache
 
 from cryptography.fernet import Fernet
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Shipped default for ADMIN_API_KEY; only accepted when DEMO_MODE is true.
@@ -23,6 +24,9 @@ class Settings(BaseSettings):
     llm_api_key: str = "changeme-llm-key"
     llm_model: str = "gpt-4o-mini"
     debounce_seconds: int = 3
+    # Turns one worker runs at once (see app/workers/scheduler.py). Each
+    # running turn holds one database connection for its whole length.
+    worker_concurrency: int = Field(default=4, ge=1)
     log_level: str = "INFO"
     rate_limit_tenant_per_min: int = 600
     rate_limit_user_per_min: int = 30

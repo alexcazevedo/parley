@@ -70,6 +70,10 @@ services:
     volumes:
       - media_data:/srv/media
     command: uv run python -m app.workers.main
+    # Restart after a crash; give running turns the worker's 90 s shutdown
+    # grace (SHUTDOWN_GRACE_SECONDS) plus margin before Docker kills it.
+    restart: unless-stopped
+    stop_grace_period: 100s
     depends_on:
       postgres:
         condition: service_healthy

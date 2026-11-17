@@ -29,6 +29,27 @@ before delivery starts, and again between humanizer bubbles. A hit drops the
 unsent parts, marks the turn's `AgentRun` superseded and returns `Superseded`
 instead of a reply; already-sent bubbles stand. No check (or a failing one)
 means today's behavior, byte for byte.
+
+Lock ownership (PRODUCT.md E3.5): the scheduler also injects an
+`ownership_check` — "is the conversation lock still ours?". It is asked right
+before every outbound send (read receipt, each bubble, the single reply) and
+right before every commit but one: the commit that stores a reply right after
+it was sent. A `False`, or a check that raises, means another worker may own
+this conversation now: the turn rolls back what it has not committed, sends
+nothing more and returns `LockLost`. Bubbles already sent stand (and stay
+committed). No check means today's behavior.
+
+A delivered reply is committed right after its send (per bubble when
+humanized), before the rolling summary, a model call. Whatever happens to the
+summary afterwards — it raises, its commit fails, the lock is lost before its
+commit — only the summary is dropped: the turn still returns the reply.
+
+Failures (PRODUCT.md E3.2): any exception inside a turn rolls back what was
+not committed and surfaces as `TurnFailed(delivered_parts)`, chained to the
+original. A failed send of any bubble stops the reply there; nothing after it
+is sent. The scheduler retries a turn that delivered nothing and dead-letters
+one that delivered something. `send_failure_notice` is the one error message
+a customer gets when a batch is dead-lettered.
 """
 
 import asyncio
@@ -72,6 +93,26 @@ UNSUPPORTED_MEDIA_REPLY = (
 )
 
 
+# What the customer hears once when a batch is dead-lettered after its last
+# failed attempt (PRODUCT.md E3.2). Never after a partly delivered reply.
+TURN_FAILED_MESSAGE = "Desculpe, tive um problema técnico. Pode tentar novamente?"
+
+
+class TurnFailed(Exception):
+    """A turn raised; everything it had not committed was rolled back.
+
+    Always raised `from` the original exception (`__cause__`).
+    `delivered_parts` counts the outbound sends that succeeded before the
+    failure (reply bubbles, the single reply, a handoff or unsupported-media
+    reply); read receipts and typing indicators are not counted. Above zero,
+    the customer already saw part of this turn and a retry would repeat it.
+    """
+
+    def __init__(self, delivered_parts: int) -> None:
+        super().__init__(f"turn failed after {delivered_parts} delivered part(s)")
+        self.delivered_parts = delivered_parts
+
+
 @runtime_checkable
 class TurnRuntime(Protocol):
     """What a turn needs from an agent implementation: text in, text out."""
@@ -113,13 +154,36 @@ class Superseded:
     delivered_parts: int
 
 
+OwnershipCheck = Callable[[], Awaitable[bool]]
+"""Probe: does this turn still hold the conversation lock?"""
+
+
+@dataclass(frozen=True)
+class LockLost:
+    """Outcome of a turn that found it no longer owns the conversation lock.
+
+    Nothing was committed after the loss was seen and nothing more was sent.
+    `delivered_parts` is how many parts had already gone out (and stay out).
+    """
+
+    delivered_parts: int
+
+
+@dataclass
+class _Sends:
+    """Running count of this turn's successful outbound sends, for `TurnFailed`."""
+
+    delivered: int = 0
+
+
 @dataclass(frozen=True)
 class _Delivery:
-    """What `_deliver` did: the last persisted reply row, parts sent, cut short?"""
+    """What `_deliver` did: last persisted reply row, parts sent, cut short, why?"""
 
     message: Message | None
     parts_sent: int
     superseded: bool
+    lock_lost: bool = False
 
 
 async def process_turn(
@@ -129,7 +193,8 @@ async def process_turn(
     runtime: AnyTurnRuntime | None = None,
     *,
     supersede_check: SupersedeCheck | None = None,
-) -> Message | Superseded | None:
+    ownership_check: OwnershipCheck | None = None,
+) -> Message | Superseded | LockLost | None:
     """Run one turn for `conversation_id` over `messages` (arrival order).
 
     Returns the persisted assistant message, or `None` when no reply was
@@ -141,7 +206,105 @@ async def process_turn(
     Returns `Superseded` instead when `supersede_check` reported a newer
     inbound message at one of the two checkpoints: the reply (or its remaining
     bubbles) is abandoned for the next turn to answer as one batch.
+
+    Returns `LockLost` when `ownership_check` said (or, by raising, could not
+    confirm) that the lock is no longer ours, before a send or a commit.
+
+    Raises `TurnFailed` (from the original exception) when anything in the
+    turn raised: the session is rolled back first, and `delivered_parts` says
+    how many sends had already reached the customer.
     """
+    sends = _Sends()
+    try:
+        return await _run_turn(
+            session,
+            conversation_id,
+            messages,
+            runtime,
+            sends,
+            supersede_check=supersede_check,
+            ownership_check=ownership_check,
+        )
+    except Exception as exc:
+        await _rollback_quietly(session, conversation_id)
+        logger.warning(
+            "turn.failed",
+            conversation_id=str(conversation_id),
+            delivered_parts=sends.delivered,
+            error=_describe(exc),
+        )
+        raise TurnFailed(sends.delivered) from exc
+
+
+async def _rollback_quietly(session: AsyncSession, conversation_id: uuid.UUID) -> None:
+    """Roll back after a failure; a rollback that fails too is only logged.
+
+    The original error is the one worth reporting: a broken connection that
+    cannot even roll back must not replace it.
+    """
+    try:
+        await session.rollback()
+    except Exception:
+        logger.warning(
+            "turn.rollback_failed", conversation_id=str(conversation_id), exc_info=True
+        )
+
+
+def _describe(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"[:2000]
+
+
+async def send_failure_notice(session: AsyncSession, conversation_id: uuid.UUID) -> bool:
+    """Tell the customer their batch could not be answered. Never raises.
+
+    Only for an `ACTIVE_AI` conversation: with a human driving it, the AI
+    stays quiet even about its own failure. The notice is stored as an
+    assistant message and committed *before* the send, so it is on record
+    (webchat polls it from there) even when the channel is what keeps failing;
+    a send error is logged only. Returns whether the notice was stored.
+    """
+    try:
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is None or conversation.state != ConversationState.ACTIVE_AI:
+            return False
+        channel = await session.get(Channel, conversation.channel_id)
+        contact = await session.get(Contact, conversation.contact_id)
+        if channel is None or contact is None:
+            return False
+        session.add(_build_reply(conversation, TURN_FAILED_MESSAGE))
+        conversation.last_message_at = datetime.now(UTC)
+        await session.commit()
+    except Exception:
+        await _rollback_quietly(session, conversation_id)
+        logger.exception("turn.failure_notice_not_stored", conversation_id=str(conversation_id))
+        return False
+
+    try:
+        await get_adapter(channel.type).send_message(
+            OutgoingMessage(conversation_id=conversation_id, content=TURN_FAILED_MESSAGE),
+            contact,
+            channel,
+        )
+    except Exception:
+        logger.warning(
+            "turn.failure_notice_send_failed",
+            conversation_id=str(conversation_id),
+            exc_info=True,
+        )
+    return True
+
+
+async def _run_turn(
+    session: AsyncSession,
+    conversation_id: uuid.UUID,
+    messages: list[Message],
+    runtime: AnyTurnRuntime | None,
+    sends: _Sends,
+    *,
+    supersede_check: SupersedeCheck | None,
+    ownership_check: OwnershipCheck | None,
+) -> Message | Superseded | LockLost | None:
+    """`process_turn`'s body; `sends` counts what reached the customer."""
     if not messages:
         return None
 
@@ -192,11 +355,21 @@ async def process_turn(
     humanized = bool((channel.config or {}).get("humanize"))
 
     if humanized:
+        if await _lock_lost(ownership_check):
+            return await _give_up(session, conversation_id, delivered_parts=0)
         await _mark_read(adapter, messages, contact, channel)
 
     if all(message.type == "unsupported" for message in messages):
         return await _reply_unsupported_media(
-            session, conversation, adapter, contact, channel, humanized, len(messages)
+            session,
+            conversation,
+            adapter,
+            contact,
+            channel,
+            humanized,
+            len(messages),
+            ownership_check,
+            sends,
         )
 
     # Media messages render as readable placeholders (a photo's caption, an
@@ -206,7 +379,16 @@ async def process_turn(
 
     if agent.sentiment_escalation_enabled:
         escalation = await _maybe_escalate_on_sentiment(
-            session, conversation, agent, adapter, contact, channel, humanized, input_text
+            session,
+            conversation,
+            agent,
+            adapter,
+            contact,
+            channel,
+            humanized,
+            input_text,
+            ownership_check,
+            sends,
         )
         if escalation is not None:
             return escalation
@@ -219,9 +401,12 @@ async def process_turn(
 
     # Checkpoint 1: last moment before anything is sent. The commit keeps the
     # rows the runtime already wrote (AgentRun, tool messages) — a superseded
-    # turn is observable, not lost work.
+    # turn is observable, not lost work. Lock ownership is asked by `_deliver`
+    # right before each send, and by `_abandon_or_give_up` before its commit.
     if await _is_superseded(supersede_check):
-        return await _abandon_turn(session, conversation, delivered_parts=0)
+        return await _abandon_or_give_up(
+            session, conversation, ownership_check, delivered_parts=0
+        )
 
     delivery = await _deliver(
         session,
@@ -232,15 +417,27 @@ async def process_turn(
         humanized,
         reply_text,
         supersede_check=supersede_check,
+        ownership_check=ownership_check,
+        sends=sends,
     )
+    if delivery.lock_lost:
+        return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
     # Checkpoint 2 fired between bubbles: the parts already sent stand.
     if delivery.superseded:
-        return await _abandon_turn(session, conversation, delivered_parts=delivery.parts_sent)
+        return await _abandon_or_give_up(
+            session, conversation, ownership_check, delivered_parts=delivery.parts_sent
+        )
     reply = delivery.message
 
+    # The reply reached the customer: store it now, before the summary (a
+    # model call) can fail or outlast the lock. No ownership check here on
+    # purpose — rolling back a delivered reply would get the batch answered
+    # twice. The humanized path already committed each bubble after its send.
     conversation.last_message_at = datetime.now(UTC)
-    await _maybe_summarize(session, conversation, runtime)
     await session.commit()
+    await _summarize_after_reply(
+        session, conversation, runtime, ownership_check, reply, delivery.parts_sent
+    )
     logger.info(
         "turn.completed",
         conversation_id=str(conversation_id),
@@ -282,12 +479,27 @@ async def _reply_unsupported_media(
     channel: Channel,
     humanized: bool,
     message_count: int,
-) -> Message | None:
+    ownership_check: OwnershipCheck | None = None,
+    sends: _Sends | None = None,
+) -> Message | LockLost | None:
     """Answer a batch made entirely of unsupported media, without an LLM call."""
+    conversation_id = conversation.id
     delivery = await _deliver(
-        session, conversation, adapter, contact, channel, humanized, UNSUPPORTED_MEDIA_REPLY
+        session,
+        conversation,
+        adapter,
+        contact,
+        channel,
+        humanized,
+        UNSUPPORTED_MEDIA_REPLY,
+        ownership_check=ownership_check,
+        sends=sends,
     )
+    if delivery.lock_lost:
+        return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
     conversation.last_message_at = datetime.now(UTC)
+    if await _lock_lost(ownership_check):
+        return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
     await session.commit()
     logger.info(
         "turn.unsupported_media_only",
@@ -306,7 +518,9 @@ async def _maybe_escalate_on_sentiment(
     channel: Channel,
     humanized: bool,
     input_text: str,
-) -> Message | None:
+    ownership_check: OwnershipCheck | None = None,
+    sends: _Sends | None = None,
+) -> Message | LockLost | None:
     """Score the inbound batch; on a frustrated batch, hand off instead of answering.
 
     Returns the delivered `handoff_message` when the turn was short-circuited,
@@ -331,11 +545,26 @@ async def _maybe_escalate_on_sentiment(
     # No supersede checkpoints here on purpose: the conversation is already
     # HUMAN_HANDOFF, so the handoff_message is not a stale AI answer — it must
     # go out whole no matter what arrived meanwhile.
+    # Lock ownership is still asked: losing the lock rolls back the handoff
+    # itself, and the worker that holds the lock now decides again.
+    conversation_id = conversation.id
     delivery = await _deliver(
-        session, conversation, adapter, contact, channel, humanized, agent.handoff_message
+        session,
+        conversation,
+        adapter,
+        contact,
+        channel,
+        humanized,
+        agent.handoff_message,
+        ownership_check=ownership_check,
+        sends=sends,
     )
+    if delivery.lock_lost:
+        return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
     reply = delivery.message
     conversation.last_message_at = datetime.now(UTC)
+    if await _lock_lost(ownership_check):
+        return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
     await session.commit()
     logger.info(
         "turn.sentiment_escalated",
@@ -355,23 +584,39 @@ async def _deliver(
     reply_text: str,
     *,
     supersede_check: SupersedeCheck | None = None,
+    ownership_check: OwnershipCheck | None = None,
+    sends: _Sends | None = None,
 ) -> _Delivery:
     """Persist + send one reply, paced into bubbles when the channel is humanized.
 
-    Only the humanized path can be interrupted (checkpoint 2, between bubbles);
+    Only the humanized path can be superseded (checkpoint 2, between bubbles);
     the single-message path is one send with nothing left to cut, so it is
-    covered entirely by checkpoint 1 in `process_turn`.
+    covered entirely by checkpoint 1 in `process_turn`. Lock ownership is asked
+    right before every send on both paths. Each successful send is counted in
+    `sends`; a failed one raises.
     """
     if humanized:
         return await _deliver_humanized(
-            session, conversation, adapter, contact, channel, reply_text, supersede_check
+            session,
+            conversation,
+            adapter,
+            contact,
+            channel,
+            reply_text,
+            supersede_check,
+            ownership_check,
+            sends,
         )
+    if await _lock_lost(ownership_check):
+        return _Delivery(message=None, parts_sent=0, superseded=False, lock_lost=True)
     reply = _build_reply(conversation, reply_text)
     session.add(reply)
     await session.flush()
     await adapter.send_message(
         OutgoingMessage(conversation_id=conversation.id, content=reply_text), contact, channel
     )
+    if sends is not None:
+        sends.delivered += 1
     return _Delivery(message=reply, parts_sent=1, superseded=False)
 
 
@@ -413,6 +658,8 @@ async def _deliver_humanized(
     channel: Channel,
     reply_text: str,
     supersede_check: SupersedeCheck | None = None,
+    ownership_check: OwnershipCheck | None = None,
+    sends: _Sends | None = None,
 ) -> _Delivery:
     """Split the reply and deliver it as paced bubbles, committing per part.
 
@@ -425,6 +672,10 @@ async def _deliver_humanized(
     part is already covered by checkpoint 1, and the pacing pause is exactly
     where a user's correction lands. Stopping mid-reply leaves the bubbles that
     already went out standing — humans get cut off mid-thought too.
+
+    Lock ownership is asked after the pacing pause, right before each part is
+    written and sent: the pause is where a lock can run out. A loss stops the
+    loop with the parts already sent (and committed) standing.
     """
     settings = get_settings()
     parts = split_reply(reply_text, settings.humanize_max_parts) or [reply_text]
@@ -441,20 +692,19 @@ async def _deliver_humanized(
             logger.warning("turn.send_typing_failed", channel_id=str(channel.id), exc_info=True)
         await asyncio.sleep(delay)
 
+        if await _lock_lost(ownership_check):
+            return _Delivery(message=last, parts_sent=index, superseded=False, lock_lost=True)
         message = _build_reply(conversation, part)
         session.add(message)
         await session.flush()
-        try:
-            await adapter.send_message(
-                OutgoingMessage(conversation_id=conversation.id, content=part), contact, channel
-            )
-        except Exception:
-            # The first part keeps the non-humanized path's behavior (raise, turn
-            # fails); later parts are best-effort so an already-delivered reply
-            # is never rolled back over a partial send failure.
-            if index == 0:
-                raise
-            logger.warning("turn.part_send_failed", channel_id=str(channel.id), exc_info=True)
+        # A failed send of any part raises (PRODUCT.md E3.2): the reply stops
+        # here, the parts already sent stay sent and committed, and `sends`
+        # tells the scheduler not to retry a reply the customer partly saw.
+        await adapter.send_message(
+            OutgoingMessage(conversation_id=conversation.id, content=part), contact, channel
+        )
+        if sends is not None:
+            sends.delivered += 1
         await session.commit()
         last = message
 
@@ -476,6 +726,52 @@ async def _is_superseded(check: SupersedeCheck | None) -> bool:
     except Exception:
         logger.warning("turn.supersede_check_failed", exc_info=True)
         return False
+
+
+async def _lock_lost(check: OwnershipCheck | None) -> bool:
+    """Ask whether the lock is gone. A check that raises counts as gone.
+
+    The opposite default from `_is_superseded` on purpose: sending while
+    another worker may be answering the same batch is the failure E3.5 rules
+    out, while stopping early only leaves the batch to the current holder.
+    """
+    if check is None:
+        return False
+    try:
+        return not bool(await check())
+    except Exception:
+        logger.warning("turn.ownership_check_failed", exc_info=True)
+        return True
+
+
+async def _give_up(
+    session: AsyncSession, conversation_id: uuid.UUID, *, delivered_parts: int
+) -> LockLost:
+    """Lock lost: drop everything not yet committed and report the outcome.
+
+    Takes the id, not the `Conversation`: the rollback expires loaded rows, and
+    touching one afterwards would need a lazy load.
+    """
+    await session.rollback()
+    logger.warning(
+        "turn.lock_lost",
+        conversation_id=str(conversation_id),
+        delivered_parts=delivered_parts,
+    )
+    return LockLost(delivered_parts)
+
+
+async def _abandon_or_give_up(
+    session: AsyncSession,
+    conversation: Conversation,
+    ownership_check: OwnershipCheck | None,
+    *,
+    delivered_parts: int,
+) -> Superseded | LockLost:
+    """Superseded turn: commit the abandonment only while the lock is ours."""
+    if await _lock_lost(ownership_check):
+        return await _give_up(session, conversation.id, delivered_parts=delivered_parts)
+    return await _abandon_turn(session, conversation, delivered_parts=delivered_parts)
 
 
 async def _abandon_turn(
@@ -515,6 +811,54 @@ async def _mark_run_superseded(session: AsyncSession, conversation: Conversation
     if run is None or run.status == AgentRunStatus.ERROR:
         return
     run.status = AgentRunStatus.SUPERSEDED
+
+
+async def _summarize_after_reply(
+    session: AsyncSession,
+    conversation: Conversation,
+    runtime: AnyTurnRuntime,
+    ownership_check: OwnershipCheck | None,
+    reply: Message | None,
+    delivered_parts: int,
+) -> None:
+    """Advance the rolling summary after a committed reply. Never raises `Exception`.
+
+    The reply is already sent and stored, so nothing here can change the
+    turn's outcome: a summary that raises, a commit that fails, or a lock lost
+    before the commit only drops the summary (rolled back, logged). The turn
+    still returns its reply, and the scheduler does not retry it.
+    """
+    conversation_id = conversation.id
+    try:
+        await _maybe_summarize(session, conversation, runtime)
+        if await _lock_lost(ownership_check):
+            logger.warning(
+                "turn.lock_lost",
+                conversation_id=str(conversation_id),
+                delivered_parts=delivered_parts,
+                stage="summary",
+            )
+            await _discard_summary(session, conversation_id, reply)
+            return
+        await session.commit()
+    except Exception:
+        logger.warning(
+            "turn.summary_not_saved", conversation_id=str(conversation_id), exc_info=True
+        )
+        await _discard_summary(session, conversation_id, reply)
+
+
+async def _discard_summary(
+    session: AsyncSession, conversation_id: uuid.UUID, reply: Message | None
+) -> None:
+    """Roll back the uncommitted summary; keep `reply` usable for the caller.
+
+    A rollback expires every loaded row, and touching an expired one would
+    need a lazy load. The reply is committed already, so it is detached first.
+    """
+    if reply is not None and reply in session:
+        session.expunge(reply)
+    await _rollback_quietly(session, conversation_id)
 
 
 async def _maybe_summarize(
