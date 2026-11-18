@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db import end_transaction
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage
 from app.llm.factory import get_provider, resolve_model
 from app.models.agent import Agent
@@ -66,28 +67,20 @@ async def score_frustration(
     """
     settings = get_settings()
     try:
-        return await asyncio.wait_for(
-            _score(session, conversation, agent, input_text),
+        messages = await _recent_messages(session, conversation)
+        prompt = _build_prompt(messages, input_text)
+        provider = get_provider(agent)
+        model = resolve_model(agent)
+        # No transaction open during the model call; the timeout wraps only it.
+        await end_transaction(session)
+        response = await asyncio.wait_for(
+            provider.complete(prompt, model=model, temperature=0.0, max_tokens=16),
             timeout=settings.sentiment_timeout_seconds,
         )
+        return _parse_score(response.content)
     except Exception:
         logger.warning("sentiment.classify_failed", conversation_id=str(conversation.id))
         return None
-
-
-async def _score(
-    session: AsyncSession,
-    conversation: Conversation,
-    agent: Agent,
-    input_text: str,
-) -> float | None:
-    messages = await _recent_messages(session, conversation)
-    prompt = _build_prompt(messages, input_text)
-    provider = get_provider(agent)
-    response = await provider.complete(
-        prompt, model=resolve_model(agent), temperature=0.0, max_tokens=16
-    )
-    return _parse_score(response.content)
 
 
 async def _recent_messages(session: AsyncSession, conversation: Conversation) -> list[Message]:

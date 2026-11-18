@@ -18,6 +18,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db import end_transaction
 from app.media.storage import get_media_storage
 from app.media.stt import STTError, transcribe
 from app.models.message import Message
@@ -29,7 +30,13 @@ AUDIO_EMPTY_TEXT = "[áudio sem fala detectada]"
 
 
 async def prepare_media_messages(session: AsyncSession, messages: list[Message]) -> None:
-    """Transcribe every untranscribed audio message in `messages`, in place."""
+    """Transcribe every untranscribed audio message in `messages`, in place.
+
+    The session's transaction is ended (`app.db.end_transaction`) right
+    before each transcription call, and never when nothing needs
+    transcribing. Rows written before it are therefore committed and no
+    longer roll back if the turn fails later.
+    """
     settings = get_settings()
     storage = get_media_storage()
 
@@ -41,6 +48,9 @@ async def prepare_media_messages(session: AsyncSession, messages: list[Message])
 
         try:
             data = await storage.get(message.media_key)
+            # No transaction while speech-to-text runs: what the turn wrote
+            # so far (earlier transcripts included) is committed here.
+            await end_transaction(session)
             transcript = await transcribe(
                 data, message.media_mime or "audio/mpeg", settings=settings
             )

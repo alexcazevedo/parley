@@ -35,16 +35,19 @@ class HandoffService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    def ensure_can_handoff(self, conversation: Conversation) -> None:
+        if conversation.state not in _HANDOFF_SOURCE_STATES:
+            raise IllegalTransitionError(
+                f"cannot hand off a conversation in state {conversation.state}"
+            )
+
     async def handoff(
         self,
         conversation: Conversation,
         reason: str | None,
         requested_by: HandoffRequestedBy,
     ) -> Handoff:
-        if conversation.state not in _HANDOFF_SOURCE_STATES:
-            raise IllegalTransitionError(
-                f"cannot hand off a conversation in state {conversation.state}"
-            )
+        self.ensure_can_handoff(conversation)
         conversation.state = ConversationState.HUMAN_HANDOFF
         record = Handoff(
             id=uuid.uuid4(),

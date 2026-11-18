@@ -19,7 +19,7 @@ in the error pause; the scheduler
 claims nothing new and lets its running turns finish. `main` waits for it up
 to `SHUTDOWN_GRACE_SECONDS`, then cancels what is left: those turns release
 their locks, and their batches come back through the claim timeout. Last, the
-Redis connection is closed.
+shared HTTP client and the Redis connection are closed.
 """
 
 import asyncio
@@ -39,6 +39,7 @@ from app.conversations.turn import AnyTurnRuntime
 # The worker runs outside FastAPI, so it owns its own session factory rather
 # than going through `app.api.deps.get_db`.
 from app.db import async_session_maker
+from app.http_client import close_shared_client
 from app.observability.logging import configure_logging
 from app.queue.base import Job, Queue
 from app.queue.redis_queue import WORKER_TTL_SECONDS, RedisQueue
@@ -183,6 +184,14 @@ async def _stop_scheduler(scheduler_task: asyncio.Task) -> None:
         logger.error("worker.scheduler_failed", exc_info=results[0])
 
 
+async def _close_connections(redis: Redis) -> None:
+    """Close the shared HTTP client, then Redis (Redis even if the client fails)."""
+    try:
+        await close_shared_client()
+    finally:
+        await redis.aclose()
+
+
 async def main() -> None:
     settings = get_settings()
     assert_secure_settings(settings)
@@ -217,7 +226,7 @@ async def main() -> None:
             housekeeping_task.cancel()
             await asyncio.gather(housekeeping_task, return_exceptions=True)
             restore_signals()
-            await redis.aclose()
+            await _close_connections(redis)
             logger.info("worker.stopped")
 
 

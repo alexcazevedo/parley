@@ -1,5 +1,8 @@
 """FastAPI application entrypoint. Register new routers here."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app.agents.boundaries import load_floor
@@ -20,9 +23,18 @@ from app.api import (
 )
 from app.api.errors import add_exception_handlers
 from app.config import Settings, assert_secure_settings, get_settings
+from app.http_client import close_shared_client
 from app.observability.logging import configure_logging, request_id_middleware
 
 configure_logging()
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        await close_shared_client()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -33,7 +45,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     assert_secure_settings(settings)
     load_floor(settings.boundary_floor_file)
 
-    app = FastAPI(title="Conversational Agent Harness")
+    app = FastAPI(title="Conversational Agent Harness", lifespan=_lifespan)
 
     app.middleware("http")(request_id_middleware)
     add_exception_handlers(app)

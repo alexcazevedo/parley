@@ -30,6 +30,8 @@ os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
 os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
 # Existing tests use the demo surface (/chat/bootstrap, /dev/messages).
 os.environ.setdefault("DEMO_MODE", "true")
+# No real waiting between retries of a 429/5xx (app/http_retry.py).
+os.environ.setdefault("HTTP_RETRY_BASE_SECONDS", "0")
 
 
 def _ensure_valid_secrets_key() -> None:
@@ -50,6 +52,7 @@ def _ensure_valid_secrets_key() -> None:
 _ensure_valid_secrets_key()
 
 from app.api.deps import get_db, get_redis  # noqa: E402
+from app.http_client import close_shared_client  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.base import Base  # noqa: E402
 
@@ -68,6 +71,13 @@ async def _ensure_test_database_exists() -> None:
 
 _STABLE_DNS_SUFFIX = ".example.com"
 _STABLE_DNS_ADDRESS = "93.184.216.34"
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _close_shared_http_client():
+    """Tests run one event loop each; the shared client must not outlive its loop."""
+    yield
+    await close_shared_client()
 
 
 @pytest.fixture(autouse=True)

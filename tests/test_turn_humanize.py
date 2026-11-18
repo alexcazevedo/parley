@@ -37,8 +37,8 @@ class RecordingAdapter:
     """Stands in for the real adapter: records the outbound call sequence.
 
     `send_message` also records how many assistant text rows the turn's session
-    can already see, which is what proves the part was persisted *before* it
-    was sent.
+    can already see, which is what proves each part is stored only *after* its
+    send (and before the next part's).
     """
 
     def __init__(self, session, conversation_id: uuid.UUID, events: list) -> None:
@@ -174,8 +174,9 @@ async def test_humanized_turn_marks_read_then_paces_each_part(
     assert [event[0] for event in events] == ["mark_read", *(["typing", "sleep", "send"] * 3)]
     sends = [event for event in events if event[0] == "send"]
     assert [event[1] for event in sends] == parts
-    # Each part was persisted before it was sent (1 row visible, then 2, then 3).
-    assert [event[2] for event in sends] == [1, 2, 3]
+    # Each part is stored right after its own send, before the next one goes
+    # out (0 rows visible at the first send, then 1, then 2).
+    assert [event[2] for event in sends] == [0, 1, 2]
 
     rows = await _replies(db_session, conversation_id)
     assert [row.content for row in rows] == parts

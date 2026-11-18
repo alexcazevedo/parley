@@ -14,11 +14,11 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-import httpx
 import structlog
 
 from app.channels.base import ChannelAdapter, IncomingMedia, IncomingMessage, OutgoingMessage
 from app.config import get_settings
+from app.http_client import shared_client
 from app.models.channel import Channel
 from app.models.contact import Contact
 from app.security import secrets as secrets_crypto
@@ -134,26 +134,26 @@ class EvolutionAdapter(ChannelAdapter):
         raw_cap = max_bytes * 4 // 3 + 65_536
 
         async with asyncio.timeout(MEDIA_DOWNLOAD_DEADLINE_SECONDS):
-            async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
-                async with client.stream(
-                    "POST",
-                    f"{base_url}/chat/getBase64FromMediaMessage/{instance}",
-                    # `identity`: a compressed body could expand far past the cap in memory.
-                    headers={"apikey": apikey, "Accept-Encoding": "identity"},
-                    json={
-                        "message": {"key": {"id": incoming.external_message_id}},
-                        "convertToMp4": False,
-                    },
-                ) as response:
-                    response.raise_for_status()
-                    encoding = response.headers.get("content-encoding", "identity")
-                    if encoding.strip().lower() not in ("", "identity"):
-                        raise MediaTooLarge("unsupported response encoding")
-                    buf = bytearray()
-                    async for chunk in response.aiter_raw():
-                        buf.extend(chunk)
-                        if len(buf) > raw_cap:
-                            raise MediaTooLarge("response exceeds size limit")
+            async with shared_client().stream(
+                "POST",
+                f"{base_url}/chat/getBase64FromMediaMessage/{instance}",
+                # `identity`: a compressed body could expand far past the cap in memory.
+                headers={"apikey": apikey, "Accept-Encoding": "identity"},
+                timeout=20,
+                json={
+                    "message": {"key": {"id": incoming.external_message_id}},
+                    "convertToMp4": False,
+                },
+            ) as response:
+                response.raise_for_status()
+                encoding = response.headers.get("content-encoding", "identity")
+                if encoding.strip().lower() not in ("", "identity"):
+                    raise MediaTooLarge("unsupported response encoding")
+                buf = bytearray()
+                async for chunk in response.aiter_raw():
+                    buf.extend(chunk)
+                    if len(buf) > raw_cap:
+                        raise MediaTooLarge("response exceeds size limit")
 
         body = json.loads(bytes(buf))
         data = base64.b64decode(body["base64"])
@@ -167,12 +167,12 @@ class EvolutionAdapter(ChannelAdapter):
     ) -> None:
         base_url, instance, apikey = await self._connection(channel)
 
-        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-            response = await client.post(
-                f"{base_url}/message/sendText/{instance}",
-                headers={"apikey": apikey},
-                json={"number": contact.external_user_id, "text": message.content},
-            )
+        response = await shared_client().post(
+            f"{base_url}/message/sendText/{instance}",
+            headers={"apikey": apikey},
+            json={"number": contact.external_user_id, "text": message.content},
+            timeout=10,
+        )
         response.raise_for_status()
 
     async def mark_read(
@@ -180,20 +180,20 @@ class EvolutionAdapter(ChannelAdapter):
     ) -> None:
         base_url, instance, apikey = await self._connection(channel)
 
-        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-            response = await client.post(
-                f"{base_url}/chat/markMessageAsRead/{instance}",
-                headers={"apikey": apikey},
-                json={
-                    "readMessages": [
-                        {
-                            "remoteJid": f"{contact.external_user_id}{_JID_SUFFIX}",
-                            "fromMe": False,
-                            "id": external_message_id,
-                        }
-                    ]
-                },
-            )
+        response = await shared_client().post(
+            f"{base_url}/chat/markMessageAsRead/{instance}",
+            headers={"apikey": apikey},
+            json={
+                "readMessages": [
+                    {
+                        "remoteJid": f"{contact.external_user_id}{_JID_SUFFIX}",
+                        "fromMe": False,
+                        "id": external_message_id,
+                    }
+                ]
+            },
+            timeout=10,
+        )
         response.raise_for_status()
 
     async def send_typing(
@@ -201,16 +201,16 @@ class EvolutionAdapter(ChannelAdapter):
     ) -> None:
         base_url, instance, apikey = await self._connection(channel)
 
-        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-            response = await client.post(
-                f"{base_url}/chat/sendPresence/{instance}",
-                headers={"apikey": apikey},
-                json={
-                    "number": contact.external_user_id,
-                    "presence": "composing",
-                    "delay": int(duration_seconds * 1000),
-                },
-            )
+        response = await shared_client().post(
+            f"{base_url}/chat/sendPresence/{instance}",
+            headers={"apikey": apikey},
+            json={
+                "number": contact.external_user_id,
+                "presence": "composing",
+                "delay": int(duration_seconds * 1000),
+            },
+            timeout=10,
+        )
         response.raise_for_status()
 
     async def check_endpoint(self, channel: Channel) -> None:

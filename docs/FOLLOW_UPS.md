@@ -52,19 +52,6 @@ plausible `/forge:idea` starting point. Not ordered by priority.
 
 ## From the reliability run
 
-- **E3.6: database transaction held across model calls and sleeps.** A turn
-  keeps one session (and one pooled connection) open while the model runs and
-  while humanized bubbles wait. That is why `WORKER_CONCURRENCY` has to stay
-  under the pool size. Doing the slow work outside the transaction would free
-  the connection.
-- **E3.7: repeated or orphaned tool side effects.** A retried turn runs the
-  model and its tools again, so a tool with a side effect can run twice, and
-  a failed attempt can leave the effects of its tools behind. Needs
-  idempotency keys or a record of tool calls per batch.
-- **E3.8: shared HTTP clients, retry on 429/5xx, token-limit parameter
-  name.** Not done in the reliability run: HTTP clients are not shared, 429
-  and 5xx answers are not retried, and the token-limit parameter name is
-  part of the same item.
 - **Resend only the missing bubbles.** A reply with a failed bubble is
   dead-lettered as partly delivered and the rest is dropped. Sending only the
   undelivered bubbles would finish the reply without repeating the first.
@@ -85,6 +72,36 @@ plausible `/forge:idea` starting point. Not ordered by priority.
 - **The production scheduler path is thinly tested.** Most tests drive
   `tick`; `run_scheduler`, which the worker runs, is covered only in
   `tests/test_scheduler_concurrency.py`.
+
+## From the reliability run, part 2
+
+- **Rows written before a slow call stay when the turn later fails.** Each
+  `end_transaction` commits what the turn had so far, so a failed turn leaves
+  its earlier messages and run row behind instead of rolling them back.
+- **The new intermediate commits are not preceded by a lock check.** A turn
+  that lost its lock can still commit rows before it notices.
+- **A reply row is stored after its send.** A crash between the two repeats
+  the reply. A lock loss after the send still rolls back the
+  unsupported-media and handoff reply rows.
+- **A handoff whose message never goes out.** A handoff is committed before
+  its message is sent. Any later run of the same batch sends the message (a
+  retry after a failed send, or the batch a crashed worker left in flight,
+  once the claim times out). A batch that runs out of attempts (three failed
+  sends) still ends without it: the dead-letter path's failure notice is sent
+  only to `ACTIVE_AI` conversations, so the customer hears nothing.
+- **A reused lookup result can be seconds old.** Reuse does not check age.
+- **Unknown-outcome calls are visible only in logs and `tool_executions`.**
+  No page or API lists rows left `started`.
+- **API request paths still hold a transaction during media fetch.** Only the
+  worker's turn was changed.
+- **Transport errors are not retried.** The short retry covers 429/5xx only;
+  a timeout or connection error is not retried.
+- **A retried turn's prompt contains the earlier attempt's saved tool
+  messages.**
+- **One unexplained failure of `tests/test_e2e_demo.py`.** It failed once in a
+  full run during this work and did not reproduce.
+- **Tested with fakeredis and `respx` only.** No run against a real Redis,
+  model endpoint or channel.
 
 ## Older known MVP limitations (README)
 

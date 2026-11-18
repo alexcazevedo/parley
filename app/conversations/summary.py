@@ -14,6 +14,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import end_transaction
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage, LLMProvider
 from app.models.agent import Agent
 from app.models.conversation import Conversation
@@ -42,6 +43,12 @@ async def maybe_summarize(
 
     Never raises: callers run this after a turn already produced its reply,
     so a broken summarizer must not cost the user their answer.
+
+    Reads first, then ends the session's transaction
+    (`app.db.end_transaction`) before the model call, then writes (flushed,
+    not committed — the caller commits). No transaction is held while the
+    model runs; rows written before this call are committed by it and no
+    longer roll back with a later failure.
     """
     threshold = agent.summary_threshold or 0
     if threshold <= 0:
@@ -95,6 +102,8 @@ async def _summarize(
     # Fixed temperature/max_tokens rather than reusing `agent.temperature`:
     # summarization wants a low-variance, deterministic-ish output regardless
     # of how the agent is tuned for conversation. Shortcut noted per mvp mode.
+    # Reads done, writes not started: no transaction while the model runs.
+    await end_transaction(session)
     response = await llm.complete(prompt, model=agent.model, temperature=0.2, max_tokens=1024)
     summary = (response.content or "").strip()
     if not summary:

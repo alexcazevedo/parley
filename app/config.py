@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = "changeme-llm-key"
     llm_model: str = "gpt-4o-mini"
+    # Name of the token-limit field in the chat-completions payload; some
+    # models want `max_completion_tokens`. One per deployment, not per agent.
+    llm_max_tokens_param: str = Field(default="max_tokens", min_length=1)
+    # Short retry on 429/5xx for model calls, speech-to-text and GET tools
+    # (see app/http_retry.py). Attempts count the first try; the wait doubles
+    # from the base, a numeric Retry-After replaces it, both capped by the max.
+    http_retry_attempts: int = Field(default=3, ge=1)
+    http_retry_base_seconds: float = Field(default=0.5, ge=0)
+    http_retry_max_wait_seconds: float = Field(default=10.0, ge=0)
     debounce_seconds: int = 3
     # Turns one worker runs at once (see app/workers/scheduler.py). Each
     # running turn holds one database connection for its whole length.

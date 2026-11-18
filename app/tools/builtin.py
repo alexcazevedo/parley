@@ -12,6 +12,7 @@ treats any terminal tool result as "stop calling the model, send this text
 instead" — the mechanism ticket 11 reuses for its own terminal tools.
 """
 
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -25,6 +26,7 @@ from app.models.agent import Agent
 from app.models.conversation import Conversation
 from app.models.handoff import HandoffRequestedBy
 from app.models.memory import MemoryType
+from app.tools import ledger
 from app.tools.base import ToolContext, ToolResult
 from app.tools.validation import validate_arguments
 
@@ -128,6 +130,12 @@ class BuiltinExecutor:
     async def specs(self, agent: Agent, session: AsyncSession) -> list[ToolSpec]:
         return [spec for spec, flag in BUILTIN_TOOLS if getattr(agent, flag, True)]
 
+    async def repeat_safe(self, name: str, ctx: ToolContext) -> bool:
+        """Always True: a built-in's effect is committed together with its
+        result (`ledger.finish`), so a row left `STARTED` means nothing happened.
+        """
+        return True
+
     async def execute(self, name: str, arguments: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handler = _HANDLERS.get(name)
         if handler is None:
@@ -135,4 +143,15 @@ class BuiltinExecutor:
         flag = _FLAG_BY_NAME.get(name)
         if flag is not None and not getattr(ctx.agent, flag, True):
             return ToolResult.failure(f"tool disabled for this agent: {name}")
-        return await handler(arguments or {}, ctx)
+        arguments = arguments or {}
+        # Committed `STARTED` before the handler runs; `finish` commits the
+        # handler's own writes together with the result, so a row left
+        # `STARTED` means the call had no effect. A handler that raises is not
+        # caught: the turn's rollback drops its writes and the row stays
+        # `STARTED`.
+        execution = await ledger.begin(ctx, tool_name=name, arguments=arguments)
+        started = time.perf_counter()
+        result = await handler(arguments, ctx)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        await ledger.finish(ctx, execution, result, latency_ms=latency_ms)
+        return result

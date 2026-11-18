@@ -239,6 +239,71 @@ same conversation.
    way, with a fixed "technical problem" message — a broken turn must not
    cost the user a reply.
 
+### A turn is a series of short transactions
+
+A turn does not hold a database transaction across slow work. Before every
+model call (the reply check included), tool call, speech-to-text call, send to
+the channel and paced wait, the code calls `app.db.end_transaction(session)`,
+which commits the open transaction if there is one. The connection goes back
+to the pool while the call runs. Sessions use `expire_on_commit=False`, so
+loaded rows stay usable. The cost: what was written before the call is
+committed and stays if the turn fails later. The time limit
+(`asyncio.wait_for`) wraps only the model call, never a database operation or
+a tool, so a timeout cannot leave the session mid-statement. A model step's
+tool messages are added to the session only after every call of the step
+returned. Intermediate commits are not preceded by a lock check; the lock is
+checked before every send and before the commits that store a turn's outcome. The API's request paths still hold a
+transaction while they fetch media.
+
+### The tool ledger
+
+`app/tools/ledger.py` puts every tool call on record before it runs.
+`begin` inserts a `ToolExecution` with status `STARTED` and commits it;
+`finish` fills in the result (`model_content` holds the exact string the model
+received) and commits again, together with anything the tool wrote on the
+session (a built-in's `Memory` or `Handoff`). A row left `STARTED` means the
+outcome is unknown. `HttpToolExecutor` also leaves it `STARTED`, through
+`ledger.mark_unknown` (fills in `error` and `latency_ms`), when the call failed
+after its request may have reached the endpoint: an `httpx.TimeoutException`
+other than `ConnectTimeout`, an `httpx.HTTPError` other than `ConnectError`,
+or an unexpected exception. A blocked endpoint (`SSRFError`), `ConnectError`,
+`ConnectTimeout`, invalid arguments and any HTTP response are finished as
+today. In every case the current attempt's model gets the same failure text.
+`finish` stores a terminal result's `final_text` (`handoff_to_human`) in
+`terminal_text`, and `replay` restores `terminal=True` and `final_text`, so a
+reused handoff still ends the loop. `agent_runs.conversation_id` and
+`tool_executions.agent_run_id`, which `find_prior` filters and joins on, are
+indexed.
+
+`ToolRegistry.execute` asks `ledger.find_prior` first. "Same turn" is decided
+by the batch: `process_turn` passes the ids of the messages it answers to
+`run_turn`, which stores them in `AgentRun.input_message_ids`. An earlier run
+counts when it is in the same tenant and conversation and its ids are a
+non-empty subset of the current run's ids. A retry has the same ids, a turn
+merged with newer messages has a superset, a later turn has none of them.
+The match is on tool name and arguments; a finished row (the newest) wins over
+a `STARTED` one.
+
+- finished (`OK` or `ERROR`): `ledger.replay` returns the saved result, the
+  tool does not run, no new row is written (`tools.result_reused`);
+- `STARTED`: the call runs again only if the owning executor's
+  `repeat_safe(name, ctx)` is true (HTTP tool with GET; built-ins, whose effect
+  and result are saved together). Otherwise the model gets
+  `OUTCOME_UNKNOWN_ERROR` and the log gets `tools.outcome_unknown`. An
+  executor without `repeat_safe` counts as not safe.
+
+### The shared HTTP client
+
+`app/http_client.py` holds one `httpx.AsyncClient` per process, created on
+first use (`shared_client()`). The model provider, speech-to-text, the
+Evolution adapter and the HTTP tools all use it, each passing its own timeout
+per request; redirects stay off. The API's lifespan (`app/main.py`) and the
+worker's `_close_connections` (`app/workers/main.py`) close it through
+`close_shared_client()` on shutdown; the provider's own `aclose` does not.
+`app/http_retry.py` adds the short retry on 429/5xx for model calls,
+speech-to-text and GET tools (`send_with_retry`); a GET tool repeats its SSRF
+check before every try.
+
 ### Tenant-scoped agent loading
 
 Every place that needs the agent of a conversation (`process_turn`,

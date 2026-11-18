@@ -10,12 +10,18 @@ One thing runs before the runtime: for agents with
 `settings.sentiment_threshold` short-circuits the turn into a warm handoff
 (`requested_by=system`) whose reply is the agent's `handoff_message`.
 
+A handoff (sentiment, or the agent's `handoff_to_human` tool) is committed
+before its `handoff_message` is sent, so a failed send leaves the
+conversation in `HUMAN_HANDOFF` with the customer told nothing. When the
+scheduler retries that batch, the turn sees the handoff message is still
+owed (`_handoff_message_owed`) and sends just that, with no runtime call.
+Every other batch of a conversation that is not `ACTIVE_AI` gets nothing.
+
 Two runtime shapes are accepted. `TurnRuntime` is text-in/text-out and needs
 nothing from the database (`EchoRuntime`, test doubles).
 `SessionAwareTurnRuntime` additionally receives the turn's session, because it
 writes its own rows — `app.agents.runtime.AgentRuntime` persists an `AgentRun`
-plus the tool-call/tool-result messages and must land in the same transaction
-as the reply. The worker injects `AgentRuntime`; `EchoRuntime` stays the
+plus the tool-call/tool-result messages. The worker injects `AgentRuntime`; `EchoRuntime` stays the
 default so nothing accidentally calls a live model.
 
 A batch made entirely of `unsupported` media (video, documents, stickers)
@@ -33,14 +39,35 @@ means today's behavior, byte for byte.
 Lock ownership (PRODUCT.md E3.5): the scheduler also injects an
 `ownership_check` — "is the conversation lock still ours?". It is asked right
 before every outbound send (read receipt, each bubble, the single reply) and
-right before every commit but one: the commit that stores a reply right after
-it was sent. A `False`, or a check that raises, means another worker may own
+right before the turn's own commits (the abandonment of a superseded turn,
+the unsupported-media, sentiment and owed handoff replies, the summary), but
+not before the commit that stores a reply right after it was sent, the
+commits `app.db.end_transaction` makes before slow calls, the tool ledger's
+commits (`app/tools/ledger.py`) or the runtime's commits of its `AgentRun`.
+A `False`, or a check that raises, means another worker may own
 this conversation now: the turn rolls back what it has not committed, sends
 nothing more and returns `LockLost`. Bubbles already sent stand (and stay
 committed). No check means today's behavior.
 
-A delivered reply is committed right after its send (per bubble when
-humanized), before the rolling summary, a model call. Whatever happens to the
+No transaction across slow work (PRODUCT.md E3.6): right before every slow
+call — the channel endpoint check, speech-to-text, the read receipt, each
+typing indicator, each pacing sleep, each send, the summary model call — the
+turn calls `app.db.end_transaction`, so no connection sits idle in a
+transaction while the network or the clock is waited on. The consequence:
+rows written before a slow call are committed before it, and no longer roll
+back when the turn later fails or loses the lock (a rollback only drops what
+was written since the last slow call). The runtime's own model and tool
+calls are not covered here yet.
+
+A runtime whose `run_turn` has a `message_ids` parameter (`AgentRuntime`)
+also gets the batch's message ids, so a re-run of the batch reuses the tool
+calls an earlier attempt already made (PRODUCT.md E3.7). Three-argument
+runtimes are called as before.
+
+A reply row is written only after its send succeeded: send first, then the
+row is added and committed (per bubble when humanized), so a failed send
+leaves no reply row. A delivered reply is committed right after its send,
+before the rolling summary, a model call. Whatever happens to the
 summary afterwards — it raises, its commit fails, the lock is lost before its
 commit — only the summary is dropped: the turn still returns the reply.
 
@@ -53,14 +80,15 @@ a customer gets when a batch is dead-lettered.
 """
 
 import asyncio
+import inspect
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.context import render_message_text
@@ -71,6 +99,7 @@ from app.channels.registry import get_adapter
 from app.config import get_settings
 from app.conversations.humanize import split_reply, typing_delay_seconds
 from app.conversations.summary import maybe_summarize
+from app.db import end_transaction
 from app.handoff.summarizer import handoff_with_summary
 from app.llm.factory import get_provider
 from app.media.prepare import prepare_media_messages
@@ -79,7 +108,7 @@ from app.models.agent_run import AgentRun, AgentRunStatus
 from app.models.channel import Channel
 from app.models.contact import Contact
 from app.models.conversation import Conversation, ConversationState
-from app.models.handoff import HandoffRequestedBy
+from app.models.handoff import Handoff, HandoffRequestedBy
 from app.models.message import Message, MessageDirection, MessageRole
 from app.tools.ssrf import SSRFError
 
@@ -199,7 +228,8 @@ async def process_turn(
 
     Returns the persisted assistant message, or `None` when no reply was
     produced (unknown conversation, empty batch, a conversation that is not
-    `ACTIVE_AI` — a human is driving it, so the AI stays quiet — or one whose
+    `ACTIVE_AI` — a human is driving it, so the AI stays quiet, unless this is
+    the retry of a batch whose handoff message was never sent — or one whose
     agent is missing or belongs to another tenant, or whose channel endpoint
     the SSRF check refuses: the turn is refused, nothing is sent or written).
 
@@ -313,7 +343,18 @@ async def _run_turn(
         logger.warning("turn.unknown_conversation", conversation_id=str(conversation_id))
         return None
 
-    if conversation.state != ConversationState.ACTIVE_AI:
+    # Read now, while the rows are loaded: later commits may expire them.
+    message_ids = [message.id for message in messages]
+
+    # A handoff is committed before its message is sent, so a failed send
+    # leaves the conversation in HUMAN_HANDOFF with the customer told nothing.
+    # The retry of that batch still owes them the message; any other batch of a
+    # conversation that is not ACTIVE_AI stays silent (a human is driving it).
+    handoff_message_owed = (
+        conversation.state == ConversationState.HUMAN_HANDOFF
+        and await _handoff_message_owed(session, conversation, message_ids)
+    )
+    if conversation.state != ConversationState.ACTIVE_AI and not handoff_message_owed:
         logger.info(
             "turn.skipped_not_active_ai",
             conversation_id=str(conversation_id),
@@ -344,20 +385,33 @@ async def _run_turn(
     # refuses would only fail at `send_message`, after the model and tools ran,
     # and the exception would hold up the rest of the scheduler tick. Ask up
     # front and return quietly instead.
-    if not await _channel_endpoint_ok(adapter, channel, conversation_id):
+    if not await _channel_endpoint_ok(session, adapter, channel, conversation_id):
         return None
+
+    humanized = bool((channel.config or {}).get("humanize"))
+
+    if handoff_message_owed:
+        return await _deliver_owed_handoff_message(
+            session,
+            conversation,
+            agent,
+            adapter,
+            contact,
+            channel,
+            humanized,
+            ownership_check,
+            sends,
+        )
 
     # Voice notes are transcribed before anything else touches the batch, so
     # the read receipt, sentiment scoring and the joined `input_text` all see
     # the transcript rather than an empty audio message.
     await prepare_media_messages(session, messages)
 
-    humanized = bool((channel.config or {}).get("humanize"))
-
     if humanized:
         if await _lock_lost(ownership_check):
             return await _give_up(session, conversation_id, delivered_parts=0)
-        await _mark_read(adapter, messages, contact, channel)
+        await _mark_read(session, adapter, messages, contact, channel)
 
     if all(message.type == "unsupported" for message in messages):
         return await _reply_unsupported_media(
@@ -395,7 +449,14 @@ async def _run_turn(
 
     runtime = runtime or EchoRuntime()
     if isinstance(runtime, SessionAwareTurnRuntime):
-        reply_text = await runtime.run_turn(session, conversation, input_text)
+        if _accepts_message_ids(runtime):
+            # The batch's ids let the runtime reuse tool calls an earlier
+            # attempt of this same batch already made (PRODUCT.md E3.7).
+            reply_text = await runtime.run_turn(  # type: ignore[call-arg]
+                session, conversation, input_text, message_ids=message_ids
+            )
+        else:
+            reply_text = await runtime.run_turn(session, conversation, input_text)
     else:
         reply_text = await runtime.run(conversation, input_text)
 
@@ -446,19 +507,30 @@ async def _run_turn(
     return reply
 
 
+def _accepts_message_ids(runtime: SessionAwareTurnRuntime) -> bool:
+    """Does `runtime.run_turn` take `message_ids`? Three-argument runtimes don't."""
+    try:
+        parameters = inspect.signature(runtime.run_turn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "message_ids" in parameters
+
+
 async def _channel_endpoint_ok(
-    adapter: ChannelAdapter, channel: Channel, conversation_id: uuid.UUID
+    session: AsyncSession, adapter: ChannelAdapter, channel: Channel, conversation_id: uuid.UUID
 ) -> bool:
     """False (and a warning) when the channel's outbound endpoint is refused.
 
     Every registered adapter subclasses `ChannelAdapter` and so has
     `check_endpoint`; the `getattr` only spares duck-typed test doubles
     (recording adapters swapped in for `get_adapter`), which have no endpoint.
-    The adapter's own outbound calls re-check regardless.
+    The adapter's own outbound calls re-check regardless. The check resolves
+    DNS, so the turn's transaction (reads only so far) is ended first.
     """
     check_endpoint = getattr(adapter, "check_endpoint", None)
     if check_endpoint is None:
         return True
+    await end_transaction(session)
     try:
         await check_endpoint(channel)
     except SSRFError:
@@ -574,6 +646,126 @@ async def _maybe_escalate_on_sentiment(
     return reply
 
 
+async def _handoff_message_owed(
+    session: AsyncSession, conversation: Conversation, message_ids: list[uuid.UUID]
+) -> bool:
+    """Does this batch still owe the customer the agent's `handoff_message`?
+
+    Yes when the conversation's latest `Handoff` was requested by the agent
+    (the `handoff_to_human` tool) or the system (sentiment escalation), was
+    created after the newest message of this batch arrived, and no outbound
+    assistant text has been stored since that handoff. That is the retry of a
+    batch whose handoff was committed and whose message then failed to send.
+    An operator's handoff, a handoff made before this batch arrived (a later
+    batch) and one already followed by a reply stay silent.
+
+    Which clock each comparison uses:
+
+    - `handoffs.created_at` against `messages.created_at` of the batch: both
+      are server defaults, `now()` of the inserting transaction, so both come
+      from the database clock. The batch was committed before this turn read
+      it, and the handoff's transaction started after that (it follows a
+      commit made right before a model call), so a handoff made for this batch
+      is strictly later.
+    - `handoffs.created_at` against the reply rows' `created_at`: replies are
+      stamped by this process (`_build_reply`, `datetime.now`), the handoff by
+      the database, and the two clocks may differ by any amount. So the
+      database clock's offset from ours is measured here (`clock_timestamp()`
+      between two local readings) and the handoff time is moved onto our clock
+      before comparing. The error is at most half of that one round trip,
+      smaller than the gap between a handoff's transaction start and its reply
+      (several round trips plus the send). A step of the local clock between
+      the reply and this check is not covered.
+    """
+    latest = (
+        await session.execute(
+            select(Handoff.requested_by, Handoff.created_at)
+            .where(
+                Handoff.tenant_id == conversation.tenant_id,
+                Handoff.conversation_id == conversation.id,
+            )
+            .order_by(Handoff.created_at.desc(), Handoff.id.desc())
+            .limit(1)
+        )
+    ).first()
+    if latest is None or latest.requested_by not in _HANDOFFS_THAT_OWE_A_MESSAGE:
+        return False
+    newest_arrival = (
+        await session.execute(
+            select(func.max(Message.created_at)).where(
+                Message.conversation_id == conversation.id, Message.id.in_(message_ids)
+            )
+        )
+    ).scalar_one_or_none()
+    if newest_arrival is None or latest.created_at <= newest_arrival:
+        return False
+    handoff_on_our_clock = latest.created_at - await _database_clock_offset(session)
+    answered = (
+        await session.execute(
+            select(Message.id)
+            .where(
+                Message.conversation_id == conversation.id,
+                Message.direction == MessageDirection.OUT,
+                Message.role == MessageRole.ASSISTANT,
+                Message.type == "text",
+                Message.created_at > handoff_on_our_clock,
+            )
+            .limit(1)
+        )
+    ).first()
+    return answered is None
+
+
+_HANDOFFS_THAT_OWE_A_MESSAGE = (HandoffRequestedBy.AGENT, HandoffRequestedBy.SYSTEM)
+
+
+async def _database_clock_offset(session: AsyncSession) -> timedelta:
+    """The database clock minus this process's clock, to within half a round trip."""
+    before = datetime.now(UTC)
+    database_now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+    after = datetime.now(UTC)
+    return database_now - (before + (after - before) / 2)
+
+
+async def _deliver_owed_handoff_message(
+    session: AsyncSession,
+    conversation: Conversation,
+    agent: Agent,
+    adapter: ChannelAdapter,
+    contact: Contact,
+    channel: Channel,
+    humanized: bool,
+    ownership_check: OwnershipCheck | None,
+    sends: _Sends,
+) -> Message | LockLost | None:
+    """Send the handoff message an earlier attempt of this batch failed to send.
+
+    Delivered and committed as the sentiment path does: lock ownership asked
+    before the send and before the commit, no supersede checkpoints (the
+    conversation is already handed off, so this is not a stale AI answer).
+    """
+    conversation_id = conversation.id
+    delivery = await _deliver(
+        session,
+        conversation,
+        adapter,
+        contact,
+        channel,
+        humanized,
+        agent.handoff_message,
+        ownership_check=ownership_check,
+        sends=sends,
+    )
+    if delivery.lock_lost:
+        return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
+    conversation.last_message_at = datetime.now(UTC)
+    if await _lock_lost(ownership_check):
+        return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
+    await session.commit()
+    logger.info("turn.handoff_message_delivered_on_retry", conversation_id=str(conversation_id))
+    return delivery.message
+
+
 async def _deliver(
     session: AsyncSession,
     conversation: Conversation,
@@ -594,6 +786,11 @@ async def _deliver(
     covered entirely by checkpoint 1 in `process_turn`. Lock ownership is asked
     right before every send on both paths. Each successful send is counted in
     `sends`; a failed one raises.
+
+    The send comes first, outside any transaction (`end_transaction` right
+    before it); the reply row is added only once the send succeeded, so a
+    failed send leaves no row. On this single-message path the row is left
+    for the caller's commit; the humanized path commits each part itself.
     """
     if humanized:
         return await _deliver_humanized(
@@ -610,13 +807,13 @@ async def _deliver(
     if await _lock_lost(ownership_check):
         return _Delivery(message=None, parts_sent=0, superseded=False, lock_lost=True)
     reply = _build_reply(conversation, reply_text)
-    session.add(reply)
-    await session.flush()
+    await end_transaction(session)
     await adapter.send_message(
         OutgoingMessage(conversation_id=conversation.id, content=reply_text), contact, channel
     )
     if sends is not None:
         sends.delivered += 1
+    session.add(reply)
     return _Delivery(message=reply, parts_sent=1, superseded=False)
 
 
@@ -638,12 +835,17 @@ def _build_reply(conversation: Conversation, content: str) -> Message:
 
 
 async def _mark_read(
-    adapter: ChannelAdapter, messages: list[Message], contact: Contact, channel: Channel
+    session: AsyncSession,
+    adapter: ChannelAdapter,
+    messages: list[Message],
+    contact: Contact,
+    channel: Channel,
 ) -> None:
     """Best-effort read receipt for the newest inbound message of the batch."""
     external_message_id = messages[-1].external_message_id
     if not external_message_id:
         return
+    await end_transaction(session)
     try:
         await adapter.mark_read(external_message_id, contact, channel)
     except Exception:
@@ -674,8 +876,12 @@ async def _deliver_humanized(
     already went out standing — humans get cut off mid-thought too.
 
     Lock ownership is asked after the pacing pause, right before each part is
-    written and sent: the pause is where a lock can run out. A loss stops the
-    loop with the parts already sent (and committed) standing.
+    sent: the pause is where a lock can run out. A loss stops the loop with
+    the parts already sent (and committed) standing.
+
+    No transaction is open during the typing indicator, the pause or the
+    send (`end_transaction` before each). A part's row is added and
+    committed right after its send succeeded; a failed send leaves none.
     """
     settings = get_settings()
     parts = split_reply(reply_text, settings.humanize_max_parts) or [reply_text]
@@ -686,17 +892,18 @@ async def _deliver_humanized(
             return _Delivery(message=last, parts_sent=index, superseded=True)
 
         delay = typing_delay_seconds(part, settings)
+        await end_transaction(session)
         try:
             await adapter.send_typing(contact, channel, delay)
         except Exception:
             logger.warning("turn.send_typing_failed", channel_id=str(channel.id), exc_info=True)
+        await end_transaction(session)
         await asyncio.sleep(delay)
 
         if await _lock_lost(ownership_check):
             return _Delivery(message=last, parts_sent=index, superseded=False, lock_lost=True)
         message = _build_reply(conversation, part)
-        session.add(message)
-        await session.flush()
+        await end_transaction(session)
         # A failed send of any part raises (PRODUCT.md E3.2): the reply stops
         # here, the parts already sent stay sent and committed, and `sends`
         # tells the scheduler not to retry a reply the customer partly saw.
@@ -705,6 +912,7 @@ async def _deliver_humanized(
         )
         if sends is not None:
             sends.delivered += 1
+        session.add(message)
         await session.commit()
         last = message
 

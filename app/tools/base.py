@@ -32,6 +32,10 @@ class ToolContext:
     contact_id: uuid.UUID
     agent: Agent
     agent_run_id: uuid.UUID
+    # Ids of the inbound messages this turn answers. A tool call made by an
+    # earlier attempt of the same batch is not made again (app/tools/ledger.py
+    # `find_prior`); empty means no reuse at all.
+    message_ids: tuple[uuid.UUID, ...] = ()
 
 
 @dataclass(slots=True)

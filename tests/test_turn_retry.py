@@ -364,12 +364,15 @@ async def test_failure_in_final_commit_after_send_is_not_retried(
     adapter = _stub_adapter(monkeypatch, FlakyAdapter())
     runtime = RecordingRuntime()
     original_commit = db_session.commit
-    commits = {"count": 0}
+    commits = {"after_send": 0}
 
+    # The turn commits before its send too (no transaction across the send);
+    # the one that fails here is the first commit after the reply went out.
     async def failing_commit():
-        commits["count"] += 1
-        if commits["count"] == 1:
-            raise Boom("database went away")
+        if adapter.delivered:
+            commits["after_send"] += 1
+            if commits["after_send"] == 1:
+                raise Boom("database went away")
         return await original_commit()
 
     monkeypatch.setattr(db_session, "commit", failing_commit)
@@ -561,12 +564,15 @@ async def test_failing_commit_after_the_summary_keeps_the_sent_reply(
     adapter = _stub_adapter(monkeypatch, FlakyAdapter())
     runtime = RecordingRuntime()
     original_commit = db_session.commit
-    commits = {"count": 0}
+    commits = {"after_send": 0}
 
+    # Commits after the send: the first stores the reply, the second the
+    # summary. The turn's commits before the send are not counted.
     async def failing_second_commit():
-        commits["count"] += 1
-        if commits["count"] == 2:
-            raise Boom("database went away")
+        if adapter.delivered:
+            commits["after_send"] += 1
+            if commits["after_send"] == 2:
+                raise Boom("database went away")
         return await original_commit()
 
     monkeypatch.setattr(db_session, "commit", failing_second_commit)

@@ -12,6 +12,8 @@ import httpx
 import structlog
 
 from app.config import Settings
+from app.http_client import shared_client
+from app.http_retry import send_with_retry
 
 logger = structlog.get_logger(__name__)
 
@@ -52,15 +54,18 @@ async def transcribe(data: bytes, mime: str, *, settings: Settings) -> str:
     filename = _FILENAMES.get(mime, "audio.bin")
 
     try:
-        async with httpx.AsyncClient(timeout=settings.stt_timeout_seconds) as client:
-            response = await client.post(
+        response = await send_with_retry(
+            lambda: shared_client().post(
                 url,
                 headers={"Authorization": f"Bearer {api_key}"},
                 data=form_data,
                 files={"file": (filename, data, mime)},
-            )
-            response.raise_for_status()
-            body = response.json()
+                timeout=settings.stt_timeout_seconds,
+            ),
+            settings=settings,
+        )
+        response.raise_for_status()
+        body = response.json()
     except httpx.HTTPStatusError as exc:
         raise STTError(
             f"{exc.response.status_code} from {url}: {exc.response.text[:500]}"

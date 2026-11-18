@@ -361,7 +361,9 @@ What happens to a customer's message when a worker dies or a turn fails.
 The tests are in `tests/test_e3_reliability.py` (one per case below) and in
 the per-feature files `tests/test_queue_recovery.py`,
 `tests/test_claim_recovery.py`, `tests/test_lock_heartbeat.py`,
-`tests/test_turn_retry.py` and `tests/test_scheduler_concurrency.py`.
+`tests/test_turn_retry.py` and `tests/test_scheduler_concurrency.py`. The
+tool ledger, the short retry and the held-transaction rules are covered in
+`tests/test_e3_part2.py`.
 
 **Delivery is at-least-once, not exactly-once.** A worker that dies after it
 sent a reply and before it marked the turn done repeats that reply after
@@ -421,6 +423,57 @@ API or page for it and no replay (see `docs/FOLLOW_UPS.md`). `harness:dlq`
 is a different list, the job queue's own (`RedisQueue.fail`); the worker does
 not call it today.
 
+### Tool calls are recorded first and not repeated
+
+Before a tool runs, its call (tool name and arguments) is saved in its own
+transaction with status `started` in `tool_executions`; when the tool returns,
+the row is completed with the result (or the error). The record therefore
+stays when the turn later fails, is cancelled or is superseded. When a turn
+runs again for the same messages (a retry, or a turn merged with newer
+messages), a call with the same tool and the same arguments as an earlier
+attempt is not made again:
+
+- **Reuse.** If the earlier call returned, the model gets the saved result,
+  an error included, and the tool is not called. This applies to every tool.
+  It holds only within re-runs of the same turn, never in a later turn with
+  other messages. Log event `tools.result_reused`.
+- **Unknown outcome.** If the earlier call was started and has no result, an
+  HTTP tool with method GET is called again. That covers a worker that died
+  mid-call and an HTTP tool call that failed after its request may have
+  reached the endpoint: a timeout other than a connect timeout, another
+  transport error, or an unexpected error (the row stays `started`, with the
+  error and latency filled in). A call that never left (connection refused,
+  connect timeout, blocked endpoint, invalid arguments) or that got an HTTP
+  response, of any status, has a saved result. Any other HTTP tool is not: the model is told the outcome is unknown
+  and that the call was not repeated, and the call is logged as
+  `tools.outcome_unknown` (warning). The built-in tools (`remember`,
+  `handoff_to_human`) save their effect together with their result, so a call
+  with no result did nothing and runs again. A reused `handoff_to_human` result
+  still ends the turn with the agent's handoff message.
+- **Same turn.** Another run in the same conversation whose saved message ids
+  are all among this run's message ids.
+
+### Short retry on 429/5xx
+
+Model calls, speech-to-text and GET tools are retried when the answer is 429,
+500, 502, 503 or 504: up to `HTTP_RETRY_ATTEMPTS` tries in total, waiting a
+growing time between them (log event `http.retry`). A numeric `Retry-After`
+header sets the wait, up to `HTTP_RETRY_MAX_WAIT_SECONDS`. Not covered:
+non-GET tools and sends to the channel are never retried at this level, and
+nothing is retried after a timeout or a connection error, because the request
+may have been processed. A model call that still fails after the last try
+gets the runtime's own error text.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `HTTP_RETRY_ATTEMPTS` | `3` | Tries in total, the first included |
+| `HTTP_RETRY_BASE_SECONDS` | `0.5` | Wait after the first failure; doubles each time |
+| `HTTP_RETRY_MAX_WAIT_SECONDS` | `10` | Longest single wait, `Retry-After` included |
+| `LLM_MAX_TOKENS_PARAM` | `max_tokens` | Name of the token-limit field sent to the model; some models want `max_completion_tokens` |
+
+The API and the worker each keep one shared HTTP client for the model,
+speech-to-text, the channel and HTTP tools, and close it on shutdown.
+
 ### Redis errors in the worker
 
 An error in the job loop (Redis down or restarting, a job that cannot be
@@ -431,11 +484,14 @@ The housekeeping pass and the scheduler loop also log their errors and go on.
 ### Concurrency
 
 One worker runs up to `WORKER_CONCURRENCY` conversations at the same time
-(default 4, minimum 1). One conversation never runs twice at once. Each running
-turn holds one database connection for as long as it runs, including model
-calls and paced bubbles. The app's engine uses SQLAlchemy's default pool (5
-connections, up to 10 more on demand), so keep `WORKER_CONCURRENCY` well under
-that.
+(default 4, minimum 1). One conversation never runs twice at once. A turn
+holds a database connection only while it reads or writes: it commits before
+every model call, tool call, speech-to-text call, send to the channel and
+paced wait, so the connection goes back to the pool during that slow work.
+The one exception is the API's request paths, which still hold a transaction
+while they fetch media (see "Limits"). The app's engine uses SQLAlchemy's
+default pool (5 connections, up to 10 more on demand), so keep
+`WORKER_CONCURRENCY` well under that.
 
 ### Graceful shutdown
 
@@ -452,19 +508,32 @@ Log events: `worker.stopping`, `scheduler.stopping`, `scheduler.stopped`,
 
 - Delivery is at-least-once. A worker that dies after sending and before the
   turn is marked done repeats the reply after recovery (about 60 s later).
-- A retried turn runs the model and its tools again. A tool with a side
-  effect can run twice.
+- A tool call is not repeated on a re-run, but only within the same turn. A
+  reused lookup result can be seconds old. A call with unknown outcome is
+  visible to an operator only in the logs and in `tool_executions` (rows still
+  `started`).
+- Rows a turn wrote before a slow call stay when the turn later fails.
+- A reply row is stored after its send, so a crash between the two repeats the
+  reply. A handoff the tool committed, followed by a crash before the handoff
+  message is sent, leaves the customer without that message. A lock loss after
+  the send still rolls back the unsupported-media and handoff reply rows.
+- A retried turn's prompt contains the earlier attempt's saved tool messages.
+- The API's request paths still hold a
+  transaction while they fetch media.
 - A send that errored but did reach the customer is retried and can repeat.
-- Model errors are answered with the runtime's own error text and are not
-  retried. Retries cover what escapes the turn: a send failure, a database
+- Model errors that remain after the short retry are answered with the
+  runtime's own error text, and the turn is not run again for them. Turn
+  retries cover what escapes the turn: a send failure, a database
   error, a speech-to-text failure.
 - The error message after the last attempt is stored first and then sent on
   a best-effort basis. On a broken channel the customer may not receive it.
 - A turn cancelled after the shutdown grace period may resend bubbles it
   already sent.
-- Not done in this run: the database transaction is still held across model
-  calls (E3.6), tool side effects are not de-duplicated (E3.7), HTTP clients
-  are not shared and 429/5xx are not retried (E3.8). See `docs/FOLLOW_UPS.md`.
+- The short retry does not cover transport errors or timeouts, non-GET tools
+  or sends to the channel.
+- The reliability behaviour is tested with fakeredis and `respx` only, not
+  against a real Redis, model or channel.
+  See `docs/FOLLOW_UPS.md`.
 
 ## Known MVP limitations
 

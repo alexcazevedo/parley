@@ -5,75 +5,93 @@ parallel_default: sequential   # sequential | parallel
 owner: human                   # human | agent (set by forge:auto)
 ---
 
-# No lost messages, no stalled workers (PRD epic E3, part 1)
+# No repeated side effects, no held connections (PRD epic E3, part 2)
 
 ## What / why
 
-A customer's message can be lost today, and one slow conversation holds
-up every other one on the same worker. This run fixes the five items of
-PRD epic E3 that cause that. Every item starts with a test that fails on
-the current code; an item whose reproduction fails is dropped and
-reported, not "fixed" blind.
+Part 1 made a turn safe to run again. Running it again still repeats
+whatever its tools did, a turn still holds a database connection while it
+waits on the model, and every outbound call opens a new HTTP client and
+gives up on the first 429 or 5xx. This run fixes the three remaining
+items of PRD epic E3. Every item starts with a test that fails on the
+current code; an item whose reproduction fails is dropped and reported,
+not "fixed" blind.
 
 In scope (existing repo):
 
-- **E3.1 Job survives a worker crash.** A job taken from the queue is
-  recorded as in progress in the same step. Jobs left behind by a dead
-  worker are put back.
-- **E3.2 A failed turn is retried.** Any error during a turn puts the
-  batch back for another attempt: up to 3 attempts, with a growing wait
-  of seconds between them. After the last one the batch goes to the
-  dead-letter list and the customer gets the fixed error message once.
-  Messages that arrived meanwhile are always scheduled, failure or not.
-- **E3.3 A claimed conversation is recoverable.** If a worker dies
-  after claiming a due conversation and before finishing it, the
-  conversation is picked up again after a timeout.
-- **E3.4 Conversations run concurrently.** One worker runs several
-  conversations at once, 4 by default, set by the operator. The same
-  conversation never runs twice in parallel. On shutdown the worker
-  takes no new turns and waits for the running ones.
-- **E3.5 The lock holds for the whole turn.** The conversation lock is
-  renewed while the turn runs. A turn that finds it no longer owns the
-  lock stops before sending or saving anything further, and its batch is
-  put back for the current holder.
+- **E3.6 No database transaction across slow work.** A turn does not
+  hold a transaction or a connection while it calls the model, a tool,
+  speech-to-text or the channel, or while it sleeps. Timeouts wrap only
+  the network call, never a database operation, so a timeout cannot
+  leave the session unusable.
+- **E3.7 Tool calls are recorded first and not repeated.** A tool call
+  is saved, in its own transaction, before it runs, and its result is
+  saved when it returns. The record survives a failed or superseded
+  turn. When the turn runs again, a call the earlier attempt already
+  made is not made again.
+- **E3.8 Shared clients, short retry, token-limit name.** The API and
+  the worker each own their HTTP clients for the model, speech-to-text,
+  the channel and HTTP tools, and close them on shutdown. Safe calls are
+  retried on 429/5xx. The name of the token-limit parameter sent to the
+  model is an operator setting.
 
 Decided in the grill:
 
-- **Retry is the whole turn**, including the model call. Tools that ran
-  in a failed attempt may run again; preventing that is E3.7, a later
-  run.
-- **No retry once anything reached the customer.** If part of a reply
-  was delivered before the failure, the turn ends there: what was sent
-  stays, the rest is dropped, the batch goes to the dead-letter list
-  marked as partly delivered, and no error message is added.
-- **The dead-letter list** is logged and readable in Redis. No API or
-  page for it in this run.
-- The README and architecture doc describe the new behaviour and the
-  concurrency setting; the wrong "BRPOPLPUSH-alike" claim is corrected.
+- **Reuse the saved result.** On a re-run (a retry, or a turn merged
+  with newer messages), a call with the same tool and the same arguments
+  as one that already returned gets the saved result. This applies to
+  every tool and only within re-runs of the same turn, never to later
+  turns. Tenants configure nothing.
+- **Unknown outcome: repeat only read-only calls.** A call that was
+  started and has no saved result (worker died, call timed out) is
+  called again only if it is an HTTP tool using GET. Any other HTTP
+  tool call is not repeated: the agent is told the outcome is unknown
+  and the call is logged for the operator. Built-in tools (`remember`,
+  `handoff_to_human`) are the exception: their effect is saved together
+  with their result, so a call with no saved result did nothing and is
+  run again.
+- **A saved error is reused too.** A call that returned an error counts
+  as already made.
+- **Automatic retry only where a repeat is safe.** Model calls,
+  speech-to-text and GET tools are retried a bounded number of times
+  with a growing wait, honouring `Retry-After`. Non-GET tools and sends
+  to the channel are not retried at this level and keep today's
+  handling.
+- **Token-limit name is one operator setting**, not per agent: there is
+  one model endpoint per deployment. Default stays `max_tokens`.
+- The README and architecture doc describe the new behaviour and
+  settings; `docs/FOLLOW_UPS.md` drops what this run closes.
 
 ## Primary user story
 
-As someone running parley for my customers, I know that a message a
-customer sent is answered or ends up where I can see it, even when a
-worker crashes or a provider is down, and that one slow conversation
-does not make everyone else wait.
+As someone running parley for my customers, I know that a retried or
+interrupted turn does not book, charge or notify twice, that slow model
+calls do not use up my database connections, and that one rate-limit
+response from a provider does not fail a customer's turn.
 
 ## Out of scope
 
-- E3.6 DB transaction held across model calls and sleeps
-- E3.7 Repeated or orphaned tool side effects
-- E3.8 Shared HTTP clients, retry on 429/5xx, token-limit parameter name
-- Resending only the undelivered bubbles of a partly delivered reply
-- An API or operator page for the dead-letter list; replaying it
-- Raising the default DB pool size; multi-worker autoscaling
-- PRD epics E4–E7 and everything in `docs/FOLLOW_UPS.md`
+- A per-tool "safe to repeat" setting; treating non-GET tools as
+  repeatable
+- Retrying sends to the channel or non-GET tools on 429/5xx
+- Exactly-once delivery of replies (the duplicate reply after a crash
+  between saving and finishing, from part 1)
+- An operator page or API for unknown-outcome calls or the dead-letter
+  list
+- Retrying a turn whose model call failed after the short retry is
+  exhausted (the runtime's own error text stays)
+- Raising the DB pool size; the reply-check token limit; DNS-rebinding
+  pin; E2.6
+- PRD epics E4–E7 and the rest of `docs/FOLLOW_UPS.md`
 
 ## Success demo
 
-Done when the test suite proves that a worker killed between taking a
-job and processing it does not lose the job, a turn whose send keeps
-failing is retried and ends in the dead-letter list with one error
-reply, a partly delivered reply is not sent again, two slow
-conversations progress at the same time on one worker, and a turn longer
-than the lock's lifetime never runs twice in parallel — and the existing
-suite still passes.
+Done when the test suite proves that no database transaction is open
+while the model or a tool is being called, a timed-out model call leaves
+the session usable, a retried turn does not call a tool again that
+already returned and gets its saved result, a non-GET call with unknown
+outcome is not repeated while a GET one is, a tool call's record
+survives a failed turn, a model call answered with 429 then 200
+succeeds without failing the turn, a non-GET tool answered with 503 is
+called exactly once, clients are created once and closed on shutdown —
+and the existing suite still passes.
