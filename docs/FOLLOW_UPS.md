@@ -103,6 +103,47 @@ plausible `/forge:idea` starting point. Not ordered by priority.
 - **Tested with fakeredis and `respx` only.** No run against a real Redis,
   model endpoint or channel.
 
+## From the conversation-correctness run
+
+- **A tool call in flight completes after an operator takes over.** The state
+  check runs before each send, not during a tool call.
+- **A cut-off reply is not explained to the customer.** After an operator
+  stops a turn, the customer sees the bubbles already sent and nothing more.
+- **A person seen under an `@lid` and a phone number is two contacts.** Not
+  merged. Delivery to an `@lid` is unverified against a real Evolution
+  instance.
+- **Migration `0012` closes duplicates and its downgrade does not reopen
+  them.** It drops the index only.
+- **A turn stopped by an operator is recorded only as a log line.** The stop
+  is the log event `turn.stopped_state_changed`; the turn's `AgentRun` stays
+  successful with the full reply text, although the customer got none or only
+  part of it.
+- **Migration `0012` blocks writes to `conversations` while it runs.** It
+  takes `LOCK TABLE conversations IN SHARE ROW EXCLUSIVE MODE` and builds the
+  index without `CONCURRENTLY`; on a large table, run it in a quiet period.
+- **Still open from PRD epic E4:** E4.4 (media fetched inline, base64 in
+  stored payloads), E4.7 (sentiment prompt contains the batch twice), E4.8
+  (rolling-summary cursor, timestamp sources, tool rows in the context
+  window), E4.9 (wrong channel type returns 500), E4.10 (validation error
+  format).
+- **Message order depends on two clocks.** Inbound messages get `created_at`
+  from the database (`now()`); assistant and tool messages from the app
+  (`datetime.now(UTC)` in `app/conversations/turn.py`,
+  `app/agents/runtime.py`, `app/api/conversations.py`). When the database
+  clock is behind the app clock, a customer message stored right after a
+  reply sorts before it. Seen with the test database container 25 s to 3 min
+  behind the host (Docker VM clock drift): `tests/test_handoff.py`,
+  `tests/test_e2e_demo.py`, `tests/test_lock_heartbeat.py` and
+  `tests/test_scheduler_concurrency.py` then fail every time and pass again
+  once the clocks agree. The same can happen in production with a smaller gap.
+- **Tests reach the network.**
+  `tests/test_handoff.py::test_handoff_tool_flips_state_sends_message_and_silences_ai`
+  (and the e2e demo) request `https://api.openai.com/v1/chat/completions` for
+  the handoff brief (answered `401`, logged as `handoff.summary_failed`).
+- **A timing-dependent test.**
+  `tests/test_scheduler_concurrency.py::test_run_scheduler_starts_newly_due_turn_while_slow_one_runs`
+  depends on sleeps of 0.8 s and 0.05 s and fails on a slow machine.
+
 ## Older known MVP limitations (README)
 
 - **SSRF DNS-rebinding TOCTOU.** The allowed-IP check resolves once;

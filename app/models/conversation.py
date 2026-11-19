@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,6 +20,18 @@ class ConversationState(enum.StrEnum):
 
 class Conversation(Base, TenantScoped):
     __tablename__ = "conversations"
+    # At most one open (not `CLOSED`) conversation per contact and channel
+    # (migration 0012); `app/conversations/resolver.py` inserts against it.
+    __table_args__ = (
+        Index(
+            "uq_conversations_open_contact_channel",
+            "tenant_id",
+            "contact_id",
+            "channel_id",
+            unique=True,
+            postgresql_where=text("state != 'CLOSED'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4

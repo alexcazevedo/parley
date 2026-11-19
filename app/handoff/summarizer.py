@@ -1,10 +1,11 @@
 """Best-effort operator-brief generation at handoff time.
 
 `app/handoff/service.py` stays a pure state machine on purpose — this module
-is where the one extra LLM call for the warm-handoff summary lives, and where
-both handoff call sites (`app/tools/builtin.py`'s `handoff_to_human`,
-`app/api/conversations.py`'s `POST /{id}/handoff`) go through
-`handoff_with_summary` instead of `HandoffService.handoff` directly.
+is where the one extra LLM call for the warm-handoff summary lives. The tool
+`handoff_to_human` (`app/tools/builtin.py`) and the turn's sentiment path go
+through `handoff_with_summary`; the operator endpoint
+(`app/api/conversations.py`'s `POST /{id}/handoff`) calls `HandoffService.handoff`,
+commits, then calls `generate_handoff_summary` and stores the brief.
 
 Generation is strictly best-effort: any failure (LLM error, timeout, bad
 response) is logged and swallowed — `generate_handoff_summary` returns

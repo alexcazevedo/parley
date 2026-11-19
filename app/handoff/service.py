@@ -1,7 +1,7 @@
 """`HandoffService`: the only place conversation state moves in and out of
 `HUMAN_HANDOFF`.
 
-Three transitions, each a plain state check plus a `Handoff` row:
+Three transitions, each a state check plus a `Handoff` row:
 
   * `handoff`  — `ACTIVE_AI`/`WAITING` -> `HUMAN_HANDOFF`, inserts a `Handoff`.
   * `resume`   — `HUMAN_HANDOFF` -> `ACTIVE_AI`, closes the open `Handoff`
@@ -11,6 +11,15 @@ Three transitions, each a plain state check plus a `Handoff` row:
 Anything else raises `IllegalTransitionError`; callers (the built-in tool in
 `app/tools/builtin.py`, the REST endpoints in `app/api/conversations.py`) map
 that to a tool failure / `409` respectively.
+
+Each transition decides on the conversation's current row, not on the loaded
+`Conversation` (PRODUCT.md E4.2): it re-reads the state with `SELECT ... FOR
+UPDATE`, so a stale object (a turn's, loaded before an operator closed the
+conversation) cannot overwrite a newer state. The row lock lasts until the
+caller commits; callers commit right after (the tool ledger, the endpoints,
+the sentiment path's send), never across a model call. The loaded object is
+not refreshed by the re-read: on a refusal it keeps its old state, which is
+what lets a running turn notice the change (`app/conversations/turn.py`).
 """
 
 import uuid
@@ -18,6 +27,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.models.conversation import Conversation, ConversationState
 from app.models.handoff import Handoff, HandoffRequestedBy
@@ -36,10 +46,11 @@ class HandoffService:
         self._session = session
 
     def ensure_can_handoff(self, conversation: Conversation) -> None:
-        if conversation.state not in _HANDOFF_SOURCE_STATES:
-            raise IllegalTransitionError(
-                f"cannot hand off a conversation in state {conversation.state}"
-            )
+        """Early refusal on the loaded object, before any write or model call.
+
+        Only a pre-check: `handoff` decides again on the current row.
+        """
+        _check_can_handoff(conversation.state)
 
     async def handoff(
         self,
@@ -47,8 +58,8 @@ class HandoffService:
         reason: str | None,
         requested_by: HandoffRequestedBy,
     ) -> Handoff:
-        self.ensure_can_handoff(conversation)
-        conversation.state = ConversationState.HUMAN_HANDOFF
+        _check_can_handoff(await self._locked_state(conversation))
+        self._set_state(conversation, ConversationState.HUMAN_HANDOFF)
         record = Handoff(
             id=uuid.uuid4(),
             tenant_id=conversation.tenant_id,
@@ -61,11 +72,10 @@ class HandoffService:
         return record
 
     async def resume(self, conversation: Conversation) -> Conversation:
-        if conversation.state != ConversationState.HUMAN_HANDOFF:
-            raise IllegalTransitionError(
-                f"cannot resume a conversation in state {conversation.state}"
-            )
-        conversation.state = ConversationState.ACTIVE_AI
+        current = await self._locked_state(conversation)
+        if current != ConversationState.HUMAN_HANDOFF:
+            raise IllegalTransitionError(f"cannot resume a conversation in state {current}")
+        self._set_state(conversation, ConversationState.ACTIVE_AI)
         open_handoff = await self._latest_open_handoff(conversation)
         if open_handoff is not None:
             open_handoff.resolved_at = datetime.now(UTC)
@@ -73,12 +83,35 @@ class HandoffService:
         return conversation
 
     async def close(self, conversation: Conversation) -> Conversation:
-        conversation.state = ConversationState.CLOSED
+        await self._locked_state(conversation)
+        self._set_state(conversation, ConversationState.CLOSED)
         open_handoff = await self._latest_open_handoff(conversation)
         if open_handoff is not None:
             open_handoff.resolved_at = datetime.now(UTC)
         await self._session.flush()
         return conversation
+
+    async def _locked_state(self, conversation: Conversation) -> ConversationState:
+        """The row's current state, locked (`FOR UPDATE`) until the caller commits.
+
+        A column select, so the loaded `conversation` is left as it was.
+        """
+        result = await self._session.execute(
+            select(Conversation.state)
+            .where(
+                Conversation.tenant_id == conversation.tenant_id,
+                Conversation.id == conversation.id,
+            )
+            .with_for_update()
+        )
+        return result.scalar_one()
+
+    @staticmethod
+    def _set_state(conversation: Conversation, state: ConversationState) -> None:
+        # Always written, even when the loaded (possibly stale) value already
+        # equals `state`: the row may hold something else by now.
+        conversation.state = state
+        flag_modified(conversation, "state")
 
     async def _latest_open_handoff(self, conversation: Conversation) -> Handoff | None:
         result = await self._session.execute(
@@ -92,3 +125,8 @@ class HandoffService:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+
+def _check_can_handoff(state: ConversationState) -> None:
+    if state not in _HANDOFF_SOURCE_STATES:
+        raise IllegalTransitionError(f"cannot hand off a conversation in state {state}")

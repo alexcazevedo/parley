@@ -32,9 +32,34 @@ Barge-in (PRODUCT.md): callers may inject a `supersede_check` — "did a newer
 inbound message arrive for this conversation?". It is consulted at exactly two
 safe checkpoints, never mid-LLM/mid-tool: once after the runtime returns and
 before delivery starts, and again between humanizer bubbles. A hit drops the
-unsent parts, marks the turn's `AgentRun` superseded and returns `Superseded`
-instead of a reply; already-sent bubbles stand. No check (or a failing one)
-means today's behavior, byte for byte.
+unsent parts, marks the `AgentRun`s this turn created superseded (told apart
+by id from runs of other turns: whatever appeared while the runtime ran) and
+returns `Superseded` instead of a reply; already-sent bubbles stand. No check
+(or a failing one) means today's behavior, byte for byte.
+
+A turn whose own `handoff_to_human` call handed the conversation off (its
+loaded `Conversation` is `HUMAN_HANDOFF` once the runtime returns) is never
+superseded: the handoff message is not a stale AI answer, so it is delivered
+whole and committed like the sentiment path, with no rolling summary after.
+What goes out is always the agent's `handoff_message` (the tool's default
+when it is empty), not the runtime's return value: a runtime that failed
+after the handoff committed returns its generic error text.
+
+An operator wins over a running turn (PRODUCT.md E4.2): right before every
+outbound send (the single reply, each humanized bubble after its pacing
+sleep, the unsupported-media and handoff replies), after the lock check, the
+turn reads the conversation's current `state` with a fresh query
+(`_state_change`), ends that transaction and only then sends. A state that
+differs from the one on the turn's loaded `Conversation` means someone else
+(an operator's handoff, resume or close) changed it: the turn rolls back what
+it has not committed, sends nothing more, logs `turn.stopped_state_changed`
+and returns the last delivered reply, or `None` when nothing went out.
+Bubbles already sent stand; no rolling summary follows. A tool call already
+in flight still completes, but `HandoffService` decides on the current row
+(`SELECT ... FOR UPDATE`), so the turn's own `handoff_to_human` (or sentiment
+handoff) after an operator's close is refused instead of reopening the
+conversation. The turn's own handoff is not a change: its loaded object and
+the row agree.
 
 Lock ownership (PRODUCT.md E3.5): the scheduler also injects an
 `ownership_check` — "is the conversation lock still ours?". It is asked right
@@ -93,6 +118,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.context import render_message_text
 from app.agents.loading import load_conversation_agent
+from app.agents.runtime import EMPTY_REPLY_MESSAGE
 from app.agents.sentiment import score_frustration
 from app.channels.base import ChannelAdapter, OutgoingMessage
 from app.channels.registry import get_adapter
@@ -100,6 +126,7 @@ from app.config import get_settings
 from app.conversations.humanize import split_reply, typing_delay_seconds
 from app.conversations.summary import maybe_summarize
 from app.db import end_transaction
+from app.handoff.service import IllegalTransitionError
 from app.handoff.summarizer import handoff_with_summary
 from app.llm.factory import get_provider
 from app.media.prepare import prepare_media_messages
@@ -206,6 +233,27 @@ class _Sends:
 
 
 @dataclass(frozen=True)
+class _StateChange:
+    """The conversation's state in the database differs from the turn's loaded one.
+
+    `state` is the current state (`None`: the row is gone).
+    """
+
+    state: ConversationState | None
+
+
+class _Stopped:
+    """The turn is over and nothing went out: someone else changed the state.
+
+    Returned by `_maybe_escalate_on_sentiment` instead of `None`, which there
+    means "no escalation, run the agent". `_run_turn` turns it into `None`.
+    """
+
+
+_STOPPED = _Stopped()
+
+
+@dataclass(frozen=True)
 class _Delivery:
     """What `_deliver` did: last persisted reply row, parts sent, cut short, why?"""
 
@@ -213,6 +261,7 @@ class _Delivery:
     parts_sent: int
     superseded: bool
     lock_lost: bool = False
+    state_change: _StateChange | None = None
 
 
 async def process_turn(
@@ -239,6 +288,11 @@ async def process_turn(
 
     Returns `LockLost` when `ownership_check` said (or, by raising, could not
     confirm) that the lock is no longer ours, before a send or a commit.
+
+    Returns the last delivered reply (or `None` when nothing went out) when
+    the conversation's state in the database no longer matches the turn's
+    loaded one right before a send: an operator took over, resumed or closed
+    it meanwhile. Nothing more is sent (`turn.stopped_state_changed`).
 
     Raises `TurnFailed` (from the original exception) when anything in the
     turn raised: the session is rolled back first, and `delivered_parts` says
@@ -391,16 +445,17 @@ async def _run_turn(
     humanized = bool((channel.config or {}).get("humanize"))
 
     if handoff_message_owed:
-        return await _deliver_owed_handoff_message(
+        return await _deliver_handoff_reply(
             session,
             conversation,
-            agent,
             adapter,
             contact,
             channel,
             humanized,
+            agent.handoff_message,
             ownership_check,
             sends,
+            event="turn.handoff_message_delivered_on_retry",
         )
 
     # Voice notes are transcribed before anything else touches the batch, so
@@ -444,11 +499,23 @@ async def _run_turn(
             ownership_check,
             sends,
         )
+        if isinstance(escalation, _Stopped):
+            # An operator changed the state while the scorer or the brief
+            # ran; the session was rolled back: the turn ends here.
+            return None
         if escalation is not None:
             return escalation
 
+    # Read before the runtime: its commits may expire the loaded agent. This
+    # is the text the `handoff_to_human` tool ends the loop with.
+    handoff_message = agent.handoff_message or EMPTY_REPLY_MESSAGE
     runtime = runtime or EchoRuntime()
-    if isinstance(runtime, SessionAwareTurnRuntime):
+    # The runs this turn creates are told apart from other turns' runs by id
+    # (E4.6): whatever is new after the runtime returns is this turn's. Only a
+    # session-aware runtime can write runs; any other creates none.
+    session_aware = isinstance(runtime, SessionAwareTurnRuntime)
+    runs_before = await _agent_run_ids(session, conversation_id) if session_aware else set()
+    if session_aware:
         if _accepts_message_ids(runtime):
             # The batch's ids let the runtime reuse tool calls an earlier
             # attempt of this same batch already made (PRODUCT.md E3.7).
@@ -459,6 +526,31 @@ async def _run_turn(
             reply_text = await runtime.run_turn(session, conversation, input_text)
     else:
         reply_text = await runtime.run(conversation, input_text)
+    own_run_ids = (
+        await _agent_run_ids(session, conversation_id) - runs_before if session_aware else set()
+    )
+
+    # The turn's own `handoff_to_human` call set the loaded conversation to
+    # HUMAN_HANDOFF through this session (it was ACTIVE_AI when the turn
+    # started, or the owed-message path above would have returned). The reply
+    # is then the handoff message, not a stale AI answer: no supersede
+    # checkpoint applies and it goes out whole, as on the sentiment path.
+    # It is the agent's handoff message whatever the runtime returned: a
+    # runtime that failed after the handoff committed (a deadline before the
+    # step's next tool) returns its generic error text instead.
+    if conversation.state == ConversationState.HUMAN_HANDOFF:
+        return await _deliver_handoff_reply(
+            session,
+            conversation,
+            adapter,
+            contact,
+            channel,
+            humanized,
+            handoff_message,
+            ownership_check,
+            sends,
+            event="turn.handoff_message_delivered",
+        )
 
     # Checkpoint 1: last moment before anything is sent. The commit keeps the
     # rows the runtime already wrote (AgentRun, tool messages) — a superseded
@@ -466,7 +558,7 @@ async def _run_turn(
     # right before each send, and by `_abandon_or_give_up` before its commit.
     if await _is_superseded(supersede_check):
         return await _abandon_or_give_up(
-            session, conversation, ownership_check, delivered_parts=0
+            session, conversation, ownership_check, own_run_ids, delivered_parts=0
         )
 
     delivery = await _deliver(
@@ -483,10 +575,16 @@ async def _run_turn(
     )
     if delivery.lock_lost:
         return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
+    if delivery.state_change is not None:
+        return await _stop_state_changed(session, conversation_id, delivery)
     # Checkpoint 2 fired between bubbles: the parts already sent stand.
     if delivery.superseded:
         return await _abandon_or_give_up(
-            session, conversation, ownership_check, delivered_parts=delivery.parts_sent
+            session,
+            conversation,
+            ownership_check,
+            own_run_ids,
+            delivered_parts=delivery.parts_sent,
         )
     reply = delivery.message
 
@@ -569,6 +667,8 @@ async def _reply_unsupported_media(
     )
     if delivery.lock_lost:
         return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
+    if delivery.state_change is not None:
+        return await _stop_state_changed(session, conversation_id, delivery)
     conversation.last_message_at = datetime.now(UTC)
     if await _lock_lost(ownership_check):
         return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
@@ -592,12 +692,16 @@ async def _maybe_escalate_on_sentiment(
     input_text: str,
     ownership_check: OwnershipCheck | None = None,
     sends: _Sends | None = None,
-) -> Message | LockLost | None:
+) -> Message | LockLost | _Stopped | None:
     """Score the inbound batch; on a frustrated batch, hand off instead of answering.
 
     Returns the delivered `handoff_message` when the turn was short-circuited,
     or `None` to let the normal agent turn proceed. The scorer is best-effort
     (`None` = no signal), so a broken classifier never costs the user a reply.
+
+    Returns `_STOPPED` when someone else changed the conversation's state
+    (the handoff is refused, or the state moved again before the send) and
+    nothing went out: the session is rolled back and the turn is over.
 
     The classifier + operator brief run before the reply goes out, which adds a
     few seconds of latency to an escalating turn — accepted for mvp: state
@@ -608,18 +712,35 @@ async def _maybe_escalate_on_sentiment(
     if score is None or score < get_settings().sentiment_threshold:
         return None
 
-    await handoff_with_summary(
-        session,
-        conversation,
-        reason=f"frustração do usuário detectada (score {score:.2f})",
-        requested_by=HandoffRequestedBy.SYSTEM,
-    )
+    conversation_id = conversation.id
+    try:
+        await handoff_with_summary(
+            session,
+            conversation,
+            reason=f"frustração do usuário detectada (score {score:.2f})",
+            requested_by=HandoffRequestedBy.SYSTEM,
+        )
+    except IllegalTransitionError:
+        # Someone else (an operator) moved the conversation out of ACTIVE_AI
+        # while the classifier or the brief ran: theirs is the newer state.
+        # The turn is over, whatever `_stop_state_changed` returns.
+        state_change = await _state_change(session, conversation)
+        await _stop_state_changed(
+            session,
+            conversation_id,
+            _Delivery(
+                message=None,
+                parts_sent=0,
+                superseded=False,
+                state_change=state_change or _StateChange(conversation.state),
+            ),
+        )
+        return _STOPPED
     # No supersede checkpoints here on purpose: the conversation is already
     # HUMAN_HANDOFF, so the handoff_message is not a stale AI answer — it must
     # go out whole no matter what arrived meanwhile.
     # Lock ownership is still asked: losing the lock rolls back the handoff
     # itself, and the worker that holds the lock now decides again.
-    conversation_id = conversation.id
     delivery = await _deliver(
         session,
         conversation,
@@ -633,6 +754,9 @@ async def _maybe_escalate_on_sentiment(
     )
     if delivery.lock_lost:
         return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
+    if delivery.state_change is not None:
+        stopped = await _stop_state_changed(session, conversation_id, delivery)
+        return stopped if stopped is not None else _STOPPED
     reply = delivery.message
     conversation.last_message_at = datetime.now(UTC)
     if await _lock_lost(ownership_check):
@@ -727,22 +851,27 @@ async def _database_clock_offset(session: AsyncSession) -> timedelta:
     return database_now - (before + (after - before) / 2)
 
 
-async def _deliver_owed_handoff_message(
+async def _deliver_handoff_reply(
     session: AsyncSession,
     conversation: Conversation,
-    agent: Agent,
     adapter: ChannelAdapter,
     contact: Contact,
     channel: Channel,
     humanized: bool,
+    reply_text: str,
     ownership_check: OwnershipCheck | None,
     sends: _Sends,
+    *,
+    event: str,
 ) -> Message | LockLost | None:
-    """Send the handoff message an earlier attempt of this batch failed to send.
+    """Send a handoff message whole and commit it; no rolling summary follows.
 
-    Delivered and committed as the sentiment path does: lock ownership asked
-    before the send and before the commit, no supersede checkpoints (the
-    conversation is already handed off, so this is not a stale AI answer).
+    Used for the reply of a turn whose own `handoff_to_human` call handed the
+    conversation off, and for the handoff message an earlier attempt of this
+    batch failed to send. Delivered and committed as the sentiment path does:
+    lock ownership asked before every send and before the commit, no
+    supersede checkpoints (the conversation is already handed off, so this is
+    not a stale AI answer).
     """
     conversation_id = conversation.id
     delivery = await _deliver(
@@ -752,17 +881,19 @@ async def _deliver_owed_handoff_message(
         contact,
         channel,
         humanized,
-        agent.handoff_message,
+        reply_text,
         ownership_check=ownership_check,
         sends=sends,
     )
     if delivery.lock_lost:
         return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
+    if delivery.state_change is not None:
+        return await _stop_state_changed(session, conversation_id, delivery)
     conversation.last_message_at = datetime.now(UTC)
     if await _lock_lost(ownership_check):
         return await _give_up(session, conversation_id, delivered_parts=delivery.parts_sent)
     await session.commit()
-    logger.info("turn.handoff_message_delivered_on_retry", conversation_id=str(conversation_id))
+    logger.info(event, conversation_id=str(conversation_id))
     return delivery.message
 
 
@@ -784,8 +915,10 @@ async def _deliver(
     Only the humanized path can be superseded (checkpoint 2, between bubbles);
     the single-message path is one send with nothing left to cut, so it is
     covered entirely by checkpoint 1 in `process_turn`. Lock ownership is asked
-    right before every send on both paths. Each successful send is counted in
-    `sends`; a failed one raises.
+    right before every send on both paths, then the conversation's current
+    state (`_state_change`); a changed state stops the delivery with
+    `state_change` set and the caller rolls back. Each successful send is
+    counted in `sends`; a failed one raises.
 
     The send comes first, outside any transaction (`end_transaction` right
     before it); the reply row is added only once the send succeeded, so a
@@ -806,6 +939,9 @@ async def _deliver(
         )
     if await _lock_lost(ownership_check):
         return _Delivery(message=None, parts_sent=0, superseded=False, lock_lost=True)
+    state_change = await _state_change(session, conversation)
+    if state_change is not None:
+        return _Delivery(message=None, parts_sent=0, superseded=False, state_change=state_change)
     reply = _build_reply(conversation, reply_text)
     await end_transaction(session)
     await adapter.send_message(
@@ -877,7 +1013,9 @@ async def _deliver_humanized(
 
     Lock ownership is asked after the pacing pause, right before each part is
     sent: the pause is where a lock can run out. A loss stops the loop with
-    the parts already sent (and committed) standing.
+    the parts already sent (and committed) standing. The conversation's state
+    is checked right after it, for the same reason: the pause is where an
+    operator takes over.
 
     No transaction is open during the typing indicator, the pause or the
     send (`end_transaction` before each). A part's row is added and
@@ -902,6 +1040,11 @@ async def _deliver_humanized(
 
         if await _lock_lost(ownership_check):
             return _Delivery(message=last, parts_sent=index, superseded=False, lock_lost=True)
+        state_change = await _state_change(session, conversation)
+        if state_change is not None:
+            return _Delivery(
+                message=last, parts_sent=index, superseded=False, state_change=state_change
+            )
         message = _build_reply(conversation, part)
         await end_transaction(session)
         # A failed send of any part raises (PRODUCT.md E3.2): the reply stops
@@ -952,6 +1095,49 @@ async def _lock_lost(check: OwnershipCheck | None) -> bool:
         return True
 
 
+async def _state_change(session: AsyncSession, conversation: Conversation) -> _StateChange | None:
+    """Has someone else changed the conversation's state since the turn loaded it?
+
+    Asked right before every send, after the lock check (PRODUCT.md E4.2): a
+    fresh column query of the row, compared with the state on the turn's
+    loaded `conversation`. The loaded object is not refreshed by it. The query
+    opens a transaction; the caller ends it (`end_transaction`) before the
+    send, or rolls it back when this says stop. The turn's own writes are
+    visible here (autoflush), so its own handoff is not a change.
+    """
+    loaded = conversation.state
+    current = (
+        await session.execute(select(Conversation.state).where(Conversation.id == conversation.id))
+    ).scalar_one_or_none()
+    if current == loaded:
+        return None
+    return _StateChange(current)
+
+
+async def _stop_state_changed(
+    session: AsyncSession, conversation_id: uuid.UUID, delivery: _Delivery
+) -> Message | None:
+    """The state changed under the turn: send nothing more and report the outcome.
+
+    Rolls back what is not committed (the parts already sent are committed and
+    stand), logs `turn.stopped_state_changed` and returns the last delivered
+    reply, or `None` when nothing went out. No rolling summary follows. The
+    last reply is detached first so the rollback does not expire it.
+    """
+    last = delivery.message
+    if last is not None and last in session:
+        session.expunge(last)
+    await _rollback_quietly(session, conversation_id)
+    state = delivery.state_change.state if delivery.state_change is not None else None
+    logger.info(
+        "turn.stopped_state_changed",
+        conversation_id=str(conversation_id),
+        state=str(state) if state is not None else None,
+        delivered_parts=delivery.parts_sent,
+    )
+    return last
+
+
 async def _give_up(
     session: AsyncSession, conversation_id: uuid.UUID, *, delivered_parts: int
 ) -> LockLost:
@@ -973,17 +1159,24 @@ async def _abandon_or_give_up(
     session: AsyncSession,
     conversation: Conversation,
     ownership_check: OwnershipCheck | None,
+    own_run_ids: set[uuid.UUID],
     *,
     delivered_parts: int,
 ) -> Superseded | LockLost:
     """Superseded turn: commit the abandonment only while the lock is ours."""
     if await _lock_lost(ownership_check):
         return await _give_up(session, conversation.id, delivered_parts=delivered_parts)
-    return await _abandon_turn(session, conversation, delivered_parts=delivered_parts)
+    return await _abandon_turn(
+        session, conversation, own_run_ids, delivered_parts=delivered_parts
+    )
 
 
 async def _abandon_turn(
-    session: AsyncSession, conversation: Conversation, *, delivered_parts: int
+    session: AsyncSession,
+    conversation: Conversation,
+    own_run_ids: set[uuid.UUID],
+    *,
+    delivered_parts: int,
 ) -> Superseded:
     """Give up the rest of the reply: mark the run, commit, report the outcome.
 
@@ -991,7 +1184,7 @@ async def _abandon_turn(
     AgentRun and the tool messages the runtime wrote. `last_message_at` and the
     rolling summary are deliberately skipped: this turn produced no answer.
     """
-    await _mark_run_superseded(session, conversation)
+    await _mark_runs_superseded(session, own_run_ids)
     await session.commit()
     logger.info(
         "turn.superseded",
@@ -1001,24 +1194,29 @@ async def _abandon_turn(
     return Superseded(delivered_parts)
 
 
-async def _mark_run_superseded(session: AsyncSession, conversation: Conversation) -> None:
-    """Flag this turn's `AgentRun` as superseded, if the runtime wrote one.
-
-    The row is flushed but not committed, so it is visible inside this
-    transaction. Runtimes without runs (`EchoRuntime`, test doubles) are a
-    no-op. An ERROR run keeps its status: a superseded errored turn is still an
-    error, and losing that would hide real failures.
-    """
+async def _agent_run_ids(session: AsyncSession, conversation_id: uuid.UUID) -> set[uuid.UUID]:
+    """Ids of every `AgentRun` of the conversation visible to this session."""
     result = await session.execute(
-        select(AgentRun)
-        .where(AgentRun.conversation_id == conversation.id)
-        .order_by(AgentRun.created_at.desc(), AgentRun.id)
-        .limit(1)
+        select(AgentRun.id).where(AgentRun.conversation_id == conversation_id)
     )
-    run = result.scalar_one_or_none()
-    if run is None or run.status == AgentRunStatus.ERROR:
+    return set(result.scalars().all())
+
+
+async def _mark_runs_superseded(session: AsyncSession, run_ids: set[uuid.UUID]) -> None:
+    """Flag the `AgentRun`s this turn created as superseded (E4.6).
+
+    `run_ids` are the runs that appeared while this turn's runtime ran, so
+    another turn's run of the same conversation is never touched. Runtimes
+    without runs (`EchoRuntime`, test doubles) leave it empty: a no-op. An
+    ERROR run keeps its status: a superseded errored turn is still an error,
+    and losing that would hide real failures.
+    """
+    if not run_ids:
         return
-    run.status = AgentRunStatus.SUPERSEDED
+    result = await session.execute(select(AgentRun).where(AgentRun.id.in_(run_ids)))
+    for run in result.scalars().all():
+        if run.status != AgentRunStatus.ERROR:
+            run.status = AgentRunStatus.SUPERSEDED
 
 
 async def _summarize_after_reply(

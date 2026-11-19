@@ -178,13 +178,13 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
 | `POST /webhooks/whatsapp/{channel_id}` | Evolution API inbound webhook. Tenant and channel come from the authenticated channel, never from the payload. When the user or tenant rate limit is exceeded it still answers 200 `{"status": "rate_limited"}`: the message is stored (media as `[mídia não recebida]`) and visible to operators, but no agent turn runs, and a warning is logged. An Evolution media download over the size limit is cut off and stored the same way (`unsupported`, `[mídia não recebida]`) |
 | `GET /conversations/{id}/messages` | poll for replies (`?include_tools=false` by default; `?after=<timestamp>`) |
 | `POST /conversations/{id}/messages` | operator reply (typically while `HUMAN_HANDOFF`) |
-| `POST /conversations/{id}/handoff` / `/resume` / `/close` | conversation state transitions |
+| `POST /conversations/{id}/handoff` / `/resume` / `/close` | conversation state transitions. An operator's action is saved at once and stops a running reply: a turn checks the state before each send, sends nothing more (bubbles already sent stay) and the customer is not told about the cut-off. A tool call already in flight still completes |
 | `GET/POST/DELETE /contacts/{id}/memories` | long-term memory CRUD |
 | `GET /operator` | self-contained operator inbox page (handoff triage, reply, resume/close) |
 
 ## Evolution API (WhatsApp) setup
 
-1. Create a channel: `POST /channels` with `type: "whatsapp"`, `config:
+1. Create a channel: `POST /channels` with `type: "whatsapp_evolution"`, `config:
    {"base_url": "...", "instance": "..."}` and `secret` set to the Evolution
    instance's `apikey` (encrypted at rest, never returned by the API).
 2. In Evolution, point that instance's webhook at:
@@ -194,6 +194,16 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
    channel's stored secret and returns `401` on a mismatch.
 4. Outbound replies go back out through Evolution's `sendText` REST endpoint
    using that same `apikey`, `base_url` and `instance`.
+
+Who is answered: only people. Senders at `@s.whatsapp.net` and bare ids are
+answered under their phone number; senders at a WhatsApp privacy id (`@lid`)
+are answered too and keep the full `…@lid` as their contact id. Groups
+(`@g.us`), status broadcasts (`status@broadcast`), newsletters and any other
+suffix are ignored: the webhook answers `{"status": "ignored"}`, and nothing
+is stored or sent. Limits: replies to an `@lid` are sent to that id, and
+whether Evolution delivers them has not been checked; test it once against a
+real instance. A person seen under both an `@lid` and a phone number is two
+contacts.
 5. `base_url` must be a public address. On create and update, a channel of
    type `whatsapp_evolution` whose `config.base_url` is not globally routable
    gets 422 `invalid base_url: ...`. The address is checked again on every

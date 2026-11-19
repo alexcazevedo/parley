@@ -2,11 +2,17 @@
 operator posting a message, and the handoff/resume/close transitions
 (`app.handoff.service.HandoffService` owns the state machine; this router
 only translates its `IllegalTransitionError` into a `409`).
+
+An operator's transition is committed at once and never waits for a running
+turn (PRODUCT.md E4.2): the handoff endpoint commits the state change first
+and only then generates the operator brief (a model call), stored by a second
+commit. A brief that fails leaves the handoff in place without one.
 """
 
 import uuid
 from datetime import UTC, datetime
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -16,7 +22,7 @@ from app.api.deps import get_current_tenant, get_db
 from app.channels.base import OutgoingMessage
 from app.channels.registry import get_adapter
 from app.handoff.service import HandoffService, IllegalTransitionError
-from app.handoff.summarizer import handoff_with_summary
+from app.handoff.summarizer import generate_handoff_summary
 from app.models.channel import Channel
 from app.models.contact import Contact
 from app.models.conversation import Conversation, ConversationState
@@ -26,6 +32,8 @@ from app.models.tenant import Tenant
 from app.repositories.conversations import ConversationsRepository
 from app.repositories.messages import MessagesRepository
 from app.tools.ssrf import SSRFError
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -296,12 +304,34 @@ async def handoff_conversation(
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> ConversationOut:
+    """Hand the conversation to a human: committed before the brief is written.
+
+    Order: `HandoffService.handoff` and commit (the AI is silenced from here
+    on, whatever a running turn does next); then `generate_handoff_summary`
+    (best-effort, no transaction open during its model call); then the brief
+    is stored on the `Handoff` row by a second commit. Not
+    `handoff_with_summary`, which generates the brief before the state change.
+    """
     conversation = await _get_conversation_or_404(db, tenant, conversation_id)
     try:
-        await handoff_with_summary(db, conversation, payload.reason, HandoffRequestedBy.OPERATOR)
+        record = await HandoffService(db).handoff(
+            conversation, payload.reason, HandoffRequestedBy.OPERATOR
+        )
     except IllegalTransitionError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await db.commit()
+
+    summary = await generate_handoff_summary(db, conversation, payload.reason)
+    if summary is not None:
+        try:
+            record.summary = summary
+            await db.commit()
+        except Exception:
+            # The handoff is committed already; only the brief is lost.
+            await db.rollback()
+            logger.warning(
+                "handoff.summary_not_saved", conversation_id=str(conversation_id), exc_info=True
+            )
     await db.refresh(conversation)
     return ConversationOut.model_validate(conversation)
 

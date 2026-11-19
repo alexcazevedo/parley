@@ -109,10 +109,10 @@ terminal). `process_turn` only runs the agent when `state == ACTIVE_AI`; any
 other state means "a human is driving it, stay quiet" — new messages still
 persist, they just don't trigger a turn.
 
-**Warm-handoff brief**: both handoff paths (`handoff_to_human` tool and the
-operator-initiated `POST /conversations/{id}/handoff`) go through
-`app.handoff.summarizer.handoff_with_summary` instead of calling
-`HandoffService.handoff` directly. It performs the state transition, then
+**Warm-handoff brief**: the `handoff_to_human` tool goes through
+`app.handoff.summarizer.handoff_with_summary`; the operator-initiated
+`POST /conversations/{id}/handoff` calls `HandoffService.handoff`, commits,
+then `generate_handoff_summary`. `handoff_with_summary` performs the state transition, then
 makes one best-effort LLM call (`generate_handoff_summary`, timeout-bounded
 by `SUMMARY_TIMEOUT_SECONDS`) that reads recent messages, contact memories,
 the rolling conversation summary and the handoff reason to write a compact
@@ -453,6 +453,36 @@ side effects in flight.
   message is never a stale AI answer, so it is delivered whole with no
   supersede checkpoints — a conversation already moving to `HUMAN_HANDOFF`
   must not have its handoff message shredded mid-flight.
+
+### State check before each send
+
+An operator can hand off, resume or close a conversation while a turn runs.
+`HandoffService` decides on the row read `FOR UPDATE`, and the operator
+handoff endpoint commits the state change before it generates the brief, so
+the operator never waits for the turn. Right before every send (the single
+message, and each humanizer bubble) `app/conversations/turn.py::_state_change`
+reads the conversation's state column from the database. If it is no longer
+AI-driven, the turn rolls back, logs `turn.stopped_state_changed`
+(`conversation_id`, `state`, `delivered_parts`), and returns the last
+delivered reply or `None`. Bubbles already sent stay; the rest is dropped.
+Differences: the lock check asks whether this worker still owns the
+conversation; the supersede check asks whether a newer customer message
+arrived (and requeues the batch); the state check asks whether someone
+changed the conversation's state. A tool call in flight is not interrupted.
+
+A handoff made by the turn's own `handoff_to_human` tool is delivered whole
+with no supersede checkpoint, and a superseded turn marks only the
+`AgentRun` it created.
+
+### One open conversation per contact and channel
+
+`uq_conversations_open_contact_channel` is a partial unique index on
+`(tenant_id, contact_id, channel_id)` where `state != 'CLOSED'`
+(migration `0012`). `app/conversations/resolver.py` creates contacts and
+conversations with select, `INSERT ... ON CONFLICT DO NOTHING`, select again
+(up to 3 tries), so two simultaneous first messages share one contact and one
+conversation. Migration `0012` first closes existing duplicates, keeping the
+one a human handles, else the most recently active.
 
 ## Sentiment escalation
 

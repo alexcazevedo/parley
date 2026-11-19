@@ -27,6 +27,7 @@ from app.tools.ssrf import SSRFError, assert_safe_channel_url
 logger = structlog.get_logger(__name__)
 
 _JID_SUFFIX = "@s.whatsapp.net"
+_LID_SUFFIX = "@lid"
 
 # Total time for the media request and body read. httpx's `timeout` is per
 # read, so a server dripping bytes would otherwise hold the webhook open.
@@ -57,6 +58,36 @@ class IgnoredEvent(Exception):
     """
 
 
+def _person_id(remote_jid: str) -> str:
+    """`external_user_id` for a `remoteJid`, or `IgnoredEvent` if it is not a person.
+
+    - `@s.whatsapp.net`: a person; the id is the number without the suffix.
+    - `@lid` (WhatsApp privacy id): a person; the id is the full JID.
+    - no `@`, not empty: accepted as it is.
+    - anything else (`@g.us`, `@broadcast`, `@newsletter`, empty, unknown): ignored.
+
+    NOTE: whether Evolution delivers a send to an `@lid` number cannot be
+    tested here; it needs one check against a real instance.
+    """
+    if remote_jid.endswith(_JID_SUFFIX):
+        return remote_jid.removesuffix(_JID_SUFFIX)
+    if remote_jid.endswith(_LID_SUFFIX):
+        return remote_jid
+    if not remote_jid:
+        raise IgnoredEvent("missing remoteJid")
+    if "@" not in remote_jid:
+        return remote_jid
+    suffix = remote_jid.rsplit("@", 1)[1]
+    if suffix == "g.us":
+        raise IgnoredEvent("group message")
+    if suffix == "broadcast":
+        raise IgnoredEvent("broadcast or status message")
+    if suffix == "newsletter":
+        raise IgnoredEvent("newsletter message")
+    logger.warning("evolution.ignored_unknown_jid_suffix", suffix=suffix)
+    raise IgnoredEvent(f"unknown jid suffix: {suffix!r}")
+
+
 class EvolutionAdapter(ChannelAdapter):
     def parse_incoming(self, payload: dict[str, Any]) -> IncomingMessage:
         if payload.get("event") != "messages.upsert":
@@ -67,6 +98,8 @@ class EvolutionAdapter(ChannelAdapter):
 
         if key.get("fromMe"):
             raise IgnoredEvent("message is fromMe (outbound echo)")
+
+        external_user_id = _person_id(key.get("remoteJid") or "")
 
         message = data.get("message") or {}
         text = message.get("conversation") or (message.get("extendedTextMessage") or {}).get(
@@ -100,9 +133,6 @@ class EvolutionAdapter(ChannelAdapter):
         else:
             logger.info("evolution.ignored_non_text", keys=list(message.keys()))
             raise IgnoredEvent("non-text message")
-
-        remote_jid = key.get("remoteJid") or ""
-        external_user_id = remote_jid.removesuffix(_JID_SUFFIX)
 
         raw_ts = data.get("messageTimestamp")
         timestamp = (
@@ -186,7 +216,11 @@ class EvolutionAdapter(ChannelAdapter):
             json={
                 "readMessages": [
                     {
-                        "remoteJid": f"{contact.external_user_id}{_JID_SUFFIX}",
+                        "remoteJid": (
+                            contact.external_user_id
+                            if "@" in contact.external_user_id
+                            else f"{contact.external_user_id}{_JID_SUFFIX}"
+                        ),
                         "fromMe": False,
                         "id": external_message_id,
                     }
