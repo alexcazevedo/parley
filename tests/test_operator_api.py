@@ -58,7 +58,9 @@ async def _drain_jobs(fake_redis) -> None:
         assert await run_once(queue, timeout=1, debounce_seconds=DEBOUNCE_SECONDS) is not None
 
 
-async def test_multi_state_filter_and_single_state_still_works(client, fake_redis, db_session):
+async def test_multi_state_filter_and_single_state_still_works(
+    client, fake_redis, db_session, fake_handoff_brief
+):
     headers, channel_id, _ = await _setup(client)
 
     active_id = await _send(client, headers, channel_id, "user-1", "oi")

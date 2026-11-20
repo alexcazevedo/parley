@@ -117,7 +117,10 @@ class ContextBuilder:
         tools: Sequence[ToolSpec] = (),
         style_hint: str | None = None,
     ) -> list[LLMMessage]:
-        """System prompt + the last `agent.context_message_limit` messages.
+        """System prompt + the history the runtime selected.
+
+        `agent.context_message_limit` is applied by the runtime (it counts
+        conversation messages, not tool rows); this does not cut again.
 
         `tools` is accepted (and validated to be spec-shaped by the type) but not
         injected into the prompt: OpenAI-compatible backends receive tools through
@@ -128,14 +131,13 @@ class ContextBuilder:
         `style_hint` is appended as the final system-prompt part — the humanizer
         uses it to ask for short, blank-line-separated chat bubbles.
         """
-        limit = agent.context_message_limit or 20
         messages: list[LLMMessage] = [
             LLMMessage(
                 role=ROLE_SYSTEM,
                 content=self._system_prompt(agent, conversation, memories, style_hint),
             )
         ]
-        messages.extend(await self._history(list(recent_messages)[-limit:]))
+        messages.extend(await self._history(list(recent_messages)))
         return messages
 
     def _system_prompt(

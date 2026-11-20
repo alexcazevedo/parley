@@ -131,7 +131,7 @@ async def _replies(db_session, conversation_id: uuid.UUID) -> list[Message]:
             Message.role == MessageRole.ASSISTANT,
             Message.type == "text",
         )
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 

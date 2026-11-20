@@ -93,7 +93,7 @@ async def _replies(db_session, conversation_id: uuid.UUID) -> list[str]:
             Message.conversation_id == conversation_id,
             Message.role == MessageRole.ASSISTANT,
         )
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return [row.content for row in result.scalars().all()]
 

@@ -156,7 +156,12 @@ Tests run against a real Postgres (`harness_test`, auto-created if missing —
 see `tests/conftest.py`) on the host-mapped port and `fakeredis`; the LLM is
 always `FakeLLMProvider` (scripted, in-process) and any customer HTTP tool
 call goes through `respx`, so `pytest` never makes a network call and never
-needs a real `LLM_API_KEY`. `tests/test_e2e_demo.py` is the automated
+needs a real `LLM_API_KEY`. The network is blocked in the tests: an autouse
+guard in `tests/conftest.py` refuses any connection other than to loopback or
+a unix socket (and any lookup of another host than `localhost`, `*.example.com`
+and a few test names), and a test that tried fails at teardown listing the
+hosts. A test that makes a handoff uses the `fake_handoff_brief` fixture for
+the operator brief. `tests/test_e2e_demo.py` is the automated
 equivalent of `scripts/demo.py` — the full success-demo flow (debounced
 turn, tool call, handoff, operator, resume) over the real pipeline.
 
@@ -176,11 +181,36 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
 | `POST /chat/bootstrap`, `GET /chat` | **demo-only** (`DEMO_MODE=true`; 404 otherwise): unauthenticated tenant bootstrap and the built-in chat page. Outside demo mode the demo tenant key (`WEBCHAT_DEMO_API_KEY`) is refused with 401 like any unknown key |
 | `POST /dev/messages` | **demo-only** (`DEMO_MODE=true`; 404 otherwise): dev simulator — same pipeline as Web Chat, for scripting demos |
 | `POST /webhooks/whatsapp/{channel_id}` | Evolution API inbound webhook. Tenant and channel come from the authenticated channel, never from the payload. When the user or tenant rate limit is exceeded it still answers 200 `{"status": "rate_limited"}`: the message is stored (media as `[mídia não recebida]`) and visible to operators, but no agent turn runs, and a warning is logged. An Evolution media download over the size limit is cut off and stored the same way (`unsupported`, `[mídia não recebida]`) |
-| `GET /conversations/{id}/messages` | poll for replies (`?include_tools=false` by default; `?after=<timestamp>`) |
+| `GET /conversations/{id}/messages` | poll for replies (`?include_tools=false` by default; `?after=<timestamp>`, compared with `created_at`). Messages come in the order they were stored (`seq`) |
 | `POST /conversations/{id}/messages` | operator reply (typically while `HUMAN_HANDOFF`) |
 | `POST /conversations/{id}/handoff` / `/resume` / `/close` | conversation state transitions. An operator's action is saved at once and stops a running reply: a turn checks the state before each send, sends nothing more (bubbles already sent stay) and the customer is not told about the cut-off. A tool call already in flight still completes |
 | `GET/POST/DELETE /contacts/{id}/memories` | long-term memory CRUD |
 | `GET /operator` | self-contained operator inbox page (handoff triage, reply, resume/close) |
+
+### Errors
+
+Every error uses one envelope: `{"error": {"code", "message", "request_id"}}`.
+The webchat, media and dev routes (`POST /channels/webchat/messages`,
+`POST /channels/webchat/media`, `POST /dev/messages`) given a channel of
+another type answer 422 `{"error":{"code":"http_error","message":"channel is
+not a webchat channel","request_id":"..."}}`; a channel of another tenant is
+still 404. A request that fails validation answers 422 with `details`, one
+entry per problem; `field` is the location without the leading
+`body`/`query`/`path`, and the input values are never echoed:
+
+```json
+{"error": {"code": "validation_error", "message": "Validation failed",
+           "request_id": "9f0c...", "details": [{"field": "name", "message": "Field required"}]}}
+```
+
+### What the model sees of a conversation
+
+`agent.context_message_limit` (default 20 when unset or 0) counts customer
+messages, operator messages and assistant messages that are not tool calls.
+The history sent to the model starts at the limit-th most recent of those and
+carries every row after it, tool calls and tool results included, so a call is
+never separated from its result. A tool-heavy agent therefore sends a longer
+prompt than the limit suggests; there is no separate cap on its size.
 
 ## Evolution API (WhatsApp) setup
 
@@ -224,7 +254,14 @@ contacts.
    listed host skips the address check and every other `base_url` must still
    be public. It is separate from `TOOL_ALLOWED_HOSTS`: a host listed for
    tools is not thereby allowed for channels, and the other way round.
-7. Media downloaded from Evolution is read up to a cap derived from
+7. The webhook answers before any media is downloaded. It authenticates,
+   parses, recognises a repeated delivery (answers `{"status": "ok"}` and does
+   nothing more: no download, no second message), applies the rate limits and
+   stores the message; an image or audio message is stored with its type and
+   no file yet. The worker downloads the file in the turn that needs it. The
+   stored copy of the event has `base64` and `jpegThumbnail` removed. Events
+   stored before this change still contain them.
+8. Media downloaded from Evolution is read up to a cap derived from
    `MEDIA_MAX_BYTES`. A longer download, a compressed response or decoded
    media over `MEDIA_MAX_BYTES` is cut off and stored as an `unsupported`
    message with the content `[mídia não recebida]`. The whole download must

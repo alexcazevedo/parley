@@ -10,6 +10,11 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TenantScoped
 
+# What an agent tells the customer when it hands them to a person: the column
+# default below, and the fallback of every handoff path whose agent has an
+# empty `handoff_message` (app/agents/runtime.py, app/conversations/turn.py).
+DEFAULT_HANDOFF_MESSAGE = "Vou te transferir para um atendente humano."
+
 
 class Agent(Base, TenantScoped):
     __tablename__ = "agents"
@@ -34,8 +39,8 @@ class Agent(Base, TenantScoped):
     handoff_message: Mapped[str] = mapped_column(
         Text,
         nullable=False,
-        default="Vou te transferir para um atendente humano.",
-        server_default="Vou te transferir para um atendente humano.",
+        default=DEFAULT_HANDOFF_MESSAGE,
+        server_default=DEFAULT_HANDOFF_MESSAGE,
     )
     tool_names: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     context_message_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=20)

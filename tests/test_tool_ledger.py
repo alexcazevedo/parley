@@ -157,7 +157,7 @@ async def _tool_result_contents(session, conversation_id) -> list[str]:
     result = await session.execute(
         select(Message.content)
         .where(Message.conversation_id == conversation_id, Message.role == MessageRole.TOOL)
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 
@@ -347,7 +347,7 @@ async def test_remember_leaves_one_finished_row_committed_with_the_memory(
 
 
 async def test_handoff_leaves_one_finished_row_committed_with_the_handoff(
-    client, fake_redis, db_session, test_engine
+    client, fake_redis, db_session, test_engine, fake_handoff_brief
 ):
     conversation = await _setup(client, fake_redis, db_session, http_tool=False)
     conversation_id = conversation.id
@@ -491,7 +491,7 @@ async def test_blocked_endpoint_finishes_as_error(
 
 
 async def test_handoff_row_stores_the_terminal_text(
-    client, fake_redis, db_session, test_engine
+    client, fake_redis, db_session, test_engine, fake_handoff_brief
 ):
     conversation = await _setup(client, fake_redis, db_session, http_tool=False)
     provider = FakeLLMProvider([_step("handoff_to_human", {"reason": "pediu humano"})])

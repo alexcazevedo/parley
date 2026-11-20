@@ -190,7 +190,7 @@ async def _inbound(session, conversation_id) -> list[Message]:
             Message.conversation_id == conversation_id,
             Message.direction == MessageDirection.IN,
         )
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 
@@ -203,7 +203,7 @@ async def _replies(session, conversation_id) -> list[str]:
             Message.direction == MessageDirection.OUT,
             Message.role == MessageRole.ASSISTANT,
         )
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 
@@ -390,7 +390,7 @@ async def test_handoff_reply_is_sent_outside_a_transaction(
     agent.sentiment_escalation_enabled = True
     await db_session.commit()
 
-    async def frustrated(session, conversation, agent, input_text):
+    async def frustrated(session, conversation, agent, input_text, message_ids=()):
         return 1.0
 
     async def handoff(session, conversation, *, reason, requested_by):

@@ -153,7 +153,7 @@ async def _tool_result_message(db_session, conversation_id: uuid.UUID) -> Messag
     result = await db_session.execute(
         select(Message)
         .where(Message.conversation_id == conversation_id, Message.role == MessageRole.TOOL)
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     messages = list(result.scalars().all())
     assert messages, "the tool result never reached the transcript"

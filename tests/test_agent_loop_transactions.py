@@ -371,7 +371,7 @@ async def test_tool_messages_are_added_after_every_call_of_the_step_returned(
     result = await db_session.execute(
         select(Message)
         .where(Message.conversation_id == conversation.id, Message.role != MessageRole.USER)
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     rows = list(result.scalars().all())
     assert [(m.type, m.tool_call_id) for m in rows] == [

@@ -71,7 +71,9 @@ class ScoreRecorder:
         self.score = score
         self.calls: list[str] = []
 
-    async def __call__(self, session, conversation, agent, input_text: str) -> float | None:
+    async def __call__(
+        self, session, conversation, agent, input_text: str, message_ids=()
+    ) -> float | None:
         self.calls.append(input_text)
         return self.score
 
@@ -142,7 +144,7 @@ async def _replies(db_session, conversation_id: uuid.UUID) -> list[Message]:
             Message.role == MessageRole.ASSISTANT,
             Message.type == "text",
         )
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 

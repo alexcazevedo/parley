@@ -257,7 +257,9 @@ def _incoming(channel: Channel) -> IncomingMessage:
 def _calls(adapter: EvolutionAdapter, channel: Channel):
     contact = _contact(channel)
     return {
-        "fetch_media": lambda: adapter.fetch_media(_incoming(channel), channel),
+        "fetch_media": lambda: adapter.fetch_media(
+            _incoming(channel).external_message_id, "image/jpeg", channel
+        ),
         "send_message": lambda: adapter.send_message(
             OutgoingMessage(conversation_id=uuid.uuid4(), content="oi"), contact, channel
         ),
@@ -370,7 +372,10 @@ async def test_webhook_media_on_refused_channel_still_returns_200(client, db_ses
         select(Message).where(Message.channel_id == uuid.UUID(channel_id))
     )
     (message,) = result.scalars().all()
-    assert message.type == "unsupported"
+    # The webhook downloads nothing (E4.4); the turn refuses the channel
+    # before its download (`_channel_endpoint_ok`).
+    assert message.type == "image"
+    assert message.media_key is None
 
 
 async def test_operator_reply_on_refused_channel_returns_502(client, db_session):
@@ -544,7 +549,7 @@ async def _evolution_conversation(client, db_session) -> tuple[Channel, uuid.UUI
     await db_session.commit()
 
     result = await db_session.execute(
-        select(Message).where(Message.channel_id == channel.id).order_by(Message.created_at)
+        select(Message).where(Message.channel_id == channel.id).order_by(Message.seq)
     )
     messages = list(result.scalars().all())
     assert len(messages) == 1

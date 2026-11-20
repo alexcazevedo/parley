@@ -124,7 +124,7 @@ async def _messages(db_session, conversation_id: uuid.UUID) -> list[Message]:
     result = await db_session.execute(
         select(Message)
         .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 

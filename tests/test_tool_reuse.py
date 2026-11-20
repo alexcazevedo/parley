@@ -154,7 +154,7 @@ async def _inbound(db_session, conversation_id) -> list[Message]:
             Message.direction == MessageDirection.IN,
             Message.role == MessageRole.USER,
         )
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 
@@ -619,7 +619,7 @@ async def test_refused_connection_is_saved_as_error_and_reused(
 
 
 async def test_reused_handoff_ends_the_loop_with_the_handoff_message(
-    client, fake_redis, db_session, test_engine
+    client, fake_redis, db_session, test_engine, fake_handoff_brief
 ):
     conversation = await _setup(client, fake_redis, db_session)
     messages = await _inbound(db_session, conversation.id)

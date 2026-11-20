@@ -147,7 +147,7 @@ async def _recent_messages(session: AsyncSession, conversation: Conversation) ->
     result = await session.execute(
         select(Message)
         .where(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at.desc(), Message.id.desc())
+        .order_by(Message.seq.desc())
         .limit(SUMMARY_MESSAGE_LIMIT)
     )
     return list(reversed(result.scalars().all()))

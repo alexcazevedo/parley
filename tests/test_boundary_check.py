@@ -139,7 +139,7 @@ async def _messages(db_session, conversation_id) -> list[Message]:
     result = await db_session.execute(
         select(Message)
         .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 
@@ -369,7 +369,9 @@ async def test_reply_after_tool_call_is_checked(client, fake_redis, db_session):
     assert run.blocked_text == bad
 
 
-async def test_handoff_message_is_not_checked(client, fake_redis, db_session):
+async def test_handoff_message_is_not_checked(
+    client, fake_redis, db_session, fake_handoff_brief
+):
     provider = FakeLLMProvider(
         [
             LLMResponse(

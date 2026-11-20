@@ -34,7 +34,7 @@ from app.channels.registry import get_adapter
 from app.config import get_settings
 from app.media.sniff import sniff_mime
 from app.messages.ingest import MediaRejected, ingest
-from app.models.channel import Channel
+from app.models.channel import Channel, ChannelType
 from app.models.tenant import Tenant
 from app.queue.redis_queue import RedisQueue
 from app.repositories.channels import ChannelsRepository
@@ -111,6 +111,11 @@ async def resolve_channel(db: AsyncSession, tenant: Tenant, channel_id: uuid.UUI
     channel = await ChannelsRepository(db).get(tenant.id, channel_id)
     if channel is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="channel not found")
+    if channel.type != ChannelType.WEBCHAT:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="channel is not a webchat channel",
+        )
     return channel
 
 

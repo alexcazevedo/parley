@@ -126,7 +126,7 @@ async def _inbound(db_session, conversation_id: uuid.UUID) -> list[Message]:
             Message.conversation_id == conversation_id,
             Message.direction == MessageDirection.IN,
         )
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 
@@ -292,7 +292,7 @@ async def test_refused_turn_skips_sentiment_check(client, db_session, adapter, m
 
     scored: list[str] = []
 
-    async def score(session, conversation, agent, input_text):
+    async def score(session, conversation, agent, input_text, message_ids=()):
         scored.append(input_text)
         return 1.0
 

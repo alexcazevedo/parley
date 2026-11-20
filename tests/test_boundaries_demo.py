@@ -94,7 +94,7 @@ async def _outbound(db_session, conversation_id) -> list[str]:
     result = await db_session.execute(
         select(Message)
         .where(Message.conversation_id == conversation_id, Message.role != MessageRole.USER)
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return [m.content for m in result.scalars().all()]
 

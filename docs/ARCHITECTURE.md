@@ -88,8 +88,8 @@ tenants (admin-created; api_key_hash)
   └─ channels (type: webchat|whatsapp, agent_id, config, secret_encrypted)
        └─ contacts (external_user_id, per channel)
             └─ conversations (agent_id, channel_id, contact_id, state,
-                               summary, summary_cursor, last_message_at)
-                 ├─ messages (direction, role, type, content, raw_payload,
+                               summary, summary_last_seq, last_message_at)
+                 ├─ messages (seq, direction, role, type, content, raw_payload,
                  │            agent_run_id?, tool_call_id?, external_message_id)
                  ├─ agent_runs (one per turn: status, llm_calls, tool_calls,
                  │              prompt/completion_tokens, latency_ms, error)
@@ -108,6 +108,32 @@ tenants (admin-created; api_key_hash)
 terminal). `process_turn` only runs the agent when `state == ACTIVE_AI`; any
 other state means "a human is driving it, stay quiet" — new messages still
 persist, they just don't trigger a turn.
+
+**Message order.** A conversation is read in `Message.seq` order: a value from
+the database sequence `messages_seq`, taken at insert (migration `0013`).
+History, the rolling summary, the sentiment check, the handoff brief, the
+scheduler's batch and `GET /conversations/{id}/messages` all order by it.
+`created_at` is for display only: inbound rows get it from the database
+(`now()`), assistant, tool and operator rows from the app (`datetime.now(UTC)`),
+so two machines whose clocks differ stamp a reply earlier or later than the
+customer message it answers, while `seq` stays in insertion order. The one place
+that still compares `created_at` is the `after=` filter of the messages
+endpoint.
+
+**Summary cursor and the row lock.** `conversation.summary_last_seq` is the
+`seq` of the last message the rolling summary covered; the next summary takes
+the messages with a higher `seq`. A sequence value is taken before its row
+becomes visible, so a transaction could commit a lower `seq` after the summary
+had moved past it and the message would be skipped. To prevent that, the
+inserts of a customer message (`ingest`) and of an operator message
+(`post_operator_message`) lock the conversation row (`SELECT ... FOR UPDATE`)
+before inserting and hold it until they commit, and the summarizer takes the same
+lock before reading the cursor and the pending rows. Replies of a turn are
+written inside the turn, which does not take this lock itself.
+It releases it (`end_transaction`) before the model call and writes the new
+cursor afterwards. The operator message is sent first and the lock taken only to
+store it, so the lock is never held across a send, and a failed send stores
+nothing.
 
 **Warm-handoff brief**: the `handoff_to_human` tool goes through
 `app.handoff.summarizer.handoff_with_summary`; the operator-initiated
@@ -219,9 +245,12 @@ same conversation.
 `process_turn` by the worker) is one `AgentRun` row per turn:
 
 1. Build the prompt: `ContextBuilder` = system prompt (`agent.instructions` +
-   long-term memory facts + the rolling summary) + the last
-   `agent.context_message_limit` messages, replayed with tool-call/result
-   pairs reconstructed from `Message.raw_payload`.
+   long-term memory facts + the rolling summary) + the history, replayed with
+   tool-call/result pairs reconstructed from `Message.raw_payload`. The history
+   is chosen by `AgentRuntime._recent_messages`: `agent.context_message_limit`
+   (20 when unset) counts `USER`, `HUMAN_OPERATOR` and `ASSISTANT` rows that are
+   not `tool_call`, and the history is every row from the limit-th most recent
+   counted one on, tool rows included. `ContextBuilder.build` does not cut again.
 2. Loop up to `agent.max_tool_iterations` times:
    - call the `LLMProvider` with the transcript + advertised `ToolSpec`s;
    - no tool calls -> that's the final answer, `AgentRunStatus.SUCCESS`;
@@ -339,8 +368,9 @@ Boundaries (see README "Agent boundaries") sit at two points of a turn:
 
 Two kinds, deliberately different:
 
-- **Short-term**: the tail of the persisted `messages` table
-  (`context_message_limit`), plus a rolling `conversation.summary` that
+- **Short-term**: the tail of the persisted `messages` table, counted in
+  customer, operator and assistant messages (`context_message_limit`; the tool
+  rows of those turns come along), plus a rolling `conversation.summary` that
   `app/conversations/summary.py` advances once
   `messages_since_last_summary >= agent.summary_threshold` — an LLM call that
   folds the new messages into the prior summary and never runs synchronously
@@ -518,9 +548,10 @@ barge-in) gets special-cased media behavior (PRODUCT.md).
    its own payload into an `IncomingMedia` (bytes + mime + filename) on the
    `IncomingMessage`, exactly like it already maps text — the webchat
    adapter takes it from `POST /channels/webchat/media`'s multipart upload
-   (`app/api/webchat.py`), the Evolution adapter fetches the bytes via
-   `POST {base_url}/chat/getBase64FromMediaMessage/{instance}` when a
-   webhook's `audioMessage`/`imageMessage` arrives.
+   (`app/api/webchat.py`). The Evolution webhook downloads nothing: it stores
+   the message with its type (`image`/`audio`) and no `media_key`, and strips
+   `base64` and `jpegThumbnail` from the stored payload (`strip_base64`). The
+   download happens in the turn (see "Where media is downloaded" below).
 2. **Storage -> `Message.type`**: `app/messages/ingest.py` writes the file
    through `app.media.storage` (tenant-scoped local filesystem under
    `MEDIA_ROOT`, one `media_key` per file) and persists a `Message` with
@@ -556,6 +587,31 @@ barge-in) gets special-cased media behavior (PRODUCT.md).
    required) client-side and turn the response into an object URL, since
    `<img>`/`<audio>` tags can't set request headers.
 
+**Where media is downloaded, and when it fails.** In the Evolution webhook the
+order is: authenticate, parse, duplicate check (a repeated delivery answers
+`{"status": "ok"}` and stops), rate limit, store. Media is downloaded by the
+worker for every conversation state: `fetch_pending_media`
+(`app/media/fetch.py`) is the first thing `process_turn` does, before the
+returns for a conversation that is not `ACTIVE_AI` (an operator handling the
+chat sees the photo and `GET /media/{id}` serves it; no AI reply goes out),
+for an unavailable agent and for a refused endpoint (whose pending rows are
+marked as failed downloads). Then come the owed-handoff check, the endpoint
+check, `prepare_media_messages` (STT), the read receipt and the
+unsupported-only reply. `fetch_pending_media` handles only `whatsapp_evolution`
+channels and only image/audio rows without a `media_key`; it asks the turn's
+lock check before each download (a lost lock: no download, the turn returns
+`LockLost`); for each it ends the transaction, calls `EvolutionAdapter.fetch_media(external_message_id,
+fallback_mime, channel)` (`POST {base_url}/chat/getBase64FromMediaMessage/{instance}`,
+with the endpoint guard below), checks the bytes with `validate_media` (same
+rules as `ingest`) and stores the file under the message's tenant. A download that
+fails, is refused or is rejected by validation turns the row into `unsupported`
+with content `[mídia não recebida]` and logs `media.fetch_failed` with the message
+id only; the customer gets the unsupported-media reply, and the download is not
+retried. The outcome (`media_key` or the failure mark) is committed at the end of
+`fetch_pending_media`, so a rollback later in the turn neither downloads a row
+again nor undoes a failure. A message rate-limited at the webhook is stored the same way and never
+downloaded.
+
 **Channel endpoint guard.** The Evolution `config.base_url` is tenant input,
 so it gets the same address rules as tool endpoints
 (`validate_channel_base_url` and `assert_safe_channel_url` in
@@ -575,9 +631,8 @@ for tools applies here too (see `docs/FOLLOW_UPS.md`).
 in chunks and stops at `media_max_bytes * 4 // 3 + 65_536` raw bytes (base64
 overhead plus headroom). A response with a non-identity `Content-Encoding`,
 or decoded media over `MEDIA_MAX_BYTES`, is refused too. Each case raises
-`MediaTooLarge`; the webhook logs `webhook.media_fetch_failed`, stores an
-`unsupported` message with content `[mídia não recebida]`, writes no file and
-still answers 200.
+`MediaTooLarge`; the turn logs `media.fetch_failed`, turns the message into
+`unsupported` with content `[mídia não recebida]` and writes no file.
 
 Settings (`app/config.py`): `MEDIA_ROOT` (storage root, a shared Docker
 volume between `api` and `worker` in compose), `LLM_VISION_ENABLED`,

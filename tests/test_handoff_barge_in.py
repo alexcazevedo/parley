@@ -116,7 +116,7 @@ async def _prepare(client, db_session, monkeypatch, *, humanize: bool, handoff_m
     result = await db_session.execute(
         select(Message)
         .where(Message.conversation_id == conversation_id, Message.direction == MessageDirection.IN)
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     messages = list(result.scalars().all())
 
@@ -162,7 +162,7 @@ async def _stored_replies(engine, conversation_id) -> list[str]:
                 Message.role == MessageRole.ASSISTANT,
                 Message.type == "text",
             )
-            .order_by(Message.created_at)
+            .order_by(Message.seq)
         )
         return list(result.scalars().all())
 

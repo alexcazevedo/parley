@@ -19,7 +19,7 @@ class MessagesRepository(BaseRepository[Message]):
         result = await self.session.execute(
             select(Message)
             .where(Message.tenant_id == tenant_id, Message.conversation_id == conversation_id)
-            .order_by(Message.created_at)
+            .order_by(Message.seq)
         )
         return list(result.scalars().all())
 

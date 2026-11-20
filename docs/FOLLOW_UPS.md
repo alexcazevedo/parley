@@ -121,12 +121,13 @@ plausible `/forge:idea` starting point. Not ordered by priority.
 - **Migration `0012` blocks writes to `conversations` while it runs.** It
   takes `LOCK TABLE conversations IN SHARE ROW EXCLUSIVE MODE` and builds the
   index without `CONCURRENTLY`; on a large table, run it in a quiet period.
-- **Still open from PRD epic E4:** E4.4 (media fetched inline, base64 in
+- **Still open from PRD epic E4 (done in part 2 below: E4.4, E4.7, E4.8, E4.9, E4.10):** E4.4 (media fetched inline, base64 in
   stored payloads), E4.7 (sentiment prompt contains the batch twice), E4.8
   (rolling-summary cursor, timestamp sources, tool rows in the context
   window), E4.9 (wrong channel type returns 500), E4.10 (validation error
   format).
-- **Message order depends on two clocks.** Inbound messages get `created_at`
+- **Message order depends on two clocks. (Done: ordering uses `Message.seq`;
+  see part 2.)** Inbound messages get `created_at`
   from the database (`now()`); assistant and tool messages from the app
   (`datetime.now(UTC)` in `app/conversations/turn.py`,
   `app/agents/runtime.py`, `app/api/conversations.py`). When the database
@@ -136,13 +137,42 @@ plausible `/forge:idea` starting point. Not ordered by priority.
   `tests/test_e2e_demo.py`, `tests/test_lock_heartbeat.py` and
   `tests/test_scheduler_concurrency.py` then fail every time and pass again
   once the clocks agree. The same can happen in production with a smaller gap.
-- **Tests reach the network.**
+- **Tests reach the network. (Done: a guard in `tests/conftest.py` fails any
+  test that tries; the handoff brief is faked.)**
   `tests/test_handoff.py::test_handoff_tool_flips_state_sends_message_and_silences_ai`
   (and the e2e demo) request `https://api.openai.com/v1/chat/completions` for
   the handoff brief (answered `401`, logged as `handoff.summary_failed`).
-- **A timing-dependent test.**
+- **Migration `0013` rewrites every message row under an exclusive lock.**
+  It numbers all existing `messages` rows in one transaction holding an
+  `ACCESS EXCLUSIVE` lock on the table, so reads and writes of `messages`
+  (webhooks, turns, the operator view) block until it ends; the time grows
+  with the table. Run it in a quiet period. Batching it was left out.
+- **A timing-dependent test.** *Done in part 2.*
   `tests/test_scheduler_concurrency.py::test_run_scheduler_starts_newly_due_turn_while_slow_one_runs`
-  depends on sleeps of 0.8 s and 0.05 s and fails on a slow machine.
+  failed under load. The cause was not its sleeps: it read the reply from
+  the database the instant the adapter saw it, and the row is stored after
+  the send. It now waits for the row.
+
+## From the conversation-correctness run, part 2
+
+- **Base64 remains in payloads stored before this run.** Only new messages are
+  stored without it; cleaning old rows is irreversible and was left out.
+- **No cap on the size of the prompt.** `context_message_limit` counts customer,
+  operator and assistant messages; tool rows do not count, so a tool-heavy
+  agent sends a longer prompt than before.
+- **A failed media download is not retried.** The message becomes `unsupported`
+  / `[mídia não recebida]` and the customer gets the unsupported-media reply.
+- **Inline base64 sent by Evolution is not used.** It is stripped from the
+  stored event, and the worker always downloads the file itself.
+- **`created_at` still comes from two clocks.** Database `now()` for inbound
+  rows, the app's clock for replies and operator messages. It is display only;
+  order is `seq`. The `after=` filter of
+  `GET /conversations/{id}/messages` still compares `created_at`.
+- **Migration `0013` rewrites every message row under an exclusive lock.**
+  It numbers all existing `messages` rows in one transaction holding an
+  `ACCESS EXCLUSIVE` lock on the table, so reads and writes of `messages`
+  (webhooks, turns, the operator view) block until it ends; the time grows
+  with the table. Run it in a quiet period. Batching it was left out.
 
 ## Older known MVP limitations (README)
 

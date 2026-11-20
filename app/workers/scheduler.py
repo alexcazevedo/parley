@@ -200,14 +200,10 @@ class _LockKeeper:
 
 async def _load_messages(session: AsyncSession, message_ids: list[uuid.UUID]) -> list[Message]:
     result = await session.execute(
-        select(Message).where(Message.id.in_(message_ids)).order_by(Message.created_at)
+        select(Message).where(Message.id.in_(message_ids)).order_by(Message.seq)
     )
-    by_id = {message.id: message for message in result.scalars().all()}
-    # Start from arrival (pending-list) order, then sort by created_at. The
-    # sort is stable, so messages that share a timestamp keep arrival order.
-    ordered = [by_id[mid] for mid in message_ids if mid in by_id]
-    ordered.sort(key=lambda message: message.created_at)
-    return ordered
+    # Conversation order (`seq`), not arrival order and not any clock.
+    return list(result.scalars().all())
 
 
 def _delivered_before(exc: BaseException) -> int:

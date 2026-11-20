@@ -30,7 +30,7 @@ _JID_SUFFIX = "@s.whatsapp.net"
 _LID_SUFFIX = "@lid"
 
 # Total time for the media request and body read. httpx's `timeout` is per
-# read, so a server dripping bytes would otherwise hold the webhook open.
+# read, so a server dripping bytes would otherwise hold the turn's download open.
 MEDIA_DOWNLOAD_DEADLINE_SECONDS = 30.0
 
 # Message keys that carry a still-unsupported media type: the content shown
@@ -56,6 +56,47 @@ class IgnoredEvent(Exception):
     (HTTP 200) but not persisted: any event other than `messages.upsert`,
     outbound echoes (`key.fromMe`), and non-text messages.
     """
+
+
+_BINARY_KEYS = frozenset({"base64", "jpegThumbnail"})
+
+
+def strip_base64(payload: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `payload` without any `base64` or `jpegThumbnail` key, at any depth.
+
+    Applied to every event before it is stored (`messages.raw_payload`), so
+    the stored copy never carries inline media. Lists are walked too; the
+    input is left untouched (every dict and list of the result is new).
+
+    Walked with an explicit stack, not recursion: a payload nested deeper
+    than Python's recursion limit must not raise (a 500 Evolution redelivers).
+    """
+    result: dict[str, Any] = {}
+    # (source container, its new copy); each copy is filled from its source.
+    stack: list[tuple[Any, Any]] = [(payload, result)]
+    while stack:
+        source, target = stack.pop()
+        if isinstance(source, dict):
+            for key, value in source.items():
+                if key in _BINARY_KEYS:
+                    continue
+                target[key] = _empty_copy(value, stack)
+        else:
+            for item in source:
+                target.append(_empty_copy(item, stack))
+    return result
+
+
+def _empty_copy(value: Any, stack: list[tuple[Any, Any]]) -> Any:
+    """A scalar as it is; for a dict or list, a new empty one queued to be filled."""
+    if isinstance(value, dict):
+        copy: Any = {}
+    elif isinstance(value, list):
+        copy = []
+    else:
+        return value
+    stack.append((value, copy))
+    return copy
 
 
 def _person_id(remote_jid: str) -> str:
@@ -141,7 +182,8 @@ class EvolutionAdapter(ChannelAdapter):
             else datetime.now(UTC)
         )
 
-        raw: dict[str, Any] = dict(payload)
+        # What is stored as `messages.raw_payload`: never inline media.
+        raw: dict[str, Any] = strip_base64(payload)
         if raw_extra is not None:
             raw["_media"] = raw_extra
 
@@ -156,7 +198,16 @@ class EvolutionAdapter(ChannelAdapter):
             raw=raw,
         )
 
-    async def fetch_media(self, incoming: IncomingMessage, channel: Channel) -> IncomingMedia:
+    async def fetch_media(
+        self, external_message_id: str, fallback_mime: str | None, channel: Channel
+    ) -> IncomingMedia:
+        """Download one inbound message's media from Evolution.
+
+        `fallback_mime` (the mimetype the webhook declared, `raw_payload
+        ["_media"]["mimetype"]`) is used when Evolution's answer has none.
+        Goes through `_connection` (SSRF check) like every outbound call;
+        raises on any failure, including `MediaTooLarge` and `TimeoutError`.
+        """
         base_url, instance, apikey = await self._connection(channel)
 
         max_bytes = get_settings().media_max_bytes
@@ -171,7 +222,7 @@ class EvolutionAdapter(ChannelAdapter):
                 headers={"apikey": apikey, "Accept-Encoding": "identity"},
                 timeout=20,
                 json={
-                    "message": {"key": {"id": incoming.external_message_id}},
+                    "message": {"key": {"id": external_message_id}},
                     "convertToMp4": False,
                 },
             ) as response:
@@ -189,8 +240,10 @@ class EvolutionAdapter(ChannelAdapter):
         data = base64.b64decode(body["base64"])
         if len(data) > max_bytes:
             raise MediaTooLarge("media exceeds size limit")
-        fallback_mime = (incoming.raw.get("_media") or {}).get("mimetype")
-        return IncomingMedia(data=data, mime=body.get("mimetype") or fallback_mime)
+        mime = body.get("mimetype") or fallback_mime
+        if not mime:
+            raise ValueError("media has no mimetype")
+        return IncomingMedia(data=data, mime=mime)
 
     async def send_message(
         self, message: OutgoingMessage, contact: Contact, channel: Channel

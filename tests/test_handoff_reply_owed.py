@@ -144,7 +144,7 @@ async def _inbound(db_session, conversation_id) -> list[Message]:
             Message.direction == MessageDirection.IN,
             Message.role == MessageRole.USER,
         )
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 
@@ -159,7 +159,7 @@ async def _stored_replies(engine, conversation_id) -> list[str]:
                 Message.role == MessageRole.ASSISTANT,
                 Message.type == "text",
             )
-            .order_by(Message.created_at)
+            .order_by(Message.seq)
         )
         return list(result.scalars().all())
 
@@ -248,7 +248,7 @@ async def test_sentiment_handoff_whose_send_failed_is_delivered_by_the_retry(
 ):
     _, _, conversation_id = await _setup(client, fake_redis, db_session, sentiment=True)
 
-    async def frustrated(session, conversation, agent, input_text) -> float:
+    async def frustrated(session, conversation, agent, input_text, message_ids=()) -> float:
         return 0.95
 
     monkeypatch.setattr(turn_module, "score_frustration", frustrated)

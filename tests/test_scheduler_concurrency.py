@@ -163,7 +163,7 @@ async def _replies(sessions, conversation_id: uuid.UUID) -> list[str]:
                 Message.conversation_id == conversation_id,
                 Message.role == MessageRole.ASSISTANT,
             )
-            .order_by(Message.created_at)
+            .order_by(Message.seq)
         )
         return [row.content for row in result.scalars().all()]
 
@@ -385,7 +385,12 @@ async def test_run_scheduler_starts_newly_due_turn_while_slow_one_runs(
         assert not runtime.ended("devagar")
         await _until(lambda: (quick, "re: rapido") in adapter.sent)
         assert not runtime.ended("devagar")
-        assert await _replies(sessions, quick) == ["re: rapido"]
+        # The reply row is stored after its send, so wait for it instead of
+        # reading the database the instant the adapter saw the message.
+        deadline = time.monotonic() + 3.0
+        while await _replies(sessions, quick) != ["re: rapido"]:
+            assert time.monotonic() < deadline, "reply not stored in time"
+            await asyncio.sleep(0.01)
 
         await _until(lambda: (slow, "re: devagar") in adapter.sent)
     finally:

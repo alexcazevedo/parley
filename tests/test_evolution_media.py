@@ -1,6 +1,7 @@
-"""Evolution (WhatsApp) inbound media: image/audio payloads fetch their
-bytes from Evolution's `getBase64FromMediaMessage` endpoint and land in the
-same ingest pipeline as webchat uploads; other media kinds become
+"""Evolution (WhatsApp) inbound media: image/audio rows are stored by the
+webhook without media, and the worker (`fetch_pending_media`) fetches their
+bytes from Evolution's `getBase64FromMediaMessage` endpoint, validated as
+webchat uploads are; other media kinds become
 `unsupported` messages instead of being dropped.
 
 `media_root` points `MEDIA_ROOT` at a per-test temp dir (see
@@ -24,6 +25,8 @@ from sqlalchemy import select
 import app.channels.evolution as evolution_module
 from app.channels.evolution import EvolutionAdapter, IgnoredEvent, MediaTooLarge
 from app.config import get_settings
+from app.media.fetch import fetch_pending_media
+from app.models.channel import Channel
 from app.models.message import Message
 from app.queue.redis_queue import JOBS_KEY
 from tests.test_evolution import _auth, _create_evolution_channel, _create_tenant
@@ -51,6 +54,19 @@ async def _get_message(db_session, message_id: str) -> Message:
     return result.scalar_one()
 
 
+async def _fetch_after_webhook(client, headers, db_session, route) -> dict:
+    """The webhook stored the row without downloading (E4.4); run the worker's
+    download (`fetch_pending_media`, as the turn does) and return the row."""
+    assert route.call_count == 0
+    message = await _first_message(client, headers)
+    assert message["media_mime"] is None
+    row = await _get_message(db_session, message["id"])
+    channel = await db_session.get(Channel, row.channel_id)
+    await fetch_pending_media(db_session, [row], channel)
+    await db_session.commit()
+    return await _first_message(client, headers)
+
+
 async def _first_message(client, headers) -> dict:
     conversations = await client.get("/conversations", headers=headers)
     conversation_id = conversations.json()[0]["id"]
@@ -59,13 +75,15 @@ async def _first_message(client, headers) -> dict:
 
 
 @respx.mock
-async def test_image_payload_stores_media_and_enqueues_job(client, fake_redis, media_root):
+async def test_image_payload_stores_media_and_enqueues_job(
+    client, fake_redis, db_session, media_root
+):
     tenant = await _create_tenant(client)
     headers = _auth(tenant["api_key"])
     channel_id = await _create_evolution_channel(client, headers)
 
     png_bytes = (FIXTURES / "order_label.png").read_bytes()
-    respx.post(GET_BASE64_URL).mock(
+    route = respx.post(GET_BASE64_URL).mock(
         return_value=httpx.Response(
             200,
             json={
@@ -82,7 +100,8 @@ async def test_image_payload_stores_media_and_enqueues_job(client, fake_redis, m
     )
     assert response.status_code == 200
 
-    message = await _first_message(client, headers)
+    message = await _fetch_after_webhook(client, headers, db_session, route)
+    assert route.call_count == 1
     assert message["type"] == "image"
     assert message["content"] == "olha isso"
     assert message["media_mime"] == "image/png"  # sniffed, not the declared jpeg
@@ -91,13 +110,15 @@ async def test_image_payload_stores_media_and_enqueues_job(client, fake_redis, m
 
 
 @respx.mock
-async def test_audio_payload_normalizes_mime_and_stores_media(client, fake_redis, media_root):
+async def test_audio_payload_normalizes_mime_and_stores_media(
+    client, fake_redis, db_session, media_root
+):
     tenant = await _create_tenant(client)
     headers = _auth(tenant["api_key"])
     channel_id = await _create_evolution_channel(client, headers)
 
     mp3_bytes = (FIXTURES / "voice_note.mp3").read_bytes()
-    respx.post(GET_BASE64_URL).mock(
+    route = respx.post(GET_BASE64_URL).mock(
         return_value=httpx.Response(
             200,
             json={
@@ -114,7 +135,8 @@ async def test_audio_payload_normalizes_mime_and_stores_media(client, fake_redis
     )
     assert response.status_code == 200
 
-    message = await _first_message(client, headers)
+    message = await _fetch_after_webhook(client, headers, db_session, route)
+    assert route.call_count == 1
     assert message["type"] == "audio"
     assert message["content"] == ""
     assert message["media_mime"] == "audio/mpeg"  # sniffed, not the declared ogg
@@ -147,12 +169,16 @@ async def test_video_payload_is_unsupported_no_media_call(client, fake_redis, me
 
 
 @respx.mock
-async def test_media_fetch_failure_falls_back_to_unsupported(client, fake_redis, media_root):
+async def test_media_fetch_failure_falls_back_to_unsupported(
+    client, fake_redis, db_session, media_root
+):
     tenant = await _create_tenant(client)
     headers = _auth(tenant["api_key"])
     channel_id = await _create_evolution_channel(client, headers)
 
-    respx.post(GET_BASE64_URL).mock(return_value=httpx.Response(500, json={"error": "boom"}))
+    route = respx.post(GET_BASE64_URL).mock(
+        return_value=httpx.Response(500, json={"error": "boom"})
+    )
 
     response = await client.post(
         f"/webhooks/whatsapp/{channel_id}",
@@ -161,7 +187,7 @@ async def test_media_fetch_failure_falls_back_to_unsupported(client, fake_redis,
     )
     assert response.status_code == 200
 
-    message = await _first_message(client, headers)
+    message = await _fetch_after_webhook(client, headers, db_session, route)
     assert message["type"] == "unsupported"
     assert message["content"] == "[mídia não recebida]"
 
@@ -279,7 +305,7 @@ async def test_fetch_media_stops_reading_past_cap(small_media_cap):
     incoming, channel = _adapter_inputs()
 
     with pytest.raises(MediaTooLarge):
-        await EvolutionAdapter().fetch_media(incoming, channel)
+        await EvolutionAdapter().fetch_media(incoming.external_message_id, "image/jpeg", channel)
 
     assert len(pulled) < total_chunks
 
@@ -292,7 +318,7 @@ async def test_fetch_media_rejects_decoded_data_over_cap(small_media_cap):
     incoming, channel = _adapter_inputs()
 
     with pytest.raises(MediaTooLarge):
-        await EvolutionAdapter().fetch_media(incoming, channel)
+        await EvolutionAdapter().fetch_media(incoming.external_message_id, "image/jpeg", channel)
 
 
 @respx.mock
@@ -306,19 +332,19 @@ async def test_fetch_media_rejects_compressed_response(small_media_cap):
     incoming, channel = _adapter_inputs()
 
     with pytest.raises(MediaTooLarge):
-        await EvolutionAdapter().fetch_media(incoming, channel)
+        await EvolutionAdapter().fetch_media(incoming.external_message_id, "image/jpeg", channel)
 
 
 @respx.mock
 async def test_oversized_media_through_webhook_is_unsupported(
-    client, fake_redis, media_root, small_media_cap
+    client, fake_redis, db_session, media_root, small_media_cap
 ):
     tenant = await _create_tenant(client)
     headers = _auth(tenant["api_key"])
     channel_id = await _create_evolution_channel(client, headers)
 
     pulled: list[int] = []
-    respx.post(GET_BASE64_URL).mock(
+    route = respx.post(GET_BASE64_URL).mock(
         return_value=httpx.Response(200, content=_counting_body(100, pulled))
     )
 
@@ -328,9 +354,9 @@ async def test_oversized_media_through_webhook_is_unsupported(
         headers={"apikey": "evo-secret-xyz"},
     )
     assert response.status_code == 200
-    assert len(pulled) < 100
 
-    message = await _first_message(client, headers)
+    message = await _fetch_after_webhook(client, headers, db_session, route)
+    assert len(pulled) < 100
     assert message["type"] == "unsupported"
     assert message["content"] == "[mídia não recebida]"
     assert message["media_mime"] is None
@@ -358,7 +384,7 @@ async def test_fetch_media_times_out_on_stalled_download(monkeypatch):
     incoming, channel = _adapter_inputs()
 
     with pytest.raises(TimeoutError):
-        await EvolutionAdapter().fetch_media(incoming, channel)
+        await EvolutionAdapter().fetch_media(incoming.external_message_id, "image/jpeg", channel)
 
 
 def test_deadline_constant_is_30_seconds():
@@ -367,13 +393,13 @@ def test_deadline_constant_is_30_seconds():
 
 @respx.mock
 async def test_stalled_media_through_webhook_is_unsupported(
-    client, fake_redis, media_root, monkeypatch
+    client, fake_redis, db_session, media_root, monkeypatch
 ):
     monkeypatch.setattr(evolution_module, "MEDIA_DOWNLOAD_DEADLINE_SECONDS", 0.2)
     tenant = await _create_tenant(client)
     headers = _auth(tenant["api_key"])
     channel_id = await _create_evolution_channel(client, headers)
-    respx.post(GET_BASE64_URL).mock(
+    route = respx.post(GET_BASE64_URL).mock(
         return_value=httpx.Response(200, content=_never_finishing_body())
     )
 
@@ -384,7 +410,7 @@ async def test_stalled_media_through_webhook_is_unsupported(
     )
     assert response.status_code == 200
 
-    message = await _first_message(client, headers)
+    message = await _fetch_after_webhook(client, headers, db_session, route)
     assert message["type"] == "unsupported"
     assert message["content"] == "[mídia não recebida]"
     assert [p for p in media_root.rglob("*") if p.is_file()] == []

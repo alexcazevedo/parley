@@ -172,7 +172,7 @@ async def _inbound(db_session, conversation_id) -> list[Message]:
             Message.direction == MessageDirection.IN,
             Message.role == MessageRole.USER,
         )
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 

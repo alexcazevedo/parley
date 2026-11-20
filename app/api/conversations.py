@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_tenant, get_db
 from app.channels.base import OutgoingMessage
 from app.channels.registry import get_adapter
+from app.db import end_transaction
 from app.handoff.service import HandoffService, IllegalTransitionError
 from app.handoff.summarizer import generate_handoff_summary
 from app.models.channel import Channel
@@ -259,6 +260,30 @@ async def post_operator_message(
     the contact sees it wherever they already are.
     """
     conversation = await _get_conversation_or_404(db, tenant, conversation_id)
+    channel = await db.get(Channel, conversation.channel_id)
+    contact = await db.get(Contact, conversation.contact_id)
+    assert channel is not None and contact is not None, "conversation has dangling FKs"
+    adapter = get_adapter(channel.type)
+    # No transaction (and no row lock) is open while the send waits.
+    await end_transaction(db)
+    try:
+        await adapter.send_message(
+            OutgoingMessage(conversation_id=conversation.id, content=payload.content),
+            contact,
+            channel,
+        )
+    except SSRFError as exc:
+        # The channel's base_url is refused (logged as `channel.endpoint_refused`
+        # by the adapter); nothing was sent, so nothing is stored.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="channel endpoint refused"
+        ) from exc
+
+    # Held until the commit below, so this message (and its `seq`) is visible
+    # before the rolling summary can move past it (app/conversations/summary.py).
+    await db.execute(
+        select(Conversation.id).where(Conversation.id == conversation.id).with_for_update()
+    )
     message = Message(
         id=uuid.uuid4(),
         tenant_id=tenant.id,
@@ -271,26 +296,6 @@ async def post_operator_message(
         created_at=datetime.now(UTC),
     )
     db.add(message)
-    await db.flush()
-
-    channel = await db.get(Channel, conversation.channel_id)
-    contact = await db.get(Contact, conversation.contact_id)
-    assert channel is not None and contact is not None, "conversation has dangling FKs"
-    adapter = get_adapter(channel.type)
-    try:
-        await adapter.send_message(
-            OutgoingMessage(conversation_id=conversation.id, content=payload.content),
-            contact,
-            channel,
-        )
-    except SSRFError as exc:
-        # The channel's base_url is refused (logged as `channel.endpoint_refused`
-        # by the adapter); nothing was sent, so the operator message is dropped.
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="channel endpoint refused"
-        ) from exc
-
     conversation.last_message_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(message)

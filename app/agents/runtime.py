@@ -47,7 +47,7 @@ from app.llm.base import ROLE_ASSISTANT, ROLE_TOOL, ROLE_USER, LLMMessage, LLMPr
 from app.llm.factory import get_provider, resolve_model
 from app.media.storage import get_media_storage
 from app.memory.service import MemoryService
-from app.models.agent import Agent
+from app.models.agent import DEFAULT_HANDOFF_MESSAGE, Agent
 from app.models.agent_run import AgentRun, AgentRunStatus
 from app.models.channel import Channel
 from app.models.conversation import Conversation
@@ -285,8 +285,10 @@ class AgentRuntime:
                 # A tool (e.g. `handoff_to_human`) can end the loop on the spot
                 # instead of handing control back to the model — see
                 # app/tools/builtin.py and app/tools/base.py's `ToolResult`.
+                # An empty `final_text` (an agent without a handoff message)
+                # falls back to the default handoff text.
                 if result.ok and result.meta.get("terminal"):
-                    terminal_text = result.meta.get("final_text") or EMPTY_REPLY_MESSAGE
+                    terminal_text = result.meta.get("final_text") or DEFAULT_HANDOFF_MESSAGE
             session.add_all(step_rows)
             await session.flush()
 
@@ -364,14 +366,30 @@ class AgentRuntime:
     async def _recent_messages(
         self, session: AsyncSession, agent: Agent, conversation: Conversation
     ) -> list[Message]:
+        """Rows from the `limit`-th most recent counted message on, in `seq` order.
+
+        Counted: USER, HUMAN_OPERATOR and ASSISTANT that is not a `tool_call`.
+        Tool rows between counted ones come along, so the history starts with a
+        counted message and a tool call never loses its results.
+        """
         limit = agent.context_message_limit or 20
-        result = await session.execute(
-            select(Message)
-            .where(Message.conversation_id == conversation.id)
-            .order_by(Message.created_at.desc(), Message.id.desc())
-            .limit(limit)
+        counted = Message.role.in_([MessageRole.USER, MessageRole.HUMAN_OPERATOR]) | (
+            (Message.role == MessageRole.ASSISTANT) & (Message.type != "tool_call")
         )
-        return list(reversed(result.scalars().all()))
+        start_seq = (
+            await session.execute(
+                select(Message.seq)
+                .where(Message.conversation_id == conversation.id, counted)
+                .order_by(Message.seq.desc())
+                .offset(limit - 1)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        query = select(Message).where(Message.conversation_id == conversation.id)
+        if start_seq is not None:
+            query = query.where(Message.seq >= start_seq)
+        result = await session.execute(query.order_by(Message.seq))
+        return list(result.scalars().all())
 
     async def _load_memories(
         self, session: AsyncSession, agent: Agent, conversation: Conversation

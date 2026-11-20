@@ -14,6 +14,8 @@ normal agent turn.
 
 import asyncio
 import re
+import uuid
+from collections.abc import Sequence
 
 import structlog
 from sqlalchemy import select
@@ -59,15 +61,19 @@ async def score_frustration(
     conversation: Conversation,
     agent: Agent,
     input_text: str,
+    message_ids: Sequence[uuid.UUID] = (),
 ) -> float | None:
     """Best-effort frustration score in [0.0, 1.0], or `None` on any failure.
 
     Never raises: LLM errors, timeouts, and unparseable responses are all
     logged and swallowed so a broken classifier never blocks the agent turn.
+
+    `message_ids` are the rows of the batch being scored: they are left out of
+    the history, because `input_text` already carries them (rendered) once.
     """
     settings = get_settings()
     try:
-        messages = await _recent_messages(session, conversation)
+        messages = await _recent_messages(session, conversation, message_ids)
         prompt = _build_prompt(messages, input_text)
         provider = get_provider(agent)
         model = resolve_model(agent)
@@ -83,11 +89,16 @@ async def score_frustration(
         return None
 
 
-async def _recent_messages(session: AsyncSession, conversation: Conversation) -> list[Message]:
+async def _recent_messages(
+    session: AsyncSession,
+    conversation: Conversation,
+    exclude_ids: Sequence[uuid.UUID] = (),
+) -> list[Message]:
+    query = select(Message).where(Message.conversation_id == conversation.id)
+    if exclude_ids:
+        query = query.where(Message.id.not_in(list(exclude_ids)))
     result = await session.execute(
-        select(Message)
-        .where(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at.desc(), Message.id.desc())
+        query.order_by(Message.seq.desc())
         .limit(SENTIMENT_MESSAGE_LIMIT)
     )
     return list(reversed(result.scalars().all()))
@@ -100,7 +111,9 @@ def _build_prompt(messages: list[Message], input_text: str) -> list[LLMMessage]:
         if label is None or not (message.content or "").strip():
             continue
         lines.append(f"{label}: {message.content.strip()}")
-    lines.append(f"user: {input_text.strip()}")
+    # One `user:` line per line of the batch: input_text joins the batch's
+    # rendered messages with newlines.
+    lines.extend(f"user: {line.strip()}" for line in input_text.splitlines() if line.strip())
     transcript = "\n".join(lines)
 
     return [

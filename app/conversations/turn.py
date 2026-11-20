@@ -41,9 +41,9 @@ A turn whose own `handoff_to_human` call handed the conversation off (its
 loaded `Conversation` is `HUMAN_HANDOFF` once the runtime returns) is never
 superseded: the handoff message is not a stale AI answer, so it is delivered
 whole and committed like the sentiment path, with no rolling summary after.
-What goes out is always the agent's `handoff_message` (the tool's default
-when it is empty), not the runtime's return value: a runtime that failed
-after the handoff committed returns its generic error text.
+What goes out is always the agent's `handoff_message` (`DEFAULT_HANDOFF_MESSAGE`
+when it is empty, on every handoff path), not the runtime's return value: a
+runtime that failed after the handoff committed returns its generic error text.
 
 An operator wins over a running turn (PRODUCT.md E4.2): right before every
 outbound send (the single reply, each humanized bubble after its pacing
@@ -63,7 +63,8 @@ the row agree.
 
 Lock ownership (PRODUCT.md E3.5): the scheduler also injects an
 `ownership_check` — "is the conversation lock still ours?". It is asked right
-before every outbound send (read receipt, each bubble, the single reply) and
+before each WhatsApp media download (`fetch_pending_media`), every outbound
+send (read receipt, each bubble, the single reply) and
 right before the turn's own commits (the abandonment of a superseded turn,
 the unsupported-media, sentiment and owed handoff replies, the summary), but
 not before the commit that stores a reply right after it was sent, the
@@ -75,7 +76,7 @@ nothing more and returns `LockLost`. Bubbles already sent stand (and stay
 committed). No check means today's behavior.
 
 No transaction across slow work (PRODUCT.md E3.6): right before every slow
-call — the channel endpoint check, speech-to-text, the read receipt, each
+call — the channel endpoint check, a WhatsApp media download, speech-to-text, the read receipt, each
 typing indicator, each pacing sleep, each send, the summary model call — the
 turn calls `app.db.end_transaction`, so no connection sits idle in a
 transaction while the network or the clock is waited on. The consequence:
@@ -107,7 +108,7 @@ a customer gets when a batch is dead-lettered.
 import asyncio
 import inspect
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
@@ -118,7 +119,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.context import render_message_text
 from app.agents.loading import load_conversation_agent
-from app.agents.runtime import EMPTY_REPLY_MESSAGE
 from app.agents.sentiment import score_frustration
 from app.channels.base import ChannelAdapter, OutgoingMessage
 from app.channels.registry import get_adapter
@@ -129,8 +129,9 @@ from app.db import end_transaction
 from app.handoff.service import IllegalTransitionError
 from app.handoff.summarizer import handoff_with_summary
 from app.llm.factory import get_provider
+from app.media.fetch import fetch_pending_media
 from app.media.prepare import prepare_media_messages
-from app.models.agent import Agent
+from app.models.agent import DEFAULT_HANDOFF_MESSAGE, Agent
 from app.models.agent_run import AgentRun, AgentRunStatus
 from app.models.channel import Channel
 from app.models.contact import Contact
@@ -280,7 +281,9 @@ async def process_turn(
     `ACTIVE_AI` — a human is driving it, so the AI stays quiet, unless this is
     the retry of a batch whose handoff message was never sent — or one whose
     agent is missing or belongs to another tenant, or whose channel endpoint
-    the SSRF check refuses: the turn is refused, nothing is sent or written).
+    the SSRF check refuses: the turn is refused, nothing is sent). Pending
+    WhatsApp media of the batch is downloaded (or marked failed) and committed
+    before any of these returns.
 
     Returns `Superseded` instead when `supersede_check` reported a newer
     inbound message at one of the two checkpoints: the reply (or its remaining
@@ -400,6 +403,19 @@ async def _run_turn(
     # Read now, while the rows are loaded: later commits may expire them.
     message_ids = [message.id for message in messages]
 
+    # WhatsApp images and voice notes are downloaded here, not by the webhook
+    # (PRODUCT.md E4.4), and before any of the returns below: an operator
+    # handling the chat, or a turn refused for its agent, still needs the
+    # photo. A refused channel endpoint fails the download (an `unsupported`
+    # row), as does any other failure. The result is committed, so a rollback
+    # later in the turn neither loses nor repeats it. A lost lock stops here.
+    channel = await session.get(Channel, conversation.channel_id)
+    assert channel is not None, "conversation has a dangling channel FK"
+    if not await fetch_pending_media(
+        session, messages, channel, ownership_check=ownership_check
+    ):
+        return await _give_up(session, conversation_id, delivered_parts=0)
+
     # A handoff is committed before its message is sent, so a failed send
     # leaves the conversation in HUMAN_HANDOFF with the customer told nothing.
     # The retry of that batch still owes them the message; any other batch of a
@@ -430,9 +446,8 @@ async def _run_turn(
 
     # Loaded before the runtime runs: `humanize` decides whether the inbound
     # batch gets a read receipt *before* we start "typing".
-    channel = await session.get(Channel, conversation.channel_id)
     contact = await session.get(Contact, conversation.contact_id)
-    assert channel is not None and contact is not None, "conversation has dangling FKs"
+    assert contact is not None, "conversation has a dangling contact FK"
 
     adapter = get_adapter(channel.type)
     # Channel endpoint (PRODUCT.md F1): a stored `base_url` the SSRF check
@@ -452,15 +467,15 @@ async def _run_turn(
             contact,
             channel,
             humanized,
-            agent.handoff_message,
+            agent.handoff_message or DEFAULT_HANDOFF_MESSAGE,
             ownership_check,
             sends,
             event="turn.handoff_message_delivered_on_retry",
         )
 
-    # Voice notes are transcribed before anything else touches the batch, so
-    # the read receipt, sentiment scoring and the joined `input_text` all see
-    # the transcript rather than an empty audio message.
+    # Voice notes (downloaded above) are transcribed before anything else
+    # touches the batch, so the read receipt, sentiment scoring and the joined
+    # `input_text` all see the transcript rather than an empty audio message.
     await prepare_media_messages(session, messages)
 
     if humanized:
@@ -498,6 +513,7 @@ async def _run_turn(
             input_text,
             ownership_check,
             sends,
+            message_ids=[message.id for message in messages],
         )
         if isinstance(escalation, _Stopped):
             # An operator changed the state while the scorer or the brief
@@ -508,7 +524,7 @@ async def _run_turn(
 
     # Read before the runtime: its commits may expire the loaded agent. This
     # is the text the `handoff_to_human` tool ends the loop with.
-    handoff_message = agent.handoff_message or EMPTY_REPLY_MESSAGE
+    handoff_message = agent.handoff_message or DEFAULT_HANDOFF_MESSAGE
     runtime = runtime or EchoRuntime()
     # The runs this turn creates are told apart from other turns' runs by id
     # (E4.6): whatever is new after the runtime returns is this turn's. Only a
@@ -692,6 +708,7 @@ async def _maybe_escalate_on_sentiment(
     input_text: str,
     ownership_check: OwnershipCheck | None = None,
     sends: _Sends | None = None,
+    message_ids: Sequence[uuid.UUID] = (),
 ) -> Message | LockLost | _Stopped | None:
     """Score the inbound batch; on a frustrated batch, hand off instead of answering.
 
@@ -708,7 +725,9 @@ async def _maybe_escalate_on_sentiment(
     correctness (never answering as the AI once we've decided to escalate)
     matters more than shaving that delay.
     """
-    score = await score_frustration(session, conversation, agent, input_text)
+    score = await score_frustration(
+        session, conversation, agent, input_text, message_ids=message_ids
+    )
     if score is None or score < get_settings().sentiment_threshold:
         return None
 
@@ -748,7 +767,7 @@ async def _maybe_escalate_on_sentiment(
         contact,
         channel,
         humanized,
-        agent.handoff_message,
+        agent.handoff_message or DEFAULT_HANDOFF_MESSAGE,
         ownership_check=ownership_check,
         sends=sends,
     )

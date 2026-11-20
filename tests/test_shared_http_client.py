@@ -1,5 +1,6 @@
 """One process-wide HTTP client for model, STT, channel and tool calls."""
 
+import socket
 import uuid
 
 import httpx
@@ -57,7 +58,17 @@ def _channel() -> tuple[Channel, Contact]:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_all_call_sites_share_one_client_with_their_own_timeouts(count_clients):
+async def test_all_call_sites_share_one_client_with_their_own_timeouts(
+    count_clients, monkeypatch
+):
+    # The tool's SSRF check resolves `example.com`: answer it without real DNS.
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, port, *a, **k: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 0))
+        ],
+    )
     respx.post(f"{LLM_URL}/chat/completions").mock(
         return_value=httpx.Response(
             200, json={"choices": [{"message": {"content": "hi"}}], "usage": {}}

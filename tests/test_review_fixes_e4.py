@@ -18,13 +18,13 @@ from pathlib import Path
 import pytest
 
 import app.handoff.summarizer as summarizer_module
-from app.agents.runtime import EMPTY_REPLY_MESSAGE, ERROR_MESSAGE, AgentRuntime
+from app.agents.runtime import ERROR_MESSAGE, AgentRuntime
 from app.conversations import turn as turn_module
 from app.conversations.turn import process_turn
 from app.handoff.summarizer import handoff_with_summary
 from app.llm.base import LLMResponse, ToolCall
 from app.llm.providers.fake import FakeLLMProvider
-from app.models.agent import Agent
+from app.models.agent import DEFAULT_HANDOFF_MESSAGE, Agent
 from app.models.conversation import Conversation, ConversationState
 from app.models.handoff import HandoffRequestedBy
 from app.tools.builtin import BuiltinExecutor
@@ -71,7 +71,9 @@ async def test_operator_action_during_sentiment_scoring_ends_the_turn(
     )
     await _enable_sentiment(db_session, conversation_id)
 
-    async def frustrated_after_operator_acts(session, conversation, agent, input_text):
+    async def frustrated_after_operator_acts(
+        session, conversation, agent, input_text, message_ids=()
+    ):
         await _operator(test_engine, conversation_id, action)
         return 0.99
 
@@ -95,7 +97,9 @@ async def test_operator_handoff_during_sentiment_scoring_with_agent_runtime(
     )
     await _enable_sentiment(db_session, conversation_id)
 
-    async def frustrated_after_operator_acts(session, conversation, agent, input_text):
+    async def frustrated_after_operator_acts(
+        session, conversation, agent, input_text, message_ids=()
+    ):
         await _operator(test_engine, conversation_id, "handoff")
         return 0.99
 
@@ -168,7 +172,7 @@ async def test_handoff_then_deadline_with_empty_handoff_message_sends_the_defaul
         client, db_session, test_engine, monkeypatch, ""
     )
 
-    assert adapter.sent == [EMPTY_REPLY_MESSAGE]
+    assert adapter.sent == [DEFAULT_HANDOFF_MESSAGE]
     assert ERROR_MESSAGE not in await _stored_replies(test_engine, conversation_id)
 
 

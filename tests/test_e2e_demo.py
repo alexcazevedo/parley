@@ -161,7 +161,7 @@ async def _messages(db_session, conversation_id: uuid.UUID) -> list[Message]:
     result = await db_session.execute(
         select(Message)
         .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 
@@ -175,7 +175,7 @@ class MustNotBeCalledProvider:
         raise AssertionError("the LLM must not be called while handed off")
 
 
-async def test_success_demo_end_to_end(client, fake_redis, db_session):
+async def test_success_demo_end_to_end(client, fake_redis, db_session, fake_handoff_brief):
     headers, channel_id = await _setup(client)
 
     # --- 1. three rapid messages debounce into one turn; get_order(12345),
