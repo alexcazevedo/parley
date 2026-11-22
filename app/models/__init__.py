@@ -1,6 +1,7 @@
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun, AgentRunStatus
 from app.models.base import Base, TenantScoped
+from app.models.category import Category
 from app.models.channel import Channel, ChannelType
 from app.models.contact import Contact
 from app.models.conversation import Conversation, ConversationState
@@ -18,6 +19,7 @@ __all__ = [
     "Agent",
     "AgentRun",
     "AgentRunStatus",
+    "Category",
     "Channel",
     "ChannelType",
     "Contact",

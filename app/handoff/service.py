@@ -20,12 +20,17 @@ caller commits; callers commit right after (the tool ledger, the endpoints,
 the sentiment path's send), never across a model call. The loaded object is
 not refreshed by the re-read: on a refusal it keeps its old state, which is
 what lets a running turn notice the change (`app/conversations/turn.py`).
+
+`waiting_since` (the place in the waiting line) and the claim columns are
+written here too, by a core UPDATE: `handoff` stamps `waiting_since` and clears
+the claim, `resume` and `close` clear all three. Nothing else writes
+`waiting_since`.
 """
 
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -69,6 +74,7 @@ class HandoffService:
         )
         self._session.add(record)
         await self._session.flush()
+        await self._write_line_columns(conversation, entering=True)
         return record
 
     async def resume(self, conversation: Conversation) -> Conversation:
@@ -80,6 +86,7 @@ class HandoffService:
         if open_handoff is not None:
             open_handoff.resolved_at = datetime.now(UTC)
         await self._session.flush()
+        await self._write_line_columns(conversation, entering=False)
         return conversation
 
     async def close(self, conversation: Conversation) -> Conversation:
@@ -89,7 +96,28 @@ class HandoffService:
         if open_handoff is not None:
             open_handoff.resolved_at = datetime.now(UTC)
         await self._session.flush()
+        await self._write_line_columns(conversation, entering=False)
         return conversation
+
+    async def _write_line_columns(self, conversation: Conversation, *, entering: bool) -> None:
+        """`waiting_since` and the claim, in one core UPDATE on the row.
+
+        Entering the line stamps the database clock and clears any claim;
+        leaving it clears all three. Not assigned on the loaded object: the
+        session is async and a SQL expression there would expire the attribute.
+        The loaded object's three columns are stale until the caller refreshes.
+        """
+        values = {"claimed_by": None, "claimed_at": None}
+        values["waiting_since"] = func.now() if entering else None
+        await self._session.execute(
+            update(Conversation)
+            .where(
+                Conversation.tenant_id == conversation.tenant_id,
+                Conversation.id == conversation.id,
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
 
     async def _locked_state(self, conversation: Conversation) -> ConversationState:
         """The row's current state, locked (`FOR UPDATE`) until the caller commits.

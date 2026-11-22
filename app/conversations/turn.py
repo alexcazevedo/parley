@@ -4,7 +4,14 @@
 single `input_text`, hands it to a runtime, then persists the answer as an
 outbound assistant message and pushes it through the channel adapter.
 
-One thing runs before the runtime: for agents with
+First, every batch is categorized (`app/agents/categorize.py`): the
+model files the conversation under one of the tenant's categories, unless a
+human chose it (`category_locked`) or the tenant has none (then no model
+call). A batch of a `HUMAN_HANDOFF` conversation that owes no handoff message
+is categorized too, from the messages as stored, and still gets no reply.
+Categorization is best-effort and never fails the turn.
+
+One more thing runs before the runtime: for agents with
 `sentiment_escalation_enabled`, the frustration classifier
 (`app/agents/sentiment.py`) scores the batch, and a score at or above
 `settings.sentiment_threshold` short-circuits the turn into a warm handoff
@@ -117,6 +124,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.categorize import categorize_conversation
 from app.agents.context import render_message_text
 from app.agents.loading import load_conversation_agent
 from app.agents.sentiment import score_frustration
@@ -430,6 +438,24 @@ async def _run_turn(
             conversation_id=str(conversation_id),
             state=str(conversation.state),
         )
+        # A human is driving it, but the subject can still change: the batch
+        # is categorized (as stored, no transcription) and gets no AI reply.
+        if conversation.state == ConversationState.HUMAN_HANDOFF:
+            # Best-effort as a whole, agent load included: this batch gets no
+            # reply, so categorization must never fail it.
+            try:
+                agent = await load_conversation_agent(session, conversation)
+                if agent is not None:
+                    await categorize_conversation(
+                        session,
+                        conversation,
+                        agent,
+                        "\n".join(render_message_text(message) for message in messages),
+                        message_ids=message_ids,
+                    )
+            except Exception:
+                logger.warning("category.classify_failed", conversation_id=str(conversation_id))
+                await _rollback_quietly(session, conversation_id)
         return None
 
     # Refusals come first, before any model, tool, speech-to-text or outbound
@@ -500,6 +526,13 @@ async def _run_turn(
     # audio transcript), so the joined input matches the prompt transcript the
     # context builder produces from the same rows.
     input_text = "\n".join(render_message_text(message) for message in messages)
+
+    # Before the sentiment block, so an escalating batch is handed off already
+    # filed under its subject. Best-effort: it never raises, and a tenant with
+    # no categories makes no model call.
+    await categorize_conversation(
+        session, conversation, agent, input_text, message_ids=message_ids
+    )
 
     if agent.sentiment_escalation_enabled:
         escalation = await _maybe_escalate_on_sentiment(

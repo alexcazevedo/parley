@@ -184,6 +184,10 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
 | `GET /conversations/{id}/messages` | poll for replies (`?include_tools=false` by default; `?after=<timestamp>`, compared with `created_at`). Messages come in the order they were stored (`seq`) |
 | `POST /conversations/{id}/messages` | operator reply (typically while `HUMAN_HANDOFF`) |
 | `POST /conversations/{id}/handoff` / `/resume` / `/close` | conversation state transitions. An operator's action is saved at once and stops a running reply: a turn checks the state before each send, sends nothing more (bubbles already sent stay) and the customer is not told about the cut-off. A tool call already in flight still completes |
+| `GET/POST /categories`, `GET/PATCH/DELETE /categories/{id}` | the tenant's categories (`name`, `description`) |
+| `PUT /conversations/{id}/category` | a human sets (or, with `null`, clears) the category; the model no longer changes it |
+| `GET /lines` | the waiting lines: one per category, then the uncategorized one |
+| `POST /conversations/{id}/claim` / `/release` | an operator takes a waiting conversation, or puts it back |
 | `GET/POST/DELETE /contacts/{id}/memories` | long-term memory CRUD |
 | `GET /operator` | self-contained operator inbox page (handoff triage, reply, resume/close) |
 
@@ -401,6 +405,92 @@ Point `BOUNDARY_FLOOR_FILE` at a JSON file, for example:
   (`boundary_reason`, `blocked_text`) directly, and the `boundary.*` logs.
 - Block and false-block rates on a real model are not measured yet. The tests
   use a scripted model.
+
+## Categories and waiting lines
+
+Every conversation can have one category, chosen by the model from a list the
+tenant defines. A conversation handed to a human waits in a line, one line per
+category. Operators claim from a line.
+
+**What the harness owns:** the category of a conversation, since when it
+waits (`waiting_since`), and who claimed it (`claimed_by`, `claimed_at`),
+including the race: two operators cannot hold the same conversation.
+
+**What your app owns:** operator accounts, which operator may see which line,
+priorities and timers, notifications, and real operator screens. The
+`operator_id` is any text your app sends (1 to 200 characters). The harness
+stores it and does not check it. `/operator` is a demo page, not a product
+screen.
+
+How it works:
+
+- A tenant defines categories (`name`, unique per tenant, and a short
+  `description` the model reads). They are shared by all its agents and
+  channels. With no categories the feature is off: no classifier call is made
+  and handed-off conversations wait in the uncategorized line.
+- On every batch of customer messages, and also on batches that arrive while a
+  human has the conversation (`HUMAN_HANDOFF`), one extra model call picks a
+  category from the list, or none. The model never creates a category and never
+  clears one: when nothing fits the conversation stays where it was. A failed or
+  slow call (`CATEGORY_TIMEOUT_SECONDS`, default `5.0`) changes nothing and the
+  reply goes out as usual.
+- `PUT /conversations/{id}/category` sets the category in any state and locks
+  it: the model no longer changes that conversation. `{"category_id": null}`
+  clears it and locks it too. There is no unlock.
+- Deleting a category leaves its conversations uncategorized. They keep their
+  wait position.
+- A handoff sets `waiting_since`. `GET /lines` lists, per category by name and
+  then the uncategorized line, the `HUMAN_HANDOFF` conversations nobody has
+  claimed, oldest `waiting_since` first. A move to another category keeps
+  `waiting_since`, so the conversation joins the new line at its original place.
+  `?limit=` (1 to 500, default 200) caps the total, keeping the oldest;
+  `?include_handoff=true` adds the handoff brief.
+- `claim` is refused with 409 `conversation is already claimed` when another
+  operator holds it, and with 409 `conversation is not waiting for an operator`
+  when it is not in `HUMAN_HANDOFF`. A claimed conversation leaves the line.
+  `release` puts it back at its original place (409 `conversation is not
+  claimed` if nobody holds it). `resume` and `close` clear the claim and
+  `waiting_since`.
+- List filters on `GET /conversations`: `category_id=<uuid>`,
+  `uncategorized=true` (not together with `category_id`: 422), `claimed_by=<id>`.
+  They combine with `state`.
+
+Walk-through (`$BASE` is the API, `$KEY` the tenant key; `$CHANNEL` a webchat
+channel id):
+
+```bash
+H="X-API-Key: $KEY"
+# 1. Define two categories
+curl -s -X POST $BASE/categories -H "$H" -H 'Content-Type: application/json' \
+  -d '{"name":"billing","description":"invoices and payments"}'
+curl -s -X POST $BASE/categories -H "$H" -H 'Content-Type: application/json' \
+  -d '{"name":"support","description":"help with the product"}'
+# 2. A customer writes; the worker files the conversation (wait for the reply)
+curl -s -X POST $BASE/channels/webchat/messages -H "$H" -H 'Content-Type: application/json' \
+  -d "{\"channel_id\":\"$CHANNEL\",\"user_id\":\"ana\",\"message\":\"preciso da segunda via do boleto\"}"
+curl -s "$BASE/conversations?category_id=$BILLING_ID" -H "$H"
+# 3. Hand it to a human (or let the agent do it) and look at the lines
+curl -s -X POST $BASE/conversations/$CONV/handoff -H "$H" -H 'Content-Type: application/json' -d '{}'
+curl -s $BASE/lines -H "$H"
+# 4. Move it to another line (it keeps its place)
+curl -s -X PUT $BASE/conversations/$CONV/category -H "$H" -H 'Content-Type: application/json' \
+  -d "{\"category_id\":\"$SUPPORT_ID\"}"
+# 5. Claim it; a second operator gets 409
+curl -s -X POST $BASE/conversations/$CONV/claim -H "$H" -H 'Content-Type: application/json' \
+  -d '{"operator_id":"op-1"}'
+curl -s -X POST $BASE/conversations/$CONV/claim -H "$H" -H 'Content-Type: application/json' \
+  -d '{"operator_id":"op-2"}'
+# 6. Release it: back in the line at its original place
+curl -s -X POST $BASE/conversations/$CONV/release -H "$H"
+```
+
+`/operator` has the tabs "Filas" (the lines, with the wait time, a button
+"Atender" per row and a category selector), "Minhas" (claimed by the id in the
+"Seu nome" field) and "Ativas". Migrations `0014` (categories,
+`conversations.category_id`, `category_locked`) and `0015` (`waiting_since`,
+`claimed_by`, `claimed_at`, a partial index on waiting conversations) run on
+boot with the others. Limits are in `docs/FOLLOW_UPS.md`, "From the categories
+run".
 
 ## Reliability
 

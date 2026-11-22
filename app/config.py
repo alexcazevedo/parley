@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # Sentiment escalation classifier (see app/agents/sentiment.py, ticket 20).
     sentiment_threshold: float = 0.7
     sentiment_timeout_seconds: float = 5.0
+    # Category classifier (see app/agents/categorize.py): past this the
+    # model's answer is dropped and the conversation keeps its category.
+    category_timeout_seconds: float = Field(default=5.0, gt=0)
     # Media storage (see app/media/storage.py, ticket 26): local filesystem
     # root for uploaded images/audio, and the max accepted file size.
     media_root: str = "./media"

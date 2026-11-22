@@ -17,8 +17,22 @@ async def test_operator_page_serves_html(client):
     assert response.headers["content-type"].startswith("text/html")
     body = response.text
     assert "harness_operator_api_key" in body
-    assert "Caixa de entrada" in body
+    assert "Filas" in body
     assert "Assumir" in body
+    for needle in (
+        "Minhas",
+        "Atender",
+        "Devolver à fila",
+        "Sem categoria",
+        "category-select",
+        "operator-id",
+        "harness_operator_id",
+        "/lines",
+        "pane-claim-btn",
+        "Em atendimento por",
+        "Esta conversa já está com outro atendente.",
+    ):
+        assert needle in body, needle
 
 
 async def test_operator_page_needs_no_api_key_but_conversations_does(client):

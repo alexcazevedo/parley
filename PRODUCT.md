@@ -2,85 +2,91 @@
 mode: production               # prototype | mvp | production
 routing_profile: cloud         # cloud | cloud+local (local is opt-in, never a default)
 parallel_default: sequential   # sequential | parallel
-owner: human                   # human | agent (set by forge:auto)
+owner: human                   # human | agent (set by comb:auto)
 ---
 
-# Conversation correctness (PRD epic E4, part 2)
+# Categories and waiting lines
 
 ## What / why
 
-Part 1 fixed who gets answered and when. This run fixes what remains of
-PRD epic E4: a webhook that does slow work before it answers, a model
-that sees messages in the wrong order or twice, and two API errors that
-come out wrong. Every item starts with a test that fails on the current
-code; an item whose reproduction fails is dropped and reported, not
-"fixed" blind.
+Conversations are one flat list today. Nobody can see what they are
+about without opening them, and a conversation handed to a human waits
+in no particular order with nothing to stop two operators from taking
+it. This run gives every conversation a subject, chosen by the model
+from a list the tenant defined, and gives handed-off conversations a
+waiting line per subject that operators pick from.
+
+The harness owns the facts and the race: the category of a conversation,
+since when it waits, who claimed it. The app that uses the harness owns
+people and policy: operator accounts, who may see which line, priorities,
+notifications, the real operator screens.
 
 In scope (existing repo):
 
-- **E4.4 The WhatsApp webhook answers fast.** A repeated delivery is
-  recognised before any other work. Images and audio are downloaded
-  after the webhook has answered, before the turn that needs them. The
-  stored copy of an incoming event no longer contains base64 media.
-- **E4.7 The sentiment check sees each message once.** The current
-  batch is no longer in its prompt twice.
-- **E4.8 Messages have one order.** Every message of a conversation has
-  a position that does not depend on which clock stamped it; history,
-  the rolling summary and the operator's view all use it. The rolling
-  summary continues from the last message it covered, so it neither
-  skips nor repeats one.
-- **E4.9 A wrong channel type is a clean error.** Calling a webchat
-  endpoint with a channel of another type returns a 4xx, not a 500.
-- **E4.10 Validation errors use the API's error format.** A request
-  that fails validation returns 422 in the same envelope as every other
-  error.
-- **Leftovers from part 1.** A retried handoff message uses the default
-  text when the agent has none configured. No test reaches the network:
-  the handoff brief is faked in tests, and a test that tries to call out
-  fails.
+- **Categories are defined by the tenant.** One list per tenant, shared
+  by all its agents and channels. Each category has a name and a short
+  description the model reads. Managed through the API.
+- **A conversation has one category or none.** Never several.
+- **The model categorizes, and only from the list.** Every conversation
+  is categorized from the customer's first messages and checked again on
+  later messages, so the category follows a change of subject. The model
+  never creates a category; when nothing fits, the conversation stays
+  uncategorized.
+- **A human can move a conversation, and the human wins.** After a
+  category is set through the API, the model no longer changes it for
+  that conversation.
+- **Conversations can be listed by category**, whatever their state.
+- **A waiting line per category.** A conversation enters the line when
+  it is handed to a human. The line is ordered by handoff time, oldest
+  first. Uncategorized conversations wait in a line of their own.
+- **A move keeps the place earned.** A conversation moved to another
+  category, by the model or by a human, joins the new line at the
+  position of its original handoff time.
+- **Picking is exclusive.** An operator claims a conversation with an
+  operator id supplied by the app; the harness stores it and does not
+  check it. A claimed conversation leaves the line. A second claim is
+  refused. A release puts it back at its original position. Resuming the
+  AI or closing the conversation clears the claim.
+- **The `/operator` demo page shows it.** Lines grouped by category with
+  the wait time, a pick button, and a selector to move a conversation.
 
 Decided in the grill:
 
-- **The history limit counts conversation, not tools.**
-  `context_message_limit` counts customer and assistant messages; the
-  tool calls and results of those turns come along and a call is never
-  separated from its result. Prompts of tool-heavy agents get longer.
-- **Old stored payloads stay as they are.** Only new messages are stored
-  without base64. Cleaning old rows is irreversible and is left as a
-  follow-up.
-- **A failed download behaves as today.** The message is kept as
-  "media not received" and the customer gets the existing
-  unsupported-media reply.
+- A tenant with no categories has the feature off: no classifier call is
+  made and handed-off conversations wait in the one uncategorized line.
+- Deleting a category makes its conversations uncategorized; they keep
+  their wait position.
 - The README, architecture doc and `docs/FOLLOW_UPS.md` describe the new
   behaviour and its limits.
 
 ## Primary user story
 
-As someone running parley for my customers, I know that WhatsApp never
-gives up on a slow webhook, that the model reads each conversation in
-the order it happened, and that a client calling the API wrongly gets an
-error it can read.
+As someone running parley for my customers, I define the subjects my
+business deals with once; from then on every conversation is filed under
+one of them without my help, and when a customer asks for a person, my
+operators see a line per subject and take the customer who has waited
+longest, without two of them answering the same one.
 
 ## Out of scope
 
-- Stripping base64 from payloads already stored
-- A separate cap on the total size of the prompt
-- Recording an operator's stop on the agent run (new run status)
-- Making the sleep-based scheduler test deterministic
-- Remote media storage; new media types
+- Operator accounts, roles and who may see which line
+- Priorities, SLA timers, notifications, unread counters
+- Assigning conversations to operators automatically
+- Several categories or tags on one conversation
+- Categories per agent; the model proposing new categories
+- Reports and counts per category
+- Operator screens beyond the demo page (no category admin page)
 - PRD epics E5–E7 and the rest of `docs/FOLLOW_UPS.md`
 
 ## Success demo
 
-Done when the test suite proves that a repeated WhatsApp delivery causes
-no download and no second message, a media message is acknowledged
-before its download starts and is still understood by the turn, a stored
-event contains no base64, the sentiment prompt contains the batch once,
-a conversation whose replies were stamped by a clock ahead of or behind
-the database is still read in the order it happened, the rolling summary
-covers every message exactly once across several rounds, a history limit
-of N gives the model N customer and assistant messages with their tool
-rows intact, a webchat call on a WhatsApp channel returns a 4xx, a
-validation failure returns 422 in the error envelope, a retried handoff
-message with no configured text sends the default, the suite runs with
-the network blocked — and the existing suite still passes.
+Done when I can define "billing" and "support" for a tenant, send a
+billing question and a support question from two contacts and see each
+conversation filed under the right category, ask for a person in both
+and see each waiting in its own line on `/operator` in the order they
+asked, move one to the other line and see it placed by its original wait
+time, pick it as one operator and be refused as a second, release it and
+see it back in its place — and the test suite proves the same, plus that
+a human's choice is not overwritten by the model, that a tenant without
+categories makes no classifier call, and that the existing suite still
+passes.

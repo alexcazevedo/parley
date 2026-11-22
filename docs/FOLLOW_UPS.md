@@ -174,6 +174,40 @@ plausible `/forge:idea` starting point. Not ordered by priority.
   (webhooks, turns, the operator view) block until it ends; the time grows
   with the table. Run it in a quiet period. Batching it was left out.
 
+## From the categories run
+
+- **One more model call per batch.** With categories defined, every batch of
+  customer messages, and every batch during a handoff, costs one classifier
+  call. It is not counted in an agent run's `llm_calls`. There is no setting to
+  turn it off per agent; a tenant with no categories pays nothing.
+- **No unlock of a human's choice.** Once `PUT /conversations/{id}/category` is
+  used, the model never changes that conversation, and no endpoint undoes the
+  lock. Setting `null` clears the category and also locks it. Deleting the
+  category leaves the conversation uncategorized and still locked.
+- **Claims never expire and the releaser is not checked.** An operator who
+  leaves holds the conversation until someone calls `release`, `resume` or
+  `close`; anyone with the tenant key can release any claim. The `operator_id`
+  is stored as given, not checked against anything.
+- **No priorities, counts or reports.** No per-category counts, no wait-time
+  alerts, no ordering other than `waiting_since`.
+- **No audio transcription for categorization during a handoff.** The branch
+  that categorizes a `HUMAN_HANDOFF` batch reads the messages as stored; a voice
+  note is read only if it was already transcribed.
+- **No category admin on the demo page.** `/operator` can move a conversation
+  and claim it, but categories are created and edited through the API only.
+- **No tab counters on `/operator`**, and its click flows (Filas, Minhas,
+  claim, release, the category selector) have no automated browser test; the
+  API behind them is tested.
+- **A human's choice during a model call is dropped silently.** When the
+  conversation is locked while the classifier runs, nothing is written and
+  nothing is logged.
+- **`GET /lines` caps the total, not each line.** With `limit` reached, the
+  newest waiting conversations are cut, whichever line they are in.
+- **A conversation that is not handed off has no wait time.** `waiting_since`
+  is only set by a handoff. Migration `0015` backfilled every conversation
+  already in `HUMAN_HANDOFF` with the `created_at` of its newest unresolved
+  handoff, or the migration time when it had none.
+
 ## Older known MVP limitations (README)
 
 - **SSRF DNS-rebinding TOCTOU.** The allowed-IP check resolves once;

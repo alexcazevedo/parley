@@ -88,7 +88,9 @@ tenants (admin-created; api_key_hash)
   └─ channels (type: webchat|whatsapp, agent_id, config, secret_encrypted)
        └─ contacts (external_user_id, per channel)
             └─ conversations (agent_id, channel_id, contact_id, state,
-                               summary, summary_last_seq, last_message_at)
+                               summary, summary_last_seq, last_message_at,
+                               category_id?, category_locked, waiting_since?,
+                               claimed_by?, claimed_at?)
                  ├─ messages (seq, direction, role, type, content, raw_payload,
                  │            agent_run_id?, tool_call_id?, external_message_id)
                  ├─ agent_runs (one per turn: status, llm_calls, tool_calls,
@@ -96,6 +98,7 @@ tenants (admin-created; api_key_hash)
                  │    └─ tool_executions (tool_id, arguments, result, status,
                  │                        latency_ms, error)
                  └─ handoffs (reason, requested_by, summary, resolved_at)
+  └─ categories (name, description; unique per tenant)
   └─ tools (name, input_schema, endpoint, method, auth_config_encrypted,
             timeout_seconds)
   └─ memories (contact_id, type, content, importance, last_accessed_at,
@@ -537,6 +540,68 @@ off; the `/chat` demo agent on).
    unparseable answer scores `None`, which is treated as "no signal" and the
    normal agent turn proceeds. Only `ACTIVE_AI` conversations are scored, so
    an already handed-off conversation can't double-escalate.
+
+## Categories and waiting lines
+
+The harness stores the facts: a conversation's category, since when it waits
+and who claimed it. Operators, line visibility and priorities belong to the
+app that uses it.
+
+**Columns.** Migration `0014`: table `categories` (unique `(tenant_id, name)`),
+`conversations.category_id` (nullable, foreign key `ON DELETE SET NULL`, indexed)
+and `conversations.category_locked` (default false). Migration `0015`:
+`waiting_since`, `claimed_by` (text), `claimed_at`, and the partial index
+`ix_conversations_waiting` on `(tenant_id, waiting_since)` where
+`state = 'HUMAN_HANDOFF'`.
+
+**The classifier in the turn** (`app/agents/categorize.py`). One model call per
+batch, modelled on the sentiment classifier. In `_run_turn` it runs right after
+the batch text is built and before the sentiment check, so an escalated batch is
+already filed when it is handed off. It also runs in the branch that skips a
+turn because the conversation is not `ACTIVE_AI`, only for `HUMAN_HANDOFF`, so
+the category follows the subject while a human has it; `WAITING` and `CLOSED`
+are not categorized. The model gets the categories as a numbered list (by name)
+and answers a number, `0` for none. Only a valid new number is written. It is
+best-effort and never raises: no model call is made for a locked conversation or
+a tenant with no categories; the reads run in a savepoint (a missing table does
+not fail the turn); no transaction is open during the call; a timeout, provider
+error, bad answer or a category deleted meanwhile leaves the row unchanged. The
+write is one `UPDATE ... WHERE category_locked IS FALSE`, so a human's choice
+made during the call is never overwritten. In that case nothing is written and
+nothing is logged.
+
+**Human choice.** `PUT /conversations/{id}/category` is one unconditional core
+`UPDATE ... SET category_id = :c, category_locked = true ... RETURNING`, so it
+never depends on what the session loaded earlier and the response carries the
+fresh row. A category deleted mid-request gives `404 category not found`.
+Nothing sets the lock back to false. Deleting a category does not touch `category_locked`.
+
+**The line's order.** `waiting_since` is set by `HandoffService.handoff` (a core
+`UPDATE ... SET waiting_since = now()` that also clears any claim), which every
+route into a handoff uses: the tool, the operator endpoint and sentiment.
+`resume` and `close` set `waiting_since`, `claimed_by` and `claimed_at` to NULL.
+`ConversationsRepository.list_waiting` returns the unclaimed `HUMAN_HANDOFF`
+rows by `waiting_since` ascending (nulls last), then `id`; `GET /lines` groups
+them by `category_id`. A line is a query, not a table, so there is nothing to
+reorder. A move, by the model or a human, changes only `category_id`:
+`waiting_since` is the time of the handoff, not of the move, so the conversation
+appears in the new line at its original place and a move never sends anyone to
+the back. A release likewise only clears the claim.
+
+**The claim is one conditional update.** `claim` is
+`UPDATE conversations SET claimed_by = :op, claimed_at = coalesce(claimed_at, now())
+WHERE id, tenant_id, state = 'HUMAN_HANDOFF' AND (claimed_by IS NULL OR claimed_by = :op)
+RETURNING`. Two operators racing: the database serializes the updates, one
+matches and the other gets no row. The endpoint then reads the row to tell the
+409s apart (not found, not waiting, already claimed). The same operator claiming
+again succeeds and keeps the first `claimed_at`. `release` is
+`UPDATE ... SET claimed_by = NULL, claimed_at = NULL WHERE claimed_by IS NOT NULL`.
+The repository methods do not commit; the endpoint does. After a core `UPDATE`
+the loaded object is stale until refreshed, so endpoints that return
+`ConversationOut` refresh first.
+
+**Limits.** A claim never expires, and `release` does not check who asks. The
+operator id is not validated. See `docs/FOLLOW_UPS.md`.
 
 ## Inbound media
 

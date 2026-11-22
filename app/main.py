@@ -8,12 +8,14 @@ from fastapi import FastAPI
 from app.agents.boundaries import load_floor
 from app.api import (
     agents,
+    categories,
     channels,
     chat,
     contacts,
     conversations,
     dev,
     health,
+    lines,
     media,
     operator,
     tenants,
@@ -55,8 +57,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agents.router)
     app.include_router(channels.router)
     app.include_router(tools.router)
+    app.include_router(categories.router)
     app.include_router(contacts.router)
     app.include_router(conversations.router)
+    app.include_router(lines.router)
     app.include_router(webchat.router)
     app.include_router(media.router)
     if settings.demo_mode:

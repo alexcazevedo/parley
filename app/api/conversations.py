@@ -15,7 +15,8 @@ from datetime import UTC, datetime
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant, get_db
@@ -30,6 +31,7 @@ from app.models.conversation import Conversation, ConversationState
 from app.models.handoff import Handoff, HandoffRequestedBy
 from app.models.message import Message, MessageDirection, MessageRole
 from app.models.tenant import Tenant
+from app.repositories.categories import CategoriesRepository
 from app.repositories.conversations import ConversationsRepository
 from app.repositories.messages import MessagesRepository
 from app.tools.ssrf import SSRFError
@@ -69,6 +71,11 @@ class ConversationOut(BaseModel):
     latest_handoff: HandoffOut | None = None
     contact_external_user_id: str | None = None
     contact_display_name: str | None = None
+    category_id: uuid.UUID | None = None
+    category_locked: bool = False
+    waiting_since: datetime | None = None
+    claimed_by: str | None = None
+    claimed_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -103,6 +110,16 @@ class MessageCreate(BaseModel):
     content: str = Field(min_length=1)
 
 
+class CategoryMove(BaseModel):
+    category_id: uuid.UUID | None
+
+
+class ClaimCreate(BaseModel):
+    operator_id: str = Field(min_length=1, max_length=200)
+
+    model_config = {"str_strip_whitespace": True}
+
+
 class HandoffCreate(BaseModel):
     reason: str | None = None
 
@@ -125,6 +142,9 @@ async def list_conversations(
     state: list[ConversationState] | None = Query(default=None),
     include_handoff: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
+    category_id: uuid.UUID | None = Query(default=None),
+    uncategorized: bool = Query(default=False),
+    claimed_by: str | None = Query(default=None),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> list[ConversationOut]:
@@ -136,7 +156,19 @@ async def list_conversations(
     default) rather than being fetched per row, which would be an N+1;
     single-GET below always pays that one extra query for the full brief.
     """
-    conversations = await _repo(db).list_for_inbox(tenant.id, state, limit)
+    if category_id is not None and uncategorized:
+        raise HTTPException(
+            status_code=422,
+            detail="category_id and uncategorized cannot be combined",
+        )
+    conversations = await _repo(db).list_for_inbox(
+        tenant.id,
+        state,
+        limit,
+        category_id=category_id,
+        uncategorized=uncategorized,
+        claimed_by=claimed_by,
+    )
     outs = [ConversationOut.model_validate(c) for c in conversations]
     await _attach_contacts(db, tenant, conversations, outs)
     if include_handoff:
@@ -370,4 +402,90 @@ async def close_conversation(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await db.commit()
     await db.refresh(conversation)
+    return ConversationOut.model_validate(conversation)
+
+
+@router.post("/{conversation_id}/claim", response_model=ConversationOut)
+async def claim_conversation(
+    conversation_id: uuid.UUID,
+    payload: ClaimCreate,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+) -> ConversationOut:
+    """An operator takes a waiting conversation; one conditional UPDATE decides
+    the winner. The operator id is opaque and never validated.
+    """
+    claimed = await _repo(db).claim(tenant.id, conversation_id, payload.operator_id)
+    if claimed is None:
+        # The decision is made; this read only picks the 409 message.
+        conversation = await _get_conversation_or_404(db, tenant, conversation_id)
+        if conversation.state == ConversationState.HUMAN_HANDOFF:
+            detail = "conversation is already claimed"
+        else:
+            detail = "conversation is not waiting for an operator"
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+    await db.commit()
+    out = ConversationOut.model_validate(claimed)
+    await _attach_contacts(db, tenant, [claimed], [out])
+    return out
+
+
+@router.post("/{conversation_id}/release", response_model=ConversationOut)
+async def release_conversation(
+    conversation_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+) -> ConversationOut:
+    released = await _repo(db).release(tenant.id, conversation_id)
+    if released is None:
+        await _get_conversation_or_404(db, tenant, conversation_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="conversation is not claimed"
+        )
+    await db.commit()
+    out = ConversationOut.model_validate(released)
+    await _attach_contacts(db, tenant, [released], [out])
+    return out
+
+
+@router.put("/{conversation_id}/category", response_model=ConversationOut)
+async def move_conversation_category(
+    conversation_id: uuid.UUID,
+    payload: CategoryMove,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+) -> ConversationOut:
+    """A human's choice of category (or none); sets `category_locked` so the
+    classifier leaves the conversation alone. Allowed in every state.
+    """
+    tenant_id = tenant.id  # read now: a rollback expires the tenant object
+    if payload.category_id is not None:
+        category = await CategoriesRepository(db).get(tenant_id, payload.category_id)
+        if category is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="category not found"
+            )
+    # One core UPDATE writes both columns whatever the session loaded earlier
+    # (the ORM skips a column whose new value equals the loaded one, which
+    # would let a concurrent classifier write win) and returns the fresh row.
+    try:
+        result = await db.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id, Conversation.tenant_id == tenant_id)
+            .values(category_id=payload.category_id, category_locked=True)
+            .returning(Conversation)
+            .execution_options(populate_existing=True)
+        )
+        conversation = result.scalar_one_or_none()
+        if conversation is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="conversation not found"
+            )
+        await db.commit()
+    except IntegrityError:
+        # The category was deleted between the check and the write.
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="category not found"
+        ) from None
     return ConversationOut.model_validate(conversation)
