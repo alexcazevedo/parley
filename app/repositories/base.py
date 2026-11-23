@@ -6,9 +6,10 @@ way so PostgreSQL row-level security can be layered on later without changing
 callers.
 """
 
+import builtins
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from fastapi import HTTPException
 from sqlalchemy import select, tuple_
@@ -39,7 +40,7 @@ def parse_uuid(value: Any) -> uuid.UUID:
         raise bad_cursor() from None
 
 
-def parse_after(values: dict | None) -> tuple[datetime, uuid.UUID] | None:
+def parse_after(values: dict[str, Any] | None) -> tuple[datetime, uuid.UUID] | None:
     """`{"created_at", "id"}` cursor values -> the `after` tuple for `list_page`."""
     if values is None:
         return None
@@ -55,18 +56,18 @@ class BaseRepository[ModelT: Base]:
         self.session = session
 
     async def get(self, tenant_id: uuid.UUID, id: uuid.UUID) -> ModelT | None:
+        cols: Any = self.model  # Base declares no columns; subclasses do
         result = await self.session.execute(
-            select(self.model).where(
-                self.model.tenant_id == tenant_id, self.model.id == id
-            )
+            select(self.model).where(cols.tenant_id == tenant_id, cols.id == id)
         )
         return result.scalar_one_or_none()
 
     async def list(self, tenant_id: uuid.UUID, **filters: Any) -> list[ModelT]:
-        stmt = select(self.model).where(self.model.tenant_id == tenant_id)
+        cols: Any = self.model  # Base declares no columns; subclasses do
+        stmt = select(self.model).where(cols.tenant_id == tenant_id)
         for key, value in filters.items():
             stmt = stmt.where(getattr(self.model, key) == value)
-        stmt = stmt.order_by(self.model.created_at)
+        stmt = stmt.order_by(cols.created_at)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
@@ -75,21 +76,22 @@ class BaseRepository[ModelT: Base]:
         tenant_id: uuid.UUID,
         *,
         limit: int,
-        after: tuple[datetime, uuid.UUID] | None = None,
+        after: tuple[Any, uuid.UUID] | None = None,
         **filters: Any,
-    ) -> "list[ModelT]":
+    ) -> "builtins.list[ModelT]":
         """Keyset page ordered by `(created_at, id)`: up to `limit` rows after
         `after` (the `(created_at, id)` of the last row seen). Callers pass
         `page size + 1` to learn whether another page exists.
         """
-        stmt = select(self.model).where(self.model.tenant_id == tenant_id)
+        cols: Any = self.model  # Base declares no columns; subclasses do
+        stmt = select(self.model).where(cols.tenant_id == tenant_id)
         for key, value in filters.items():
             stmt = stmt.where(getattr(self.model, key) == value)
         if after is not None:
             stmt = stmt.where(
-                tuple_(self.model.created_at, self.model.id) > tuple_(after[0], after[1])
+                tuple_(cols.created_at, cols.id) > tuple_(cast(Any, after[0]), cast(Any, after[1]))
             )
-        stmt = stmt.order_by(self.model.created_at, self.model.id).limit(limit)
+        stmt = stmt.order_by(cols.created_at, cols.id).limit(limit)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 

@@ -118,7 +118,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 import structlog
 from sqlalchemy import func, select
@@ -565,16 +565,17 @@ async def _run_turn(
     session_aware = isinstance(runtime, SessionAwareTurnRuntime)
     runs_before = await _agent_run_ids(session, conversation_id) if session_aware else set()
     if session_aware:
-        if _accepts_message_ids(runtime):
+        aware_runtime = cast(SessionAwareTurnRuntime, runtime)
+        if _accepts_message_ids(aware_runtime):
             # The batch's ids let the runtime reuse tool calls an earlier
             # attempt of this same batch already made (PRODUCT.md E3.7).
-            reply_text = await runtime.run_turn(  # type: ignore[call-arg]
+            reply_text = await aware_runtime.run_turn(  # type: ignore[call-arg]  # message_ids is optional, not in the Protocol
                 session, conversation, input_text, message_ids=message_ids
             )
         else:
-            reply_text = await runtime.run_turn(session, conversation, input_text)
+            reply_text = await aware_runtime.run_turn(session, conversation, input_text)
     else:
-        reply_text = await runtime.run(conversation, input_text)
+        reply_text = await cast(TurnRuntime, runtime).run(conversation, input_text)
     own_run_ids = (
         await _agent_run_ids(session, conversation_id) - runs_before if session_aware else set()
     )
@@ -900,7 +901,7 @@ async def _database_clock_offset(session: AsyncSession) -> timedelta:
     before = datetime.now(UTC)
     database_now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
     after = datetime.now(UTC)
-    return database_now - (before + (after - before) / 2)
+    return cast(timedelta, database_now - (before + (after - before) / 2))
 
 
 async def _deliver_handoff_reply(

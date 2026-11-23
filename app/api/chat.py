@@ -8,6 +8,7 @@ same tenant/channel/agent instead of creating duplicates.
 """
 
 from pathlib import Path
+from typing import cast
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
@@ -64,7 +65,7 @@ async def _get_or_create_webchat_channel(db: AsyncSession, tenant: Tenant) -> Ch
             # Merge the new key into the config dict and update
             new_config = {**channel.config, "humanize": True}
             updated_channel = await channels_repo.update(tenant.id, channel.id, config=new_config)
-            channel = updated_channel
+            channel = cast(Channel, updated_channel)
 
         # Idempotent upgrade: flip the demo agent's sentiment escalation flag
         # on if an earlier bootstrap left it off. Plain bool column — simple

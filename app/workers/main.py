@@ -26,6 +26,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Callable
+from typing import Any
 
 import structlog
 from redis.asyncio import Redis
@@ -148,7 +149,7 @@ def _install_stop_signals(
     thread) nothing is installed: Ctrl-C then cancels `main`, and its cleanup
     still runs the same shutdown.
     """
-    installed: list[tuple[signal.Signals, object]] = []
+    installed: list[tuple[signal.Signals, Any]] = []
     for sig in _STOP_SIGNALS:
         previous = signal.getsignal(sig)
         try:

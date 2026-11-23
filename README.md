@@ -145,14 +145,41 @@ Compose network, services address each other by service name
 (`postgres:5432`, `redis:6379`, `mock-tools:9000`) regardless of the
 host-side ports.
 
-## Test
+## Development
+
+One command runs every check:
 
 ```bash
-uv run ruff check .
-uv run pytest -q
+make check
 ```
 
-Tests run against a real Postgres (`harness_test`, auto-created if missing —
+It runs `make lint`, `make typecheck` and `make test`, in that order. The
+other targets:
+
+| Target | What it does |
+|---|---|
+| `make help` | lists the targets (the default) |
+| `make env` | copies `.env.example` to `.env` when `.env` does not exist |
+| `make db` | starts the Postgres container (`docker compose up -d --wait postgres`) unless something already accepts connections on `localhost:${POSTGRES_PORT:-5434}` |
+| `make lint` | `uv run ruff check .` |
+| `make typecheck` | `uv run mypy` |
+| `make test` | `make db`, then `uv run pytest -q $(ARGS)`; for one file: `make test ARGS=tests/test_ready.py` |
+
+`make db` reads `POSTGRES_PORT` from the shell environment only. Make does not
+read `.env`, so a port set only there is ignored by the probe.
+
+**Type check.** `uv run mypy` checks `app/` and nothing else; `tests/` is not
+type-checked. Most of `app/` is checked loosely. `app.security`, `app.queue`
+and `app.conversations` are strict: untyped functions, untyped calls, bare
+generics and returning `Any` are errors there. A `type: ignore` needs a reason
+on the same line.
+
+**CI.** `.github/workflows/ci.yml` is the workflow `CI`. It runs on every push
+to any branch and on manual dispatch. One job, `check`, starts a Postgres 16
+service on port 5434 and runs `uv sync --frozen`, `uv run ruff check .`,
+`uv run mypy` and `uv run pytest -q`, in that order. There is no Redis service.
+
+`make test` and `pytest` run against a real Postgres (`harness_test`, auto-created if missing —
 see `tests/conftest.py`) on the host-mapped port and `fakeredis`; the LLM is
 always `FakeLLMProvider` (scripted, in-process) and any customer HTTP tool
 call goes through `respx`, so `pytest` never makes a network call and never
@@ -173,6 +200,8 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
 
 | Route | Purpose |
 |---|---|
+| `GET /health` | liveness: `{"status": "ok"}`, no authentication, no dependencies |
+| `GET /ready` | readiness: 200 when the database and Redis both answer, 503 otherwise. No authentication. See "Health and readiness" |
 | `POST /tenants` | admin-only; returns the tenant's `api_key` (shown once) |
 | `POST /agents`, `/channels`, `/tools` | configure an agent, a channel, a business tool. Ids in the body (`agent_id`, `channel_id`) must belong to the caller's tenant, otherwise 422 (`agent not found` / `channel not found`). On create and update a tool `endpoint` is rejected with 422 `invalid endpoint: ...` when its host is `localhost`, `*.localhost`, `*.local`, `*.internal`, or an IP literal in any IPv4 notation (`127.1`, `0x7f000001`, ...) or IPv6 that is not globally routable (e.g. `http://100.64.0.1/x`). Other hostnames pass at create; DNS resolution and the check of every returned address happen only at call time, where a host resolving to a private IP is refused. Tool requests send `Accept-Encoding: identity`; a response with any other `Content-Encoding` is a failed result (`unsupported response encoding`) |
 | `POST /channels/webchat/messages` | Web Chat ingestion for server-side callers holding a tenant key. Per-user then per-tenant rate limits apply (fixed one-minute windows; a user already over their own limit does not count toward the tenant limit): over the limit -> 429 |
@@ -190,6 +219,30 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
 | `POST /conversations/{id}/claim` / `/release` | an operator takes a waiting conversation, or puts it back |
 | `GET/POST/DELETE /contacts/{id}/memories` | long-term memory CRUD |
 | `GET /operator` | self-contained operator inbox page (handoff triage, reply, resume/close) |
+
+### Health and readiness
+
+`/health` says the process is up. It touches neither the database nor Redis.
+`/ready` runs `SELECT 1` on the database and `PING` on Redis, each with a 2
+second limit, and says which one failed.
+
+```bash
+curl -i http://localhost:8001/health
+# 200 {"status":"ok"}
+
+curl -i http://localhost:8001/ready
+# 200 {"status":"ready","checks":{"database":"ok","redis":"ok"}}
+```
+
+When a check fails, `/ready` answers 503 and names it (here Redis is down):
+
+```json
+{"status": "not_ready", "checks": {"database": "ok", "redis": "failed"}}
+```
+
+The failure is logged as `ready.check_failed` with the check name and the
+error. `/ready` does not check the worker, the model endpoint or the media
+disk.
 
 ### Errors
 

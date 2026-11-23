@@ -63,6 +63,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from typing import Any
 
 import structlog
 from redis.asyncio import Redis
@@ -72,10 +73,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.conversations import debounce, lock, retry
 from app.conversations.turn import (
+    AnyTurnRuntime,
     LockLost,
     Superseded,
     TurnFailed,
-    TurnRuntime,
     process_turn,
     send_failure_notice,
 )
@@ -334,7 +335,7 @@ async def _settle_failure(
 async def _take_turn(
     redis: Redis,
     session_factory: SessionFactory,
-    runtime: TurnRuntime | None,
+    runtime: AnyTurnRuntime | None,
     raw_conversation_id: str,
     *,
     now: float,
@@ -459,7 +460,7 @@ async def _take_turn(
 async def _run_claimed(
     redis: Redis,
     session_factory: SessionFactory,
-    runtime: TurnRuntime | None,
+    runtime: AnyTurnRuntime | None,
     raw_conversation_id: str,
     *,
     now: float,
@@ -518,7 +519,7 @@ def _exclusive_sessions(session_factory: SessionFactory) -> SessionFactory:
 async def tick(
     redis: Redis,
     session_factory: SessionFactory,
-    runtime: TurnRuntime | None = None,
+    runtime: AnyTurnRuntime | None = None,
     *,
     now: float | None = None,
     limit: int = DUE_BATCH_SIZE,
@@ -542,7 +543,7 @@ async def tick(
     due = await debounce.due_conversations(redis, now=now, limit=limit)
 
     free = asyncio.Semaphore(slots)
-    tasks: dict[str, asyncio.Task] = {}
+    tasks: dict[str, asyncio.Task[Any]] = {}
     errors: dict[str, Exception] = {}
     async with asyncio.TaskGroup() as group:
         for raw_conversation_id in due:
@@ -568,10 +569,10 @@ async def tick(
 
     processed: list[uuid.UUID] = []
     for raw_conversation_id in due:
-        task = tasks.get(raw_conversation_id)
-        if task is None:
+        finished = tasks.get(raw_conversation_id)
+        if finished is None:
             continue
-        conversation_id, error = task.result()
+        conversation_id, error = finished.result()
         if error is not None:
             errors.setdefault(raw_conversation_id, error)
         elif conversation_id is not None:
@@ -594,8 +595,8 @@ async def _wait_for_stop(stop: asyncio.Event, timeout: float) -> None:
 async def _fill_slots(
     redis: Redis,
     session_factory: SessionFactory,
-    runtime: TurnRuntime | None,
-    running: dict[str, asyncio.Task],
+    runtime: AnyTurnRuntime | None,
+    running: dict[str, asyncio.Task[Any]],
     slots: int,
     stop: asyncio.Event,
 ) -> None:
@@ -622,7 +623,7 @@ async def _fill_slots(
         )
         running[raw_conversation_id] = task
         task.add_done_callback(
-            lambda _task, raw_conversation_id=raw_conversation_id: running.pop(
+            lambda _task, raw_conversation_id=raw_conversation_id: running.pop(  # type: ignore[misc]  # mypy cannot infer a lambda with a default-bound argument
                 raw_conversation_id, None
             )
         )
@@ -631,7 +632,7 @@ async def _fill_slots(
 async def run_scheduler(
     redis: Redis,
     session_factory: SessionFactory,
-    runtime: TurnRuntime | None = None,
+    runtime: AnyTurnRuntime | None = None,
     interval: float = TICK_INTERVAL_SECONDS,
     *,
     concurrency: int | None = None,
@@ -649,7 +650,7 @@ async def run_scheduler(
     slots = _resolve_concurrency(concurrency)
     stop = asyncio.Event() if stop is None else stop
     sessions = _exclusive_sessions(session_factory)
-    running: dict[str, asyncio.Task] = {}
+    running: dict[str, asyncio.Task[Any]] = {}
     logger.info("scheduler.starting", interval=interval, concurrency=slots)
     try:
         while not stop.is_set():

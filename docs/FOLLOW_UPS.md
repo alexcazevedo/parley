@@ -233,6 +233,30 @@ plausible `/forge:idea` starting point. Not ordered by priority.
 - **Pass the same filters with a cursor.** The cursor holds only the sort key
   of the last row, so a changed filter is not checked against it.
 
+## From the CI run
+
+- **No coverage measurement.** Neither `make check` nor CI reports coverage or
+  enforces a threshold.
+- **Tests are not type-checked.** mypy runs over `app/` only.
+- **The rest of `app/` is not strict.** Only `app.security`, `app.queue` and
+  `app.conversations` are.
+- **Two `type: ignore` remain in `app/`**, each with its reason on the line:
+  `app/conversations/turn.py` (`[call-arg]`: `message_ids` is optional and not
+  in the runtime Protocol) and `app/workers/scheduler.py` (`[misc]`: mypy cannot
+  infer a lambda with a default-bound argument). Many other fixes are
+  `cast(Any, ...)` on Redis pipeline calls and SQL `tuple_` arguments.
+- **CI does not build the Docker image.** A broken `Dockerfile` or compose file
+  is not caught.
+- **No real Redis in tests.** The suite uses `fakeredis`, and CI has no Redis
+  service.
+- **Branch protection is not set.** A failing workflow does not stop a merge.
+- **The workflow has never run on GitHub.** It is only checked by
+  `tests/test_ci_workflow.py`, which reads the file.
+- **`/ready` does not check the worker or the model endpoint.** It checks the
+  database and Redis only, and not the media disk.
+- **`make db` ignores a `POSTGRES_PORT` set only in `.env`.** Make does not read
+  `.env`, so the probe uses the shell environment or 5434.
+
 ## Older known MVP limitations (README)
 
 - **SSRF DNS-rebinding TOCTOU.** The allowed-IP check resolves once;
@@ -257,4 +281,4 @@ plausible `/forge:idea` starting point. Not ordered by priority.
 - Operator UI: accounts/roles/assignment, notifications, unread counters,
   run/tool/sentiment supervision view.
 - Production hardening: real auth (static API keys today), metrics/
-  tracing, CI, deploy (see `deploying-plugu-projects` skill for Dokploy).
+  tracing, deploy (see `deploying-plugu-projects` skill for Dokploy).

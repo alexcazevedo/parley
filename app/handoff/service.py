@@ -29,6 +29,7 @@ the claim, `resume` and `close` clear all three. Nothing else writes
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -107,7 +108,7 @@ class HandoffService:
         session is async and a SQL expression there would expire the attribute.
         The loaded object's three columns are stale until the caller refreshes.
         """
-        values = {"claimed_by": None, "claimed_at": None}
+        values: dict[str, Any] = {"claimed_by": None, "claimed_at": None}
         values["waiting_since"] = func.now() if entering else None
         await self._session.execute(
             update(Conversation)

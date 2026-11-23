@@ -1,5 +1,7 @@
 """Global exception handler: safe error responses with request_id."""
 
+from typing import Any, cast
+
 import structlog
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -65,7 +67,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 
 def add_exception_handlers(app: FastAPI) -> None:
     """Register exception handlers on the FastAPI app."""
-    app.add_exception_handler(HTTPException, http_exception_handler)
-    app.add_exception_handler(RequestValidationError, validation_error_handler)
-    app.add_exception_handler(ValidationError, validation_error_handler)
+    app.add_exception_handler(HTTPException, cast(Any, http_exception_handler))
+    app.add_exception_handler(RequestValidationError, cast(Any, validation_error_handler))
+    app.add_exception_handler(ValidationError, cast(Any, validation_error_handler))
     app.add_exception_handler(Exception, generic_exception_handler)

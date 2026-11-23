@@ -783,6 +783,27 @@ surface `/chat` gives an end user — see PRODUCT.md "Operator UI".
   same "Not included" list as PRODUCT.md. Auth is exactly the existing
   tenant `X-API-Key`; the page adds no new auth code.
 
+## Checks
+
+Three checks guard the code. `make check` runs them on a developer machine in
+this order: `uv run ruff check .`, `uv run mypy`, then `uv run pytest -q`
+(`make test` starts the Postgres container first when nothing listens on its
+port). The workflow `.github/workflows/ci.yml` runs the same three on every
+push, from a clean checkout with `uv sync --frozen`, against a Postgres 16
+service.
+
+mypy checks `app/` only. `app.security`, `app.queue` and `app.conversations`
+are strict because they hold the code where a type mistake costs most: API key
+and secret handling, the job queue, and the debounce, lock and turn logic that
+decide who answers a customer and when. The rest of `app/` is checked loosely.
+The strict flags are spelled out per module in `pyproject.toml` because
+`strict = true` inside an override applied to every module in this mypy
+version.
+
+CI has no Redis service. The tests use `fakeredis`, so a Redis container would
+add start-up time and nothing the tests use. `/ready` is tested with fakes that
+fail on purpose (`tests/test_ready.py`).
+
 ## Extension points
 
 - **New channel**: implement `ChannelAdapter` (`app/channels/base.py`),

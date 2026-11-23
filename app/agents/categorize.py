@@ -26,9 +26,11 @@ import asyncio
 import re
 import uuid
 from collections.abc import Sequence
+from typing import Any, cast
 
 import structlog
-from sqlalchemy import update
+from sqlalchemy import Table, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -54,7 +56,7 @@ CATEGORY_SYSTEM_PROMPT = (
 
 _INT_RE = re.compile(r"-?\d+")
 
-_conversations = Conversation.__table__
+_conversations = cast(Table, Conversation.__table__)
 
 
 async def categorize_conversation(
@@ -121,7 +123,7 @@ async def categorize_conversation(
             category_id=str(category_id),
         )
         return
-    if result.rowcount != 1:
+    if cast(CursorResult[Any], result).rowcount != 1:
         # A human locked the category after the turn loaded the conversation.
         return
     set_committed_value(conversation, "category_id", category_id)

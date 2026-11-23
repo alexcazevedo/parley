@@ -38,6 +38,7 @@ EVAL.
 
 import time
 import uuid
+from typing import Any, cast
 
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
@@ -67,7 +68,7 @@ def _timeout_ms(timeout: float) -> int:
     return max(1, int(timeout * 1000))
 
 
-def _to_uuids(items: list) -> list[uuid.UUID]:
+def _to_uuids(items: list[Any]) -> list[uuid.UUID]:
     """Decode list items to ids, each id once at its first position.
 
     A job can be delivered twice (worker reaped while only slow), and a batch
@@ -96,7 +97,7 @@ async def push_pending(
 async def due_conversations(redis: Redis, now: float, limit: int = 50) -> list[str]:
     """Conversation ids whose debounce window has elapsed."""
     return list(
-        await redis.zrangebyscore(DUE_KEY, "-inf", now, start=0, num=limit)
+        cast(list[str], await redis.zrangebyscore(DUE_KEY, "-inf", now, start=0, num=limit))
     )
 
 
@@ -203,7 +204,7 @@ async def drain_pending(redis: Redis, conversation_id: uuid.UUID | str) -> list[
             try:
                 await pipe.watch(pending, inflight)
                 items = await pipe.lrange(pending, 0, -1)
-                pipe.multi()
+                cast(Any, pipe).multi()
                 if items:
                     pipe.rpush(inflight, *items)
                 pipe.delete(pending)
@@ -234,7 +235,7 @@ async def finish(redis: Redis, conversation_id: uuid.UUID | str) -> None:
             try:
                 await pipe.watch(pending)
                 waiting = await pipe.llen(pending)
-                pipe.multi()
+                cast(Any, pipe).multi()
                 pipe.delete(inflight_key(conversation_id), claim_key(conversation_id))
                 if waiting:
                     pipe.zadd(DUE_KEY, {member: time.time()})
@@ -262,10 +263,10 @@ async def return_inflight(redis: Redis, conversation_id: uuid.UUID | str) -> Non
                 await pipe.watch(inflight)
                 items = await pipe.lrange(inflight, 0, -1)
                 if not items:
-                    await pipe.unwatch()
+                    await cast(Any, pipe).unwatch()
                     return
                 ids = [str(mid) for mid in _to_uuids(items)]
-                pipe.multi()
+                cast(Any, pipe).multi()
                 pipe.lpush(pending, *reversed(ids))
                 pipe.delete(inflight)
                 await pipe.execute()

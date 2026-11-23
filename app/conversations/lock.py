@@ -16,6 +16,7 @@ our token, so an expired or taken-over lock is never resurrected.
 """
 
 import uuid
+from typing import Any, cast
 
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
@@ -48,9 +49,9 @@ async def release(redis: Redis, conversation_id: uuid.UUID | str, token: str) ->
                 await pipe.watch(key)
                 current = await pipe.get(key)
                 if current != token:
-                    await pipe.unwatch()
+                    await cast(Any, pipe).unwatch()
                     return False
-                pipe.multi()
+                cast(Any, pipe).multi()
                 pipe.delete(key)
                 await pipe.execute()
                 return True
@@ -73,9 +74,9 @@ async def renew(
                 await pipe.watch(key)
                 current = await pipe.get(key)
                 if current != token:
-                    await pipe.unwatch()
+                    await cast(Any, pipe).unwatch()
                     return False
-                pipe.multi()
+                cast(Any, pipe).multi()
                 pipe.pexpire(key, ttl_ms)
                 (renewed,) = await pipe.execute()
                 return bool(renewed)

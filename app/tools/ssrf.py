@@ -36,6 +36,7 @@ Two entry points share the same static checks:
 import asyncio
 import ipaddress
 import socket
+from typing import cast
 from urllib.parse import SplitResult, urlsplit
 
 import structlog
@@ -186,7 +187,7 @@ async def _resolve(host: str, port: int) -> list[str]:
         )
     except socket.gaierror as exc:
         raise SSRFError(f"could not resolve host: {host}") from exc
-    return [info[4][0] for info in infos]
+    return [cast(str, info[4][0]) for info in infos]
 
 
 async def assert_safe_url(url: str) -> None:

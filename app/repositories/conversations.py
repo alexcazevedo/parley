@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from typing import Any, cast
 
 from sqlalchemy import and_, func, or_, select, tuple_, update
 
@@ -39,13 +40,15 @@ class ConversationsRepository(BaseRepository[Conversation]):
             stmt = stmt.where(Conversation.claimed_by == claimed_by)
         if after is not None:
             last_at, created_at, row_id = after
-            tail = tuple_(Conversation.created_at, Conversation.id) < tuple_(created_at, row_id)
+            tail = tuple_(Conversation.created_at, Conversation.id) < tuple_(
+                cast(Any, created_at), cast(Any, row_id)
+            )
             if last_at is None:
                 stmt = stmt.where(and_(Conversation.last_message_at.is_(None), tail))
             else:
                 older = tuple_(
                     Conversation.last_message_at, Conversation.created_at, Conversation.id
-                ) < tuple_(last_at, created_at, row_id)
+                ) < tuple_(cast(Any, last_at), cast(Any, created_at), cast(Any, row_id))
                 stmt = stmt.where(or_(older, Conversation.last_message_at.is_(None)))
         stmt = stmt.order_by(
             Conversation.last_message_at.desc().nulls_last(),

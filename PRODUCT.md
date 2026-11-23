@@ -5,78 +5,72 @@ parallel_default: sequential   # sequential | parallel
 owner: human                   # human | agent (set by comb:auto)
 ---
 
-# API surface and performance (PRD epic E5)
+# CI, typing and readiness (PRD epic E6)
 
 ## What / why
 
-The API accepts values that break a turn later (a temperature of 50, a
-tool named like a built-in), hides two agent settings that only the demo
-bootstrap can set, and reads whole tables to answer a list or a poll.
-This run closes PRD epic E5: the API refuses bad input, exposes what it
-stores, and every list and poll costs one bounded, indexed query.
+Nothing checks this repo but the person at the keyboard. The suite only
+runs when someone remembers to start a database container and run it; a
+missing file or a broken import reaches `main` unseen; type mistakes are
+found at run time; and an orchestrator cannot tell a process that is up
+from one that can reach its database. This run closes PRD epic E6: every
+push is checked on a clean checkout, the code is type-checked, the tests
+start with one command, and the API says whether it is ready.
 
 In scope (existing repo):
 
-- **Two hidden agent settings are exposed.** `sentiment_escalation_enabled`
-  and `handoff_message` can be set and read through `/agents`.
-- **Bad input is refused with 422.** Bounds on the agent's numbers
-  (`temperature`, `max_tokens`, `max_tool_iterations`,
-  `context_message_limit`), on a tool's `method`, `timeout_seconds` and
-  name format, and on the length of an operator's message. A tool cannot
-  take the name of a built-in (`remember`, `handoff_to_human`).
-- **The message poll asks only for what is new.** Messages carry their
-  order number (`seq`); `?after_seq=` returns only later ones, filtered
-  in the database. Without it the endpoint returns the latest page.
-- **Every list endpoint is paged.** `?limit=` (default 100, max 500) and
-  `?cursor=`; the body stays a plain JSON array and the token for the
-  next page comes in the `X-Next-Cursor` response header. Existing
-  callers keep working.
-- **Missing indexes are added** for the lookups the turn and the operator
-  inbox make on every request.
-- **Reading memories no longer writes.** The agent gets a contact's
-  memories by importance, then newest first. `remember` and the memories
-  API do not store the same fact twice. The number of memories given to
-  the agent becomes a setting (default 20).
+- **Every push is checked.** A GitHub Actions workflow runs on every
+  push to any branch, and on demand: lint, type check, then the full
+  suite against a Postgres service, from a clean checkout with the
+  locked dependencies.
+- **The code is type-checked.** mypy runs over `app/`: loose on most of
+  it, strict on `app/security`, `app/queue` and `app/conversations`. The
+  errors it reports today (about 44 loose, 16 strict) are fixed without
+  changing behaviour.
+- **Tests start with one command.** `make test` brings up the database
+  when none is listening and runs the suite. `make lint`, `make
+  typecheck` and `make check` (all three) sit beside it.
+- **The API reports readiness.** `GET /ready` answers 200 when the
+  database and Redis both respond, 503 when either does not, and says
+  which. `/health` stays as it is: cheap, no dependencies.
 
 Decided in the grill:
 
-- Header cursor, not an envelope: no existing caller breaks.
-- Lists that returned everything now return at most 100 rows unless
-  `limit` says otherwise. This is the one visible change.
-- The access write is dropped, not batched: stamping the top 20 on every
-  turn kept newer memories out for ever.
-- `messages(conversation_id, created_at)` from the PRD is not added: the
-  poll runs on `seq`, which is already indexed, and `agent_runs` already
-  has its index.
-- The README, architecture doc and `docs/FOLLOW_UPS.md` describe the
-  changes.
+- mypy, not pyright (user).
+- The workflow runs on `push` only (all branches) plus manual dispatch:
+  one developer, no forks, so a pull-request trigger would only run
+  everything twice.
+- No Redis service in CI: the suite uses an in-memory fake. `/ready` is
+  tested with fakes that fail on purpose.
+- Tests are not type-checked, only `app/`.
+- A type error is fixed with a type, not silenced; an ignore needs a
+  reason on the same line.
+- E6.4 needs no work: the earlier epics' tests exist and CI now runs
+  them.
+- The README and `docs/FOLLOW_UPS.md` describe the commands, the
+  workflow and the new endpoint.
 
 ## Primary user story
 
-As a developer building on parley, I get a clear 422 when I send a value
-the harness cannot run with, I can page through any list, and my chat
-screen polls for new messages without the server re-reading the whole
-conversation each time.
+As the person maintaining parley, I push a branch and GitHub tells me
+within minutes whether it still installs, type-checks and passes, and on
+my machine `make check` tells me the same before I push.
 
 ## Out of scope
 
-- Changing the `/chat` and `/operator` demo pages to poll with
-  `after_seq` (they keep loading the latest page)
-- Paging `GET /lines` and `GET /contacts/{id}/memories` (both already
-  take a capped `limit`)
-- Checking stored rows against the new bounds; a migration for them
-- Semantic memory search, memory pruning or decay
-- Rate limits, response caching
-- PRD epics E6 and E7 and the rest of `docs/FOLLOW_UPS.md`
+- Coverage measurement and thresholds
+- Type-checking `tests/`, strict mode on the rest of `app/`
+- Building or publishing the Docker image in CI; deploy steps
+- A test run against a real Redis, model or channel
+- Branch protection rules on GitHub (a setting, not code)
+- `/ready` checking the worker, the model endpoint or the media disk
+- PRD epic E7 and the rest of `docs/FOLLOW_UPS.md`
 
 ## Success demo
 
-Done when I can create an agent with `sentiment_escalation_enabled` and
-a `handoff_message` and read them back, get a 422 for a temperature of
-50 and for a tool named `remember`, page through a list of agents two at
-a time using `X-Next-Cursor` until the header is absent, and poll a
-conversation with `after_seq` and receive only the messages stored since
-— and the test suite proves the same, plus that the poll issues one
-query on `messages` filtered in SQL, that storing the same memory twice
-keeps one row, that reading memories writes nothing, and that the
-existing suite still passes.
+Done when I can run `make check` on my machine and see lint, type check
+and the suite pass, call `/ready` and get 200 with both checks ok and
+503 naming the one that is down, and push the branch and see the
+workflow pass on GitHub — and the suite proves the readiness answers,
+and a change that deletes `app/media/` or breaks a type in
+`app/security` fails `make check`.

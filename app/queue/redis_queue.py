@@ -13,6 +13,7 @@ jobs go to `harness:dlq`.
 """
 
 import uuid
+from typing import cast
 
 import structlog
 from redis.asyncio import Redis
@@ -61,7 +62,7 @@ class RedisQueue(Queue):
             return None
         if raw is None:
             return None
-        return Job.from_json(raw)
+        return Job.from_json(cast(str, raw))
 
     async def ack(self, job: Job) -> None:
         await self.redis.lrem(self._processing_key, 1, job.to_json())
