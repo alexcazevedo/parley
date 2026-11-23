@@ -208,6 +208,31 @@ plausible `/forge:idea` starting point. Not ordered by priority.
   already in `HUMAN_HANDOFF` with the `created_at` of its newest unresolved
   handoff, or the migration time when it had none.
 
+## From the API surface run
+
+- **The demo pages do not use `after_seq`.** `/chat` and `/operator` still load
+  the latest page of messages on every poll instead of asking for what is new.
+- **`GET /lines` and the memories list are not paged.** Both take a capped
+  `limit` and no cursor.
+- **Stored rows are not checked against the new bounds.** An agent with a
+  temperature of 50 or a tool named `remember` that was stored before this run
+  stays as it is; the bounds apply only to values sent to the API. No migration
+  cleans them.
+- **`last_accessed_at` is unused.** The column and the `MemoryOut` field stay,
+  but nothing writes them any more.
+- **Indexes were built without `CONCURRENTLY`.** Migration `0016` blocks writes
+  to `handoffs`, `memories` and `conversations` while it runs; on a large table,
+  run it in a quiet period.
+- **No total counts.** A paged list gives no row count and no "last page"
+  number, only the missing `X-Next-Cursor` header.
+- **Lists return at most 100 rows by default.** A caller that relied on getting
+  every row must page.
+- **A duplicate memory is found by exact text only.** Case and spacing are
+  ignored; a reworded fact is stored again. Expired memories do not count as
+  duplicates.
+- **Pass the same filters with a cursor.** The cursor holds only the sort key
+  of the last row, so a changed filter is not checked against it.
+
 ## Older known MVP limitations (README)
 
 - **SSRF DNS-rebinding TOCTOU.** The allowed-IP check resolves once;

@@ -386,6 +386,14 @@ Two kinds, deliberately different:
   every turn (gated by `agent.memory_enabled`) and is plain structured SQL
   today — `search()` is an `ILIKE`; the interface is the seam a
   vector-similarity implementation would slot into without touching callers.
+  Reading writes nothing. The order is `importance DESC, created_at DESC, id`,
+  and the agent gets the first `MEMORY_CONTEXT_LIMIT` rows (default 20).
+  `MemoryService.store` is the one write path (the tool and the API both use
+  it): it trims the content, collapses whitespace and lower-cases it, and if a
+  non-expired memory of the same contact has the same text it returns that row
+  and raises its importance to the higher value, instead of inserting.
+  `last_accessed_at` is still a column and in `MemoryOut`, but nothing writes
+  it.
 
 No background extraction job: memory is only ever written when the model
 explicitly decides to call `remember`.
@@ -602,6 +610,45 @@ the loaded object is stale until refreshed, so endpoints that return
 
 **Limits.** A claim never expires, and `release` does not check who asks. The
 operator id is not validated. See `docs/FOLLOW_UPS.md`.
+
+## Paging, the poll and the indexes
+
+**Keyset paging.** The helpers are in `app/api/pagination.py`. A paged route
+takes `limit` (1 to 500, default 100) and `cursor`, asks the repository for
+`limit + 1` rows, returns `limit` and, if the extra row came back, sets
+`X-Next-Cursor`. The body stays a plain array, so old callers keep working. The
+cursor is the url-safe base64 of a small JSON object holding the sort key of the
+last row; a bad one is 422 `invalid cursor`. There is no `OFFSET`, so a page
+costs the same however deep it is, and a row added or removed between pages does
+not shift the others. Sort keys: `(created_at, id)` for agents, channels, tools
+and contacts (`BaseRepository.list_page`); `(name, id)` for categories;
+`last_message_at DESC NULLS LAST, created_at DESC, id DESC` for conversations
+(`list_for_inbox`). A cursor timestamp without a timezone is 422. `GET /lines`
+and the memories list are not paged.
+
+**The poll runs on `seq`.** `GET /conversations/{id}/messages` is one `SELECT`
+on `messages` (`MessagesRepository.page_by_conversation`) filtered in SQL:
+`seq > :after_seq`, or `seq < :before_seq` when walking back, plus the tool-row
+filter. `seq` comes from `messages_seq` (see "Message order"), so it is the real
+insertion order and a client can keep one number between polls. `created_at`
+would need a tie-break and comes from two clocks. The query is served by the
+index `ix_messages_conversation_id_seq`, so the PRD's
+`messages(conversation_id, created_at)` index was not added. Without a position
+the endpoint returns the newest `limit` rows (oldest first) and the cursor is
+`{"before_seq"}`; with one it returns the oldest `limit` rows after it and the
+cursor is `{"after_seq"}`. The older `after=<timestamp>` filter still compares
+`created_at`.
+
+**Indexes (migration `0016`).** Built without `CONCURRENTLY`, so each blocks
+writes to its table while it builds.
+
+| Index | Serves |
+|---|---|
+| `ix_handoffs_conversation_id_created_at` | the newest handoff of a conversation (`latest_handoff` on `GET /conversations/{id}` and the inbox list) and the open handoff the handoff service looks up |
+| `ix_memories_contact_id` | the memories of a contact, read on every turn and by `GET /contacts/{id}/memories` |
+| `ix_conversations_tenant_state_last_message_at` | the operator inbox: `GET /conversations?state=...` for one tenant, newest activity first |
+
+`agent_runs` already had its index (`agent_runs.conversation_id`).
 
 ## Inbound media
 

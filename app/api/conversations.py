@@ -13,15 +13,22 @@ import uuid
 from datetime import UTC, datetime
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant, get_db
+from app.api.pagination import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    decode_cursor,
+    set_next_cursor,
+)
 from app.channels.base import OutgoingMessage
 from app.channels.registry import get_adapter
+from app.config import get_settings
 from app.db import end_transaction
 from app.handoff.service import HandoffService, IllegalTransitionError
 from app.handoff.summarizer import generate_handoff_summary
@@ -31,6 +38,7 @@ from app.models.conversation import Conversation, ConversationState
 from app.models.handoff import Handoff, HandoffRequestedBy
 from app.models.message import Message, MessageDirection, MessageRole
 from app.models.tenant import Tenant
+from app.repositories.base import parse_dt, parse_uuid
 from app.repositories.categories import CategoriesRepository
 from app.repositories.conversations import ConversationsRepository
 from app.repositories.messages import MessagesRepository
@@ -39,11 +47,6 @@ from app.tools.ssrf import SSRFError
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
-
-# `Message.type` values that carry the agent's tool-orchestration bookkeeping
-# rather than something a human should read — see `AgentRuntime._persist_tool_*`.
-_TOOL_MESSAGE_TYPES = {"tool_call", "tool_result"}
-
 
 class HandoffOut(BaseModel):
     """The warm-handoff operator brief — the newest `Handoff` row for a
@@ -82,6 +85,7 @@ class ConversationOut(BaseModel):
 
 class MessageOut(BaseModel):
     id: uuid.UUID
+    seq: int
     conversation_id: uuid.UUID
     channel_id: uuid.UUID
     direction: MessageDirection
@@ -108,6 +112,15 @@ class MessageOut(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str = Field(min_length=1)
+
+    @field_validator("content")
+    @classmethod
+    def _max_length(cls, value: str) -> str:
+        # Read at request time so the setting can change without a reimport.
+        limit = get_settings().max_message_chars
+        if len(value) > limit:
+            raise ValueError(f"content must be at most {limit} characters")
+        return value
 
 
 class CategoryMove(BaseModel):
@@ -139,9 +152,11 @@ async def _get_conversation_or_404(db: AsyncSession, tenant: Tenant, conversatio
 
 @router.get("", response_model=list[ConversationOut])
 async def list_conversations(
+    response: Response,
     state: list[ConversationState] | None = Query(default=None),
     include_handoff: bool = Query(default=False),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    cursor: str | None = Query(default=None),
     category_id: uuid.UUID | None = Query(default=None),
     uncategorized: bool = Query(default=False),
     claimed_by: str | None = Query(default=None),
@@ -161,14 +176,40 @@ async def list_conversations(
             status_code=422,
             detail="category_id and uncategorized cannot be combined",
         )
+    position = decode_cursor(cursor)
+    after = None
+    if position is not None:
+        if not {"last_message_at", "created_at", "id"} <= position.keys():
+            raise HTTPException(status_code=422, detail="invalid cursor")
+        last_at = position["last_message_at"]
+        after = (
+            None if last_at is None else parse_dt(last_at),
+            parse_dt(position["created_at"]),
+            parse_uuid(position["id"]),
+        )
     conversations = await _repo(db).list_for_inbox(
         tenant.id,
         state,
-        limit,
+        limit + 1,
         category_id=category_id,
         uncategorized=uncategorized,
         claimed_by=claimed_by,
+        after=after,
     )
+    more = len(conversations) > limit
+    conversations = conversations[:limit]
+    if more:
+        last = conversations[-1]
+        set_next_cursor(
+            response,
+            {
+                "last_message_at": last.last_message_at.isoformat()
+                if last.last_message_at
+                else None,
+                "created_at": last.created_at.isoformat(),
+                "id": str(last.id),
+            },
+        )
     outs = [ConversationOut.model_validate(c) for c in conversations]
     await _attach_contacts(db, tenant, conversations, outs)
     if include_handoff:
@@ -260,22 +301,48 @@ async def _latest_handoff(
 @router.get("/{conversation_id}/messages", response_model=list[MessageOut])
 async def list_conversation_messages(
     conversation_id: uuid.UUID,
+    response: Response,
     after: datetime | None = Query(default=None),
+    after_seq: int | None = Query(default=None),
     include_tools: bool = Query(default=False),
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    cursor: str | None = Query(default=None),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> list[MessageOut]:
+    """One SELECT on `messages`, filtered in SQL. With `after_seq`/`after`: the
+    oldest `limit` rows after that point; otherwise the newest `limit` rows.
+    Always oldest first; `X-Next-Cursor` is set when more rows remain.
+    """
+    position = decode_cursor(cursor) or {}
+    before_seq: int | None = None
+    try:
+        if "after_seq" in position:
+            after_seq = int(position["after_seq"])
+        if "before_seq" in position:
+            before_seq = int(position["before_seq"])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="invalid cursor") from None
     await _get_conversation_or_404(db, tenant, conversation_id)
-    messages = await MessagesRepository(db).list_by_conversation(tenant.id, conversation_id)
-    if after is not None:
-        messages = [m for m in messages if m.created_at > after]
-    if not include_tools:
-        messages = [
-            m
-            for m in messages
-            if m.role != MessageRole.TOOL and m.type not in _TOOL_MESSAGE_TYPES
-        ]
-    return [MessageOut.from_message(m) for m in messages]
+    forward = after_seq is not None or after is not None
+    rows = await MessagesRepository(db).page_by_conversation(
+        tenant.id,
+        conversation_id,
+        after_seq=after_seq,
+        before_seq=before_seq,
+        after=after,
+        include_tools=include_tools,
+        limit=limit,
+        newest=not forward,
+    )
+    more = len(rows) > limit
+    if more:
+        rows = rows[:limit] if forward else rows[1:]
+    next_values = None
+    if more and rows:
+        next_values = {"after_seq": rows[-1].seq} if forward else {"before_seq": rows[0].seq}
+    set_next_cursor(response, next_values)
+    return [MessageOut.from_message(m) for m in rows]
 
 
 @router.post(

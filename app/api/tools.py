@@ -4,42 +4,81 @@ hard requirement (ticket 02's "done when"), not just a convention.
 """
 
 import json
+import re
 import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant, get_db
+from app.api.pagination import DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, set_next_cursor
 from app.models.tenant import Tenant
+from app.repositories.base import parse_after
 from app.repositories.tools import ToolsRepository
 from app.security import secrets as secrets_crypto
+from app.tools.builtin import BUILTIN_TOOLS
 from app.tools.ssrf import SSRFError, validate_tool_endpoint
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
 
-class ToolCreate(BaseModel):
+_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+
+
+def _check_name(value: str | None) -> str | None:
+    if value is None:
+        return value
+    if not _NAME_RE.match(value):
+        raise ValueError("name must match ^[A-Za-z0-9_-]{1,64}$")
+    if value in {spec.name for spec, _ in BUILTIN_TOOLS}:
+        raise ValueError(f"name '{value}' is reserved for a built-in tool")
+    return value
+
+
+def _check_method(value: str | None) -> str | None:
+    if value is None:
+        return value
+    upper = value.upper()
+    if upper not in _METHODS:
+        raise ValueError(f"method must be one of {sorted(_METHODS)}")
+    return upper
+
+
+class _ToolChecks(BaseModel):
+    @field_validator("name", check_fields=False)
+    @classmethod
+    def _name(cls, value: str | None) -> str | None:
+        return _check_name(value)
+
+    @field_validator("method", check_fields=False)
+    @classmethod
+    def _method(cls, value: str | None) -> str | None:
+        return _check_method(value)
+
+
+class ToolCreate(_ToolChecks):
     name: str
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=2000)
     input_schema: dict[str, Any] = Field(default_factory=dict)
     endpoint: str
     method: str = "POST"
     auth_config: dict[str, Any] | None = None
-    timeout_seconds: int = 10
+    timeout_seconds: int = Field(default=10, ge=1, le=60)
 
 
-class ToolUpdate(BaseModel):
+class ToolUpdate(_ToolChecks):
     name: str | None = None
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=2000)
     input_schema: dict[str, Any] | None = None
     endpoint: str | None = None
     method: str | None = None
     auth_config: dict[str, Any] | None = None
-    timeout_seconds: int | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=60)
 
 
 class ToolOut(BaseModel):
@@ -101,11 +140,21 @@ async def create_tool(
 
 @router.get("", response_model=list[ToolOut])
 async def list_tools(
+    response: Response,
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    cursor: str | None = Query(default=None),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> list[ToolOut]:
-    tools = await _repo(db).list(tenant.id)
-    return [ToolOut.model_validate(t) for t in tools]
+    after = parse_after(decode_cursor(cursor))
+    rows = await _repo(db).list_page(tenant.id, limit=limit + 1, after=after)
+    more = len(rows) > limit
+    rows = rows[:limit]
+    if more:
+        set_next_cursor(
+            response, {"created_at": rows[-1].created_at.isoformat(), "id": str(rows[-1].id)}
+        )
+    return [ToolOut.model_validate(t) for t in rows]
 
 
 @router.get("/{tool_id}", response_model=ToolOut)

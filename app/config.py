@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     # Category classifier (see app/agents/categorize.py): past this the
     # model's answer is dropped and the conversation keeps its category.
     category_timeout_seconds: float = Field(default=5.0, gt=0)
+    # How many long-term memories the agent gets in its context each turn.
+    memory_context_limit: int = Field(default=20, ge=1, le=100)
     # Media storage (see app/media/storage.py, ticket 26): local filesystem
     # root for uploaded images/audio, and the max accepted file size.
     media_root: str = "./media"

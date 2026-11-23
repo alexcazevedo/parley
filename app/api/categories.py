@@ -4,14 +4,15 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, StringConstraints
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant, get_db
+from app.api.pagination import DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, set_next_cursor
 from app.models.tenant import Tenant
-from app.repositories.categories import CategoriesRepository
+from app.repositories.categories import CategoriesRepository, parse_name_after
 
 router = APIRouter(prefix="/categories", tags=["categories"])
 
@@ -69,10 +70,19 @@ async def create_category(
 
 @router.get("", response_model=list[CategoryOut])
 async def list_categories(
+    response: Response,
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    cursor: str | None = Query(default=None),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> list[CategoryOut]:
-    return [CategoryOut.model_validate(c) for c in await _repo(db).list(tenant.id)]
+    after = parse_name_after(decode_cursor(cursor))
+    rows = await _repo(db).list_page(tenant.id, limit=limit + 1, after=after)
+    more = len(rows) > limit
+    rows = rows[:limit]
+    if more:
+        set_next_cursor(response, {"name": rows[-1].name, "id": str(rows[-1].id)})
+    return [CategoryOut.model_validate(c) for c in rows]
 
 
 @router.get("/{category_id}", response_model=CategoryOut)

@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,6 +20,10 @@ class HandoffRequestedBy(enum.StrEnum):
 
 class Handoff(Base, TenantScoped):
     __tablename__ = "handoffs"
+    # Handoffs by conversation (migration 0016).
+    __table_args__ = (
+        Index("ix_handoffs_conversation_id_created_at", "conversation_id", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4

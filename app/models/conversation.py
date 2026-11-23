@@ -38,6 +38,13 @@ class Conversation(Base, TenantScoped):
             "waiting_since",
             postgresql_where=text("state = 'HUMAN_HANDOFF'"),
         ),
+        # The operator inbox list (migration 0016).
+        Index(
+            "ix_conversations_tenant_state_last_message_at",
+            "tenant_id",
+            "state",
+            "last_message_at",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

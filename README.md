@@ -181,7 +181,7 @@ Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
 | `POST /chat/bootstrap`, `GET /chat` | **demo-only** (`DEMO_MODE=true`; 404 otherwise): unauthenticated tenant bootstrap and the built-in chat page. Outside demo mode the demo tenant key (`WEBCHAT_DEMO_API_KEY`) is refused with 401 like any unknown key |
 | `POST /dev/messages` | **demo-only** (`DEMO_MODE=true`; 404 otherwise): dev simulator — same pipeline as Web Chat, for scripting demos |
 | `POST /webhooks/whatsapp/{channel_id}` | Evolution API inbound webhook. Tenant and channel come from the authenticated channel, never from the payload. When the user or tenant rate limit is exceeded it still answers 200 `{"status": "rate_limited"}`: the message is stored (media as `[mídia não recebida]`) and visible to operators, but no agent turn runs, and a warning is logged. An Evolution media download over the size limit is cut off and stored the same way (`unsupported`, `[mídia não recebida]`) |
-| `GET /conversations/{id}/messages` | poll for replies (`?include_tools=false` by default; `?after=<timestamp>`, compared with `created_at`). Messages come in the order they were stored (`seq`) |
+| `GET /conversations/{id}/messages` | poll for replies (`?include_tools=false` by default; `?after_seq=<n>` returns only messages stored after that `seq`; `?after=<timestamp>`, compared with `created_at`). Messages come in the order they were stored (`seq`). Paged: see "Paging and limits" |
 | `POST /conversations/{id}/messages` | operator reply (typically while `HUMAN_HANDOFF`) |
 | `POST /conversations/{id}/handoff` / `/resume` / `/close` | conversation state transitions. An operator's action is saved at once and stops a running reply: a turn checks the state before each send, sends nothing more (bubbles already sent stay) and the customer is not told about the cut-off. A tool call already in flight still completes |
 | `GET/POST /categories`, `GET/PATCH/DELETE /categories/{id}` | the tenant's categories (`name`, `description`) |
@@ -215,6 +215,63 @@ The history sent to the model starts at the limit-th most recent of those and
 carries every row after it, tool calls and tool results included, so a call is
 never separated from its result. A tool-heavy agent therefore sends a longer
 prompt than the limit suggests; there is no separate cap on its size.
+
+## Paging and limits
+
+Every list endpoint is paged: `GET /agents`, `/channels`, `/tools`,
+`/contacts`, `/categories` and `/conversations`, and
+`GET /conversations/{id}/messages`. The body is still a plain JSON array.
+**Lists that used to return every row now return at most 100 rows unless you
+pass `limit`.**
+
+- `limit`: 1 to 500, default 100. Outside that range: 422.
+- `cursor`: the value of the last `X-Next-Cursor` header. It is opaque; pass it
+  back unchanged with the same filters. A bad cursor is 422 `invalid cursor`.
+- `X-Next-Cursor`: a response header, set only when more rows exist. When it is
+  absent, you have the last page. There are no total counts.
+
+Walk two pages (`$BASE` is the API, `$KEY` the tenant key):
+
+```bash
+curl -si "$BASE/agents?limit=2" -H "X-API-Key: $KEY"
+# ... X-Next-Cursor: eyJjcmVhdGVkX2F0Ijoi...   (copy the value)
+curl -si "$BASE/agents?limit=2&cursor=eyJjcmVhdGVkX2F0Ijoi..." -H "X-API-Key: $KEY"
+# the last page has no X-Next-Cursor header
+```
+
+`GET /lines` and `GET /contacts/{id}/memories` are not paged. They take a
+capped `limit` only.
+
+**Poll for new messages.** Each message has a `seq`. Keep the highest `seq`
+you have seen and ask for what came after it:
+
+```bash
+curl -s "$BASE/conversations/$CONV/messages?after_seq=$LAST_SEQ" -H "X-API-Key: $KEY"
+```
+
+This is one query on `messages`, filtered in SQL. Without `after_seq` or
+`after`, the endpoint returns the newest `limit` messages, oldest first, and
+the cursor walks back to older ones.
+
+**Bounds that return 422.** On `/agents`: `temperature` 0 to 2, `max_tokens` 1
+to 32768, `max_tool_iterations` 1 to 20, `context_message_limit` 1 to 200,
+`summary_threshold` 0 to 1000 (0 turns summaries off), `handoff_message` 1 to
+1000 characters. On `/tools`: `name` matches `^[A-Za-z0-9_-]{1,64}$` and is not
+`remember` or `handoff_to_human`; `method` is GET, POST, PUT, PATCH or DELETE;
+`timeout_seconds` 1 to 60; `description` up to 2000 characters. An operator
+message is at most `MAX_MESSAGE_CHARS` (default 4000) characters. Rows stored
+before these bounds are not checked.
+
+**Memory.** `MEMORY_CONTEXT_LIMIT` (default 20, 1 to 100) is how many of a
+contact's memories the agent sees in a turn: highest importance first, then
+newest. Reading memories writes nothing. Storing the same fact twice (compared
+ignoring case and extra spaces) keeps one row and raises its importance to the
+higher value; this holds for the `remember` tool and for
+`POST /contacts/{id}/memories`, which returns the existing memory with 201.
+
+Migration `0016` adds three indexes and runs on boot with the others. See
+`docs/ARCHITECTURE.md`, "Paging, the poll and the indexes". Limits are in
+`docs/FOLLOW_UPS.md`, "From the API surface run".
 
 ## Evolution API (WhatsApp) setup
 

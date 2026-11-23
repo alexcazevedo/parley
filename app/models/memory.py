@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, Text, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,6 +24,8 @@ class Memory(Base, TenantScoped):
     __tablename__ = "memories"
     __table_args__ = (
         CheckConstraint("importance >= 1 AND importance <= 5", name="ck_memories_importance_range"),
+        # Memories by contact (migration 0016).
+        Index("ix_memories_contact_id", "contact_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

@@ -403,7 +403,9 @@ class AgentRuntime:
         if not agent.memory_enabled:
             return []
         return await MemoryService(session).get_contact_memories(
-            conversation.tenant_id, conversation.contact_id
+            conversation.tenant_id,
+            conversation.contact_id,
+            limit=get_settings().memory_context_limit,
         )
 
     def llm_provider(self, agent: Agent) -> LLMProvider:

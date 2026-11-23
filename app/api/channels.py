@@ -6,14 +6,16 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant, get_db
+from app.api.pagination import DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, set_next_cursor
 from app.models.channel import ChannelType
 from app.models.tenant import Tenant
 from app.repositories.agents import AgentsRepository
+from app.repositories.base import parse_after
 from app.repositories.channels import ChannelsRepository
 from app.security import secrets as secrets_crypto
 from app.tools.ssrf import SSRFError, validate_channel_base_url
@@ -95,11 +97,21 @@ async def create_channel(
 
 @router.get("", response_model=list[ChannelOut])
 async def list_channels(
+    response: Response,
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    cursor: str | None = Query(default=None),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> list[ChannelOut]:
-    channels = await _repo(db).list(tenant.id)
-    return [ChannelOut.model_validate(c) for c in channels]
+    after = parse_after(decode_cursor(cursor))
+    rows = await _repo(db).list_page(tenant.id, limit=limit + 1, after=after)
+    more = len(rows) > limit
+    rows = rows[:limit]
+    if more:
+        set_next_cursor(
+            response, {"created_at": rows[-1].created_at.isoformat(), "id": str(rows[-1].id)}
+        )
+    return [ChannelOut.model_validate(c) for c in rows]
 
 
 @router.get("/{channel_id}", response_model=ChannelOut)
