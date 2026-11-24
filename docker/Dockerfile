@@ -22,6 +22,8 @@ RUN chown app:app /srv && su -s /bin/sh app -c "uv sync --frozen --no-dev"
 COPY --chown=app:app app /srv/app
 COPY --chown=app:app migrations /srv/migrations
 COPY --chown=app:app alembic.ini /srv/alembic.ini
+COPY --chown=app:app llms.txt /srv/llms.txt
+COPY --chown=app:app docs /srv/docs
 
 EXPOSE 8000
 

@@ -16,6 +16,7 @@ from app.api import (
     dev,
     health,
     lines,
+    llms,
     media,
     operator,
     tenants,
@@ -53,6 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     add_exception_handlers(app)
 
     app.include_router(health.router)
+    app.include_router(llms.router)
     app.include_router(tenants.router)
     app.include_router(agents.router)
     app.include_router(channels.router)

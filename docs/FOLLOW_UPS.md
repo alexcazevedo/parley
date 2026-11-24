@@ -1,7 +1,122 @@
 # Follow-ups
 
-Known gaps and next candidates, collected across forge runs. Each is a
-plausible `/forge:idea` starting point. Not ordered by priority.
+Known gaps and next candidates, collected across comb runs. Each is a
+plausible starting point for a new idea. Not ordered by priority.
+
+## Open now
+
+What is still open, one line per item, grouped by topic, each pointing to the
+section that holds its full text. The sections below keep their history, done
+markers included. "(verify)" marks an item that may have been fixed or may no
+longer apply; check the code before relying on it.
+
+**Security and channels**
+- End-user-scoped webchat token (From the security run).
+- Tool endpoint check accepts trailing-dot hosts at create time (From the security run).
+- SSRF DNS-rebinding TOCTOU (tools and channels) (Older known MVP limitations (README)).
+- Default database credentials remain (From the ops run).
+- Real auth: static API keys only (Product-surface gaps left out of scope by recent runs).
+- A person under an `@lid` and a phone number is two contacts (From the conversation-correctness run).
+
+**Boundaries**
+- Inbound screening (From the boundaries run).
+- One retry before refusing (From the boundaries run).
+- Handoff after repeated blocks (From the boundaries run).
+- Tenant-wide boundaries (From the boundaries run).
+- Operator page screens for boundaries (From the boundaries run).
+- Measure block and false-block rates on a real model (From the boundaries run).
+
+**Turns, delivery and recovery**
+- Resend only the missing bubbles (From the reliability run).
+- API or page for the dead-letter list, and replay (From the reliability run).
+- A failed turn that lost its lock can be answered again (From the reliability run).
+- A crash while dead-lettering can double the entry (From the reliability run).
+- Test seams in the scheduler (`_pause`, `_exclusive_sessions`) (From the reliability run).
+- The production scheduler path is thinly tested (From the reliability run).
+- Rows written before a slow call stay when the turn later fails (From the reliability run, part 2).
+- The intermediate commits are not preceded by a lock check (From the reliability run, part 2).
+- A reply row is stored after its send (From the reliability run, part 2).
+- A handoff whose message never goes out (From the reliability run, part 2).
+- A reused lookup result can be seconds old (From the reliability run, part 2).
+- Unknown-outcome calls are visible only in logs and `tool_executions` (From the reliability run, part 2).
+- API request paths still hold a transaction during media fetch (verify) (From the reliability run, part 2).
+- Transport errors are not retried (From the reliability run, part 2).
+- A retried turn's prompt contains the earlier attempt's saved tool messages (From the reliability run, part 2).
+- One unexplained failure of `tests/test_e2e_demo.py` (verify) (From the reliability run, part 2).
+- Tested with fakeredis and `respx` only (From the reliability run, part 2).
+- A tool call in flight completes after an operator takes over (From the conversation-correctness run).
+- A cut-off reply is not explained to the customer (From the conversation-correctness run).
+- A turn stopped by an operator is recorded only as a log line (From the conversation-correctness run).
+- `max_iterations` as a real `AgentRunStatus` member (Older known MVP limitations (README)).
+
+**Migrations and stored data**
+- Migration `0012` closes duplicates and its downgrade does not reopen them (From the conversation-correctness run).
+- Migration `0012` blocks writes to `conversations` while it runs (From the conversation-correctness run).
+- Migration `0013` rewrites every message row under an exclusive lock (From the conversation-correctness run; also From the conversation-correctness run, part 2).
+- Indexes were built without `CONCURRENTLY` (migration `0016`) (From the API surface run).
+- Base64 remains in payloads stored before the cleanup (From the conversation-correctness run, part 2).
+- Stored rows are not checked against the new bounds (From the API surface run).
+- Names still say `harness` (Redis keys, database, compose defaults, browser storage key) (From the ops run).
+
+**Media**
+- Order-ID normalization for real tools (From the inbound-media run (2026-08-25)).
+- Outbound media (From the inbound-media run (2026-08-25)).
+- Media retention/cleanup (From the inbound-media run (2026-08-25)).
+- Remote storage (From the inbound-media run (2026-08-25)).
+- Live Evolution media probe (verify) (From the inbound-media run (2026-08-25)).
+- A failed media download is not retried (From the conversation-correctness run, part 2).
+- Inline base64 sent by Evolution is not used (From the conversation-correctness run, part 2).
+- Transcription language is per deployment (From the ops run).
+- The default texts are Portuguese only (From the ops run).
+- An existing media volume needs one manual `chown` (From the ops run).
+
+**Context, memory and categories**
+- No cap on the size of the prompt (From the conversation-correctness run, part 2).
+- `created_at` still comes from two clocks (From the conversation-correctness run, part 2).
+- Semantic long-term memory (Older known MVP limitations (README)).
+- Background memory extraction (Older known MVP limitations (README)).
+- A duplicate memory is found by exact text only (From the API surface run).
+- `last_accessed_at` is unused (From the API surface run).
+- One more model call per batch (categories) (From the categories run).
+- No unlock of a human's category choice (From the categories run).
+- Claims never expire and the releaser is not checked (From the categories run).
+- No priorities, counts or reports (From the categories run).
+- No audio transcription for categorization during a handoff (From the categories run).
+- A human's choice during a model call is dropped silently (From the categories run).
+- `GET /lines` caps the total, not each line (From the categories run).
+- A conversation that is not handed off has no wait time (From the categories run).
+
+**API surface**
+- `GET /lines` and the memories list are not paged (From the API surface run).
+- No total counts (From the API surface run).
+- Lists return at most 100 rows by default (From the API surface run).
+- Pass the same filters with a cursor (From the API surface run).
+- The demo pages do not use `after_seq` (From the API surface run).
+- REST-poll only (no WebSocket/SSE) (Older known MVP limitations (README)).
+
+**Operator page**
+- No category admin on the demo page (From the categories run).
+- No tab counters, and no automated browser test of the click flows (From the categories run).
+- Accounts/roles/assignment, notifications, unread counters, supervision view (Product-surface gaps left out of scope by recent runs).
+
+**CI, tests and operations**
+- No coverage measurement (From the CI run).
+- Tests are not type-checked (From the CI run).
+- The rest of `app/` is not strict (From the CI run).
+- Two `type: ignore` remain in `app/` (From the CI run).
+- CI does not build the Docker image (From the CI run; also From the ops run).
+- No real Redis in tests (From the CI run).
+- Branch protection is not set (verify) (From the CI run).
+- The workflow has never run on GitHub (verify) (From the CI run).
+- `/ready` does not check the worker or the model endpoint (From the CI run).
+- `make db` ignores a `POSTGRES_PORT` set only in `.env` (From the CI run).
+- Per-tenant LLM keys and base URL, token and cost accounting, metrics (From the ops run).
+- Leftover wording that names tickets in comments (From the ops run).
+- No test starts the stack (From the ops run).
+- Sentiment per-tenant/channel threshold, cooldown, score persistence (Product-surface gaps left out of scope by recent runs).
+- Humanizer per-channel pacing settings (Product-surface gaps left out of scope by recent runs).
+- Barge-in: "user is typing" pause; retracting sent bubbles (Product-surface gaps left out of scope by recent runs).
+- Metrics/tracing and a deploy setup (Product-surface gaps left out of scope by recent runs).
 
 ## From the security run
 

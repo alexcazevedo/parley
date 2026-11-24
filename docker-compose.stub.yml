@@ -1,0 +1,29 @@
+# Try parley without a model key:
+#   docker compose -f docker-compose.yml -f docker-compose.stub.yml up -d
+# A stub (scripts/mock_llm_server.py) answers in place of the model.
+services:
+  mock-llm:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ./scripts:/srv/scripts:ro
+    command: uv run uvicorn scripts.mock_llm_server:app --host 0.0.0.0 --port 9100
+
+  api:
+    environment:
+      LLM_BASE_URL: http://mock-llm:9100/v1
+      LLM_API_KEY: stub
+      LLM_MODEL: stub
+    depends_on:
+      mock-llm:
+        condition: service_started
+
+  worker:
+    environment:
+      LLM_BASE_URL: http://mock-llm:9100/v1
+      LLM_API_KEY: stub
+      LLM_MODEL: stub
+    depends_on:
+      mock-llm:
+        condition: service_started
