@@ -12,7 +12,7 @@ db: env ## Start the Postgres container unless one already accepts connections
 	@if (echo > /dev/tcp/localhost/$${POSTGRES_PORT:-5434}) 2>/dev/null; then \
 		echo "database already running"; \
 	else \
-		docker compose up -d --wait postgres; \
+		docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --wait postgres; \
 	fi
 
 lint: ## Run the linter (ruff)

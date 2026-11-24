@@ -116,9 +116,10 @@ import asyncio
 import inspect
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from contextvars import Token
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Protocol, cast, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 import structlog
 from sqlalchemy import func, select
@@ -239,6 +240,9 @@ class _Sends:
     """Running count of this turn's successful outbound sends, for `TurnFailed`."""
 
     delivered: int = 0
+    # Tokens of the log context this turn bound (`conversation_id`, `tenant_id`),
+    # so the turn restores exactly what it changed.
+    log_tokens: dict[str, Token[Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -310,6 +314,9 @@ async def process_turn(
     how many sends had already reached the customer.
     """
     sends = _Sends()
+    sends.log_tokens.update(
+        structlog.contextvars.bind_contextvars(conversation_id=str(conversation_id))
+    )
     try:
         return await _run_turn(
             session,
@@ -329,6 +336,16 @@ async def process_turn(
             error=_describe(exc),
         )
         raise TurnFailed(sends.delivered) from exc
+    finally:
+        _reset_log_context(sends)
+
+
+def _reset_log_context(sends: _Sends) -> None:
+    """Restore the log context this turn changed. Never raises."""
+    try:
+        structlog.contextvars.reset_contextvars(**sends.log_tokens)
+    except Exception:  # a context that cannot be restored must not mask the turn's outcome
+        pass
 
 
 async def _rollback_quietly(session: AsyncSession, conversation_id: uuid.UUID) -> None:
@@ -349,6 +366,26 @@ def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"[:2000]
 
 
+async def _failure_notice_text(session: AsyncSession, conversation: Conversation) -> str:
+    """The agent's `error_message`, else `TURN_FAILED_MESSAGE`. Never raises.
+
+    The lookup runs in a savepoint, so a failure leaves the session usable.
+    """
+    try:
+        agent_id = conversation.agent_id
+        tenant_id = conversation.tenant_id
+        async with session.begin_nested():
+            text = await session.scalar(
+                select(Agent.error_message).where(
+                    Agent.id == agent_id, Agent.tenant_id == tenant_id
+                )
+            )
+        return text or TURN_FAILED_MESSAGE
+    except Exception:
+        logger.warning("turn.failure_notice_text_lookup_failed", exc_info=True)
+        return TURN_FAILED_MESSAGE
+
+
 async def send_failure_notice(session: AsyncSession, conversation_id: uuid.UUID) -> bool:
     """Tell the customer their batch could not be answered. Never raises.
 
@@ -366,7 +403,8 @@ async def send_failure_notice(session: AsyncSession, conversation_id: uuid.UUID)
         contact = await session.get(Contact, conversation.contact_id)
         if channel is None or contact is None:
             return False
-        session.add(_build_reply(conversation, TURN_FAILED_MESSAGE))
+        notice = await _failure_notice_text(session, conversation)
+        session.add(_build_reply(conversation, notice))
         conversation.last_message_at = datetime.now(UTC)
         await session.commit()
     except Exception:
@@ -376,7 +414,7 @@ async def send_failure_notice(session: AsyncSession, conversation_id: uuid.UUID)
 
     try:
         await get_adapter(channel.type).send_message(
-            OutgoingMessage(conversation_id=conversation_id, content=TURN_FAILED_MESSAGE),
+            OutgoingMessage(conversation_id=conversation_id, content=notice),
             contact,
             channel,
         )
@@ -407,6 +445,9 @@ async def _run_turn(
     if conversation is None:
         logger.warning("turn.unknown_conversation", conversation_id=str(conversation_id))
         return None
+    sends.log_tokens.update(
+        structlog.contextvars.bind_contextvars(tenant_id=str(conversation.tenant_id))
+    )
 
     # Read now, while the rows are loaded: later commits may expire them.
     message_ids = [message.id for message in messages]
@@ -469,6 +510,8 @@ async def _run_turn(
     if agent is None:
         logger.warning("turn.refused_agent_unavailable", conversation_id=str(conversation_id))
         return None
+    # Read now: later commits may expire the loaded agent.
+    unsupported_media_text = agent.unsupported_media_message or UNSUPPORTED_MEDIA_REPLY
 
     # Loaded before the runtime runs: `humanize` decides whether the inbound
     # batch gets a read receipt *before* we start "typing".
@@ -520,6 +563,7 @@ async def _run_turn(
             len(messages),
             ownership_check,
             sends,
+            reply_text=unsupported_media_text,
         )
 
     # Media messages render as readable placeholders (a photo's caption, an
@@ -701,6 +745,7 @@ async def _reply_unsupported_media(
     message_count: int,
     ownership_check: OwnershipCheck | None = None,
     sends: _Sends | None = None,
+    reply_text: str = UNSUPPORTED_MEDIA_REPLY,
 ) -> Message | LockLost | None:
     """Answer a batch made entirely of unsupported media, without an LLM call."""
     conversation_id = conversation.id
@@ -711,7 +756,7 @@ async def _reply_unsupported_media(
         contact,
         channel,
         humanized,
-        UNSUPPORTED_MEDIA_REPLY,
+        reply_text,
         ownership_check=ownership_check,
         sends=sends,
     )

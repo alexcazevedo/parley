@@ -139,6 +139,8 @@ class AgentRuntime:
             raise RuntimeError(
                 f"conversation {conversation.id} has no agent available in its tenant"
             )
+        # Read now: the commit below expires the agent, and a lazy load fails.
+        error_text = agent.error_message or ERROR_MESSAGE
 
         run = AgentRun(
             id=uuid.uuid4(),
@@ -153,35 +155,44 @@ class AgentRuntime:
         # on, whatever happens to the turn afterwards.
         await session.commit()
 
-        started = time.perf_counter()
-        deadline = started + self._timeout_seconds
+        log_tokens = structlog.contextvars.bind_contextvars(run_id=str(run.id))
         try:
-            output = await self._loop(
-                session, agent, conversation, run, input_text, deadline, tuple(message_ids)
-            )
-        except Exception as exc:  # a failed turn still owes the user a reply
-            run.status = AgentRunStatus.ERROR
-            run.error = f"{type(exc).__name__}: {exc}"[:2000]
-            output = ERROR_MESSAGE
-            logger.exception(
-                "agent.run_failed", conversation_id=str(conversation.id), agent_run_id=str(run.id)
-            )
+            started = time.perf_counter()
+            deadline = started + self._timeout_seconds
+            try:
+                output = await self._loop(
+                    session, agent, conversation, run, input_text, deadline, tuple(message_ids)
+                )
+            except Exception as exc:  # a failed turn still owes the user a reply
+                run.status = AgentRunStatus.ERROR
+                run.error = f"{type(exc).__name__}: {exc}"[:2000]
+                output = error_text
+                logger.exception(
+                    "agent.run_failed",
+                    conversation_id=str(conversation.id),
+                    agent_run_id=str(run.id),
+                )
 
-        run.output_text = output
-        run.latency_ms = int((time.perf_counter() - started) * 1000)
-        # Committed here, not left for the turn: a turn that rolls back next
-        # (lock lost before its send) must not leave the run `RUNNING`.
-        await session.commit()
-        logger.info(
-            "agent.run_finished",
-            conversation_id=str(conversation.id),
-            agent_run_id=str(run.id),
-            status=str(run.status),
-            llm_calls=run.llm_calls,
-            tool_calls=run.tool_calls,
-            latency_ms=run.latency_ms,
-        )
-        return output
+            run.output_text = output
+            run.latency_ms = int((time.perf_counter() - started) * 1000)
+            # Committed here, not left for the turn: a turn that rolls back next
+            # (lock lost before its send) must not leave the run `RUNNING`.
+            await session.commit()
+            logger.info(
+                "agent.run_finished",
+                conversation_id=str(conversation.id),
+                agent_run_id=str(run.id),
+                status=str(run.status),
+                llm_calls=run.llm_calls,
+                tool_calls=run.tool_calls,
+                latency_ms=run.latency_ms,
+            )
+            return output
+        finally:
+            try:
+                structlog.contextvars.reset_contextvars(**log_tokens)
+            except Exception:  # never mask the run's outcome
+                pass
 
     async def _loop(
         self,

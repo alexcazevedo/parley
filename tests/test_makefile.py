@@ -54,4 +54,5 @@ def test_dry_run_db_shows_port_test_and_compose_command() -> None:
     result = _make("-n", "db")
     assert result.returncode == 0, result.stderr
     assert "/dev/tcp/localhost/" in result.stdout
-    assert "docker compose up -d --wait postgres" in result.stdout
+    assert "docker-compose.dev.yml" in result.stdout
+    assert "docker-compose.yml -f docker-compose.dev.yml up -d --wait postgres" in result.stdout

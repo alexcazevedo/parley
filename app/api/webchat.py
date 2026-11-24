@@ -6,11 +6,11 @@
 path (see PRODUCT.md: "it never bypasses the pipeline").
 """
 
-import logging
 import uuid
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+import structlog
 from fastapi import (
     APIRouter,
     Depends,
@@ -41,7 +41,7 @@ from app.repositories.channels import ChannelsRepository
 from app.security.limits import check_message_size
 from app.security.ratelimit import enforce_inbound_limits
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _CHUNK_SIZE = 64 * 1024
 _MULTIPART_OVERHEAD = 1_048_576

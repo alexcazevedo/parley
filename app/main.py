@@ -47,7 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     assert_secure_settings(settings)
     load_floor(settings.boundary_floor_file)
 
-    app = FastAPI(title="Conversational Agent Harness", lifespan=_lifespan)
+    app = FastAPI(title="Parley", lifespan=_lifespan)
 
     app.middleware("http")(request_id_middleware)
     add_exception_handlers(app)

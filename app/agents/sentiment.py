@@ -1,10 +1,9 @@
 """Frustration classifier: one best-effort LLM call scoring user frustration.
 
-Runs (in a future ticket, #21) BEFORE the agent turn on `ACTIVE_AI`
-conversations to detect proactive-escalation triggers (see PRODUCT.md,
-item #4 of the seamless roadmap). This module only produces the score —
-turn wiring, threshold comparison, and the handoff itself are ticket 21's
-job (see "Not included" below).
+Runs BEFORE the agent turn on `ACTIVE_AI` conversations to detect
+proactive-escalation triggers. This module only produces the score; the
+threshold comparison and the handoff itself live in the turn flow
+(`app/conversations/turn.py`).
 
 Strictly best-effort, mirroring `app/handoff/summarizer.py`'s pattern: any
 failure (LLM error, timeout, unparseable response) is logged and turned into

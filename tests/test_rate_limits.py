@@ -2,11 +2,11 @@
 
 import copy
 import json
-import logging
 import uuid
 from pathlib import Path
 
 import pytest
+import structlog.testing
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -53,7 +53,7 @@ async def test_tenant_limit_trips_across_different_users(client, fake_redis, ten
 
 
 async def test_over_limit_webhook_stores_message_without_job(
-    client, fake_redis, db_session, tenant_limit, caplog
+    client, fake_redis, db_session, tenant_limit
 ):
     tenant_limit(1)
     tenant = await _create_tenant(client)
@@ -69,7 +69,7 @@ async def test_over_limit_webhook_stores_message_without_job(
     assert first.json() == {"status": "ok"}
     await fake_redis.delete(JOBS_KEY)
 
-    with caplog.at_level(logging.WARNING):
+    with structlog.testing.capture_logs() as logs:
         second = await client.post(
             f"/webhooks/whatsapp/{channel_id}",
             json=_payload("evolution_messages_upsert.json", "MSG-2"),
@@ -78,7 +78,7 @@ async def test_over_limit_webhook_stores_message_without_job(
     assert second.status_code == 200
     assert second.json() == {"status": "rate_limited"}
     assert await fake_redis.llen(JOBS_KEY) == 0
-    assert any("webhook.rate_limited" in r.getMessage() for r in caplog.records)
+    assert any(e["event"] == "webhook.rate_limited" for e in logs)
 
     rows = (
         await db_session.execute(

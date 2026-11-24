@@ -200,9 +200,9 @@ async def main() -> None:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     queue = RedisQueue(redis)
 
-    # The real agent loop. Tool executors are registered here as they land:
-    # ticket 06 adds the HTTP executor, 07 the built-ins — `ToolRegistry([...])`
-    # takes them in priority order.
+    # The real agent loop. `ToolRegistry()` uses the default executors (built-ins
+    # first, then the HTTP executor); `ToolRegistry([...])` takes them in
+    # priority order.
     runtime: AnyTurnRuntime = AgentRuntime(registry=ToolRegistry(), settings=settings)
     stop = asyncio.Event()
     restore_signals = _install_stop_signals(asyncio.get_running_loop(), stop)

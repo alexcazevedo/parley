@@ -1,4 +1,4 @@
-"""Bootstrap endpoint for the demo web chat page (ticket 13 consumes this).
+"""Bootstrap endpoint for the demo web chat page.
 
 No auth — dev/demo shortcut (prototype mode, see PRODUCT.md). Seeds a fixed
 demo tenant (identified by a FIXED plaintext API key, since keys are only
@@ -32,7 +32,7 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 @router.get("", include_in_schema=False)
 async def chat_page() -> FileResponse:
-    """Serves the self-contained demo web chat page (ticket 13)."""
+    """Serves the self-contained demo web chat page."""
     return FileResponse(_STATIC_DIR / "chat.html")
 
 

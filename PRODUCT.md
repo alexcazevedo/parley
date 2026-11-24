@@ -5,72 +5,81 @@ parallel_default: sequential   # sequential | parallel
 owner: human                   # human | agent (set by comb:auto)
 ---
 
-# CI, typing and readiness (PRD epic E6)
+# Ops and hygiene (PRD epic E7)
 
 ## What / why
 
-Nothing checks this repo but the person at the keyboard. The suite only
-runs when someone remembers to start a database container and run it; a
-missing file or a broken import reaches `main` unseen; type mistakes are
-found at run time; and an orchestrator cannot tell a process that is up
-from one that can reach its database. This run closes PRD epic E6: every
-push is checked on a clean checkout, the code is type-checked, the tests
-start with one command, and the API says whether it is ready.
+The last epic of the hardening backlog. The image runs as root and
+installs its package manager from an unpinned script; every API replica
+runs the migrations at start; the database and Redis are published on
+the host with default credentials; a worker log line does not say which
+conversation it is about; a caller can write anything into the request
+id; the texts a customer is sent on failure are fixed in Portuguese; and
+the project has two names. None of it is a feature. All of it is what an
+operator trips over.
 
 In scope (existing repo):
 
-- **Every push is checked.** A GitHub Actions workflow runs on every
-  push to any branch, and on demand: lint, type check, then the full
-  suite against a Postgres service, from a clean checkout with the
-  locked dependencies.
-- **The code is type-checked.** mypy runs over `app/`: loose on most of
-  it, strict on `app/security`, `app/queue` and `app/conversations`. The
-  errors it reports today (about 44 loose, 16 strict) are fixed without
-  changing behaviour.
-- **Tests start with one command.** `make test` brings up the database
-  when none is listening and runs the suite. `make lint`, `make
-  typecheck` and `make check` (all three) sit beside it.
-- **The API reports readiness.** `GET /ready` answers 200 when the
-  database and Redis both respond, 503 when either does not, and says
-  which. `/health` stays as it is: cheap, no dependencies.
+- **The image runs as a non-root user**, with uv copied from a pinned
+  image instead of piped from a script.
+- **Migrations run once.** A one-shot `migrate` service runs them; the
+  API and the worker start after it succeeded. The API no longer
+  migrates at start.
+- **The database and Redis are not published by default.** A separate
+  `docker-compose.dev.yml` publishes them for work from the host;
+  `make db` uses it.
+- **One logging library.** The two routers still on stdlib `logging`
+  move to structlog.
+- **Worker logs carry context.** Every line logged while a turn runs has
+  `tenant_id` and `conversation_id`; lines from the agent run also have
+  `run_id`.
+- **The request id is checked.** A well-formed `X-Request-ID` is kept;
+  anything else is replaced by a generated one.
+- **Customer-facing failure texts are per agent.** The technical-error
+  text and the unsupported-media text can be set on the agent; the
+  current Portuguese texts stay as defaults. The placeholders the model
+  sees for an image or an audio become settings.
+- **One name: parley.** Package name, API title, README and docs. Stale
+  "ticket NN" comments in the code are reworded or removed.
 
 Decided in the grill:
 
-- mypy, not pyright (user).
-- The workflow runs on `push` only (all branches) plus manual dispatch:
-  one developer, no forks, so a pull-request trigger would only run
-  everything twice.
-- No Redis service in CI: the suite uses an in-memory fake. `/ready` is
-  tested with fakes that fail on purpose.
-- Tests are not type-checked, only `app/`.
-- A type error is fixed with a type, not silenced; an ignore needs a
-  reason on the same line.
-- E6.4 needs no work: the earlier epics' tests exist and CI now runs
-  them.
-- The README and `docs/FOLLOW_UPS.md` describe the commands, the
-  workflow and the new endpoint.
+- E7.6 (per-tenant LLM keys, cost accounting, metrics) is left out and
+  recorded in `docs/FOLLOW_UPS.md` (user).
+- Name: parley. Redis key prefixes (`harness:`), the database name and
+  the database user stay: renaming them needs a data migration (user).
+- Ports: separate dev file, not loopback binding (user).
+- `STT_LANGUAGE` stays a deployment setting: it is already configurable,
+  and transcription runs before an agent is known.
+- E7.5 and the queue wording in E7.3 need no work: earlier runs already
+  removed the inline imports, the duplicated connection code and the
+  BRPOPLPUSH wording.
+- The README, architecture doc and follow-ups describe the changes.
 
 ## Primary user story
 
-As the person maintaining parley, I push a branch and GitHub tells me
-within minutes whether it still installs, type-checks and passes, and on
-my machine `make check` tells me the same before I push.
+As the person operating parley, I start the stack and it migrates once,
+runs unprivileged and exposes only the API; when a turn fails I find
+every log line of that conversation by its id; and I can tell each agent
+what to say, in its customers' language, when something goes wrong.
 
 ## Out of scope
 
-- Coverage measurement and thresholds
-- Type-checking `tests/`, strict mode on the rest of `app/`
-- Building or publishing the Docker image in CI; deploy steps
-- A test run against a real Redis, model or channel
-- Branch protection rules on GitHub (a setting, not code)
-- `/ready` checking the worker, the model endpoint or the media disk
-- PRD epic E7 and the rest of `docs/FOLLOW_UPS.md`
+- Per-tenant LLM keys, token and cost accounting, metrics (E7.6)
+- Renaming Redis keys, the database, the database user or env variables
+- Per-agent or per-tenant transcription language
+- Translating the default texts; a language setting that switches them
+- Building or pushing the image in CI; Kubernetes manifests
+- Secrets management, TLS, credentials rotation
+- The rest of `docs/FOLLOW_UPS.md`
 
 ## Success demo
 
-Done when I can run `make check` on my machine and see lint, type check
-and the suite pass, call `/ready` and get 200 with both checks ok and
-503 naming the one that is down, and push the branch and see the
-workflow pass on GitHub — and the suite proves the readiness answers,
-and a change that deletes `app/media/` or breaks a type in
-`app/security` fails `make check`.
+Done when I can build the image and see it run as a non-root user,
+start the stack with two API replicas and see the migrations run once
+and both replicas answer `/ready`, find no database or Redis port on the
+host unless I use the dev file, read a worker log line of a turn and see
+its `tenant_id` and `conversation_id`, send a request with a malformed
+`X-Request-ID` and get a generated one back, and set an agent's error
+text and see a customer receive it — and the suite proves the logging,
+request-id and text behaviour, and still passes.

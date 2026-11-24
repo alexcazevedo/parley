@@ -28,6 +28,7 @@ Scope = Annotated[str, Field(max_length=2000)]
 NeverList = Annotated[list[Annotated[str, AfterValidator(_strip_never_item)]], Field(max_length=50)]
 RefusalMessage = Annotated[str, Field(min_length=1, max_length=1000)]
 HandoffMessage = Annotated[str, Field(min_length=1, max_length=1000)]
+FailureText = Annotated[str, Field(min_length=1, max_length=1000)]
 Name = Annotated[str, Field(min_length=1, max_length=255)]
 Temperature = Annotated[float, Field(ge=0, le=2)]
 MaxTokens = Annotated[int, Field(ge=1, le=32768)]
@@ -55,6 +56,8 @@ class AgentCreate(BaseModel):
     boundary_check_enabled: bool = True
     sentiment_escalation_enabled: bool = False
     handoff_message: HandoffMessage | None = None
+    error_message: FailureText | None = None
+    unsupported_media_message: FailureText | None = None
 
 
 class AgentUpdate(BaseModel):
@@ -76,6 +79,9 @@ class AgentUpdate(BaseModel):
     boundary_check_enabled: bool | None = None
     sentiment_escalation_enabled: bool | None = None
     handoff_message: HandoffMessage | None = None
+    # An explicit null clears these two back to the default text.
+    error_message: FailureText | None = None
+    unsupported_media_message: FailureText | None = None
 
 
 class AgentOut(BaseModel):
@@ -98,6 +104,8 @@ class AgentOut(BaseModel):
     boundary_check_enabled: bool
     sentiment_escalation_enabled: bool
     handoff_message: str
+    error_message: str | None
+    unsupported_media_message: str | None
     created_at: datetime
 
     model_config = {"from_attributes": True}

@@ -1,14 +1,14 @@
-# Conversational Agent Harness
+# Parley
 
-Headless, multi-tenant infrastructure for AI-powered conversational apps. The
-harness owns the operational complexity of a conversation — ingestion, queue,
+Headless, multi-tenant infrastructure for AI-powered conversational apps. Parley
+owns the operational complexity of a conversation — ingestion, queue,
 per-conversation debounce, conversation state, short/long-term memory, LLM
 execution, tool orchestration, human handoff, retries, idempotency,
 observability — so a customer only implements business logic as HTTP tools
 and points a channel (WhatsApp via Evolution API, or their own Web Chat
-widget) at the harness.
+widget) at parley.
 
-Warm handoff: when a conversation escalates to a human, the harness writes a
+Warm handoff: when a conversation escalates to a human, parley writes a
 best-effort AI-summarized operator brief and surfaces it as `latest_handoff`
 on `GET /conversations/{id}`, so the operator doesn't make the contact repeat
 themselves.
@@ -19,7 +19,7 @@ a score at or above `SENTIMENT_THRESHOLD` (0.7) skips the AI answer entirely —
 the conversation warm-hands off with `requested_by=system` and the user gets
 the agent's `handoff_message`.
 
-**Principle**: the customer implements the business tools; the harness
+**Principle**: the customer implements the business tools; parley
 manages the conversation and agent runtime.
 
 Modular monolith: Python 3.12, FastAPI, PostgreSQL (SQLAlchemy 2 + Alembic),
@@ -104,9 +104,10 @@ cp .env.example .env
 # else in .env.example has a working default for local Docker Compose.
 
 docker compose up -d --build
-# starts postgres, redis, api (:8001 on the host, runs migrations on boot),
-# worker, and mock-tools (:9000 inside the compose network — the demo's
-# fake business endpoint).
+# starts postgres, redis, migrate (runs the migrations once and exits), api
+# (:8001 on the host), worker, and mock-tools (:9000 inside the compose
+# network — the demo's fake business endpoint). api and worker start after
+# migrate has succeeded; the api does not migrate at start.
 
 # operator page: http://localhost:8001/operator (paste the tenant API key;
 # the key is prefilled only in demo mode — otherwise you paste it yourself)
@@ -138,12 +139,46 @@ uv run scripts/demo_media.py
 # reading the image and transcribing the audio. Same exit codes as demo.py.
 ```
 
-Host ports: Postgres `5434`, Redis `6380`, API `8001` (overridable via
-`POSTGRES_PORT`/`REDIS_PORT`/`API_PORT` in `.env` — chosen to avoid clashing
-with other local services on the usual `5432`/`6379`/`8000`). Inside the
-Compose network, services address each other by service name
-(`postgres:5432`, `redis:6379`, `mock-tools:9000`) regardless of the
-host-side ports.
+Inside the Compose network, services address each other by service name
+(`postgres:5432`, `redis:6379`, `mock-tools:9000`).
+
+### The stack
+
+- **Start order.** `postgres` and `redis` come up healthy first. Then the
+  one-shot `migrate` service runs `uv run alembic upgrade head` and exits 0.
+  `api` and `worker` wait for it (`service_completed_successfully`). The API
+  does not run migrations when it starts, so a second replica never races the
+  first.
+- **Ports.** `docker-compose.yml` publishes only the API: `${API_PORT:-8001}`
+  on the host. `postgres` and `redis` have no `ports` there.
+- **Host access.** `docker-compose.dev.yml` publishes Postgres on
+  `${POSTGRES_PORT:-5434}` and Redis on `${REDIS_PORT:-6380}`. Use it for work
+  from the host (tests, `uv run`), not for a server:
+
+  ```bash
+  docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+  ```
+
+  `make db` does the same for Postgres alone
+  (`docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --wait postgres`).
+- **Two API replicas.** A single `API_PORT` makes the second replica fail on
+  the port, so give it a range:
+
+  ```bash
+  API_PORT=8001-8002 docker compose up -d --scale api=2
+  ```
+
+  Each replica answers `/ready` on its own port.
+- **The image user.** The image runs as the user `app` (uid and gid `10001`),
+  not root. `uv` is copied from the pinned image `ghcr.io/astral-sh/uv:0.12.6`.
+  `/srv` and `/srv/media` belong to `app`.
+- **An existing media volume.** A new `media_data` volume is writable by `app`.
+  A volume created by an older, root-run image stays owned by root, and `app`
+  cannot write to it. Change the owner once:
+
+  ```bash
+  docker compose run --rm --user root --entrypoint chown api -R 10001:10001 /srv/media
+  ```
 
 ## Development
 
@@ -160,7 +195,7 @@ other targets:
 |---|---|
 | `make help` | lists the targets (the default) |
 | `make env` | copies `.env.example` to `.env` when `.env` does not exist |
-| `make db` | starts the Postgres container (`docker compose up -d --wait postgres`) unless something already accepts connections on `localhost:${POSTGRES_PORT:-5434}` |
+| `make db` | starts the Postgres container (`docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --wait postgres`) unless something already accepts connections on `localhost:${POSTGRES_PORT:-5434}` |
 | `make lint` | `uv run ruff check .` |
 | `make typecheck` | `uv run mypy` |
 | `make test` | `make db`, then `uv run pytest -q $(ARGS)`; for one file: `make test ARGS=tests/test_ready.py` |
@@ -322,7 +357,7 @@ ignoring case and extra spaces) keeps one row and raises its importance to the
 higher value; this holds for the `remember` tool and for
 `POST /contacts/{id}/memories`, which returns the existing memory with 201.
 
-Migration `0016` adds three indexes and runs on boot with the others. See
+Migration `0016` adds three indexes and runs with the others in the `migrate` service. See
 `docs/ARCHITECTURE.md`, "Paging, the poll and the indexes". Limits are in
 `docs/FOLLOW_UPS.md`, "From the API surface run".
 
@@ -332,9 +367,9 @@ Migration `0016` adds three indexes and runs on boot with the others. See
    {"base_url": "...", "instance": "..."}` and `secret` set to the Evolution
    instance's `apikey` (encrypted at rest, never returned by the API).
 2. In Evolution, point that instance's webhook at:
-   `POST https://<your-harness-host>/webhooks/whatsapp/{channel_id}`
+   `POST https://<your-parley-host>/webhooks/whatsapp/{channel_id}`
 3. Evolution must send the shared secret on every webhook call as the
-   `apikey` header — the harness compares it (constant-time) against the
+   `apikey` header — parley compares it (constant-time) against the
    channel's stored secret and returns `401` on a mismatch.
 4. Outbound replies go back out through Evolution's `sendText` REST endpoint
    using that same `apikey`, `base_url` and `instance`.
@@ -522,13 +557,13 @@ Every conversation can have one category, chosen by the model from a list the
 tenant defines. A conversation handed to a human waits in a line, one line per
 category. Operators claim from a line.
 
-**What the harness owns:** the category of a conversation, since when it
+**What parley owns:** the category of a conversation, since when it
 waits (`waiting_since`), and who claimed it (`claimed_by`, `claimed_at`),
 including the race: two operators cannot hold the same conversation.
 
 **What your app owns:** operator accounts, which operator may see which line,
 priorities and timers, notifications, and real operator screens. The
-`operator_id` is any text your app sends (1 to 200 characters). The harness
+`operator_id` is any text your app sends (1 to 200 characters). Parley
 stores it and does not check it. `/operator` is a demo page, not a product
 screen.
 
@@ -598,9 +633,57 @@ curl -s -X POST $BASE/conversations/$CONV/release -H "$H"
 "Atender" per row and a category selector), "Minhas" (claimed by the id in the
 "Seu nome" field) and "Ativas". Migrations `0014` (categories,
 `conversations.category_id`, `category_locked`) and `0015` (`waiting_since`,
-`claimed_by`, `claimed_at`, a partial index on waiting conversations) run on
-boot with the others. Limits are in `docs/FOLLOW_UPS.md`, "From the categories
+`claimed_by`, `claimed_at`, a partial index on waiting conversations) run in
+the `migrate` service with the others. Limits are in `docs/FOLLOW_UPS.md`, "From the categories
 run".
+
+## Logs, request ids and failure texts
+
+**Logs.** Logging is structlog only, written as JSON lines. While a turn runs,
+every line carries `conversation_id` and, once the conversation has loaded,
+`tenant_id`. Lines logged during the agent run also carry `run_id`. To follow
+one conversation, filter the worker's output on its `conversation_id`:
+
+```bash
+docker compose logs worker | grep '"conversation_id": "<id>"'
+```
+
+The three keys are removed again when the turn or the run ends, so a later
+turn never inherits them.
+
+**Request id.** The API keeps a caller's `X-Request-ID` only when the whole
+value matches `^[A-Za-z0-9._-]{1,64}$`. Anything else (too long, a space, a
+newline, non-ASCII, empty) is replaced by a generated UUID. The id in use comes
+back in the `X-Request-ID` response header and in the error envelope's
+`request_id`, and it is bound to the API's log lines as `request_id`.
+
+**Failure texts per agent.** Two optional agent fields set what a customer is
+sent when something goes wrong. Both are 1 to 1000 characters. Null means the
+built-in Portuguese default. `PATCH /agents/{id}` with an explicit `null`
+clears one; a field left out is not changed.
+
+| Field | Sent when | Default |
+|---|---|---|
+| `error_message` | an agent run fails, and after the last failed attempt of a turn (the dead-letter notice) | `Desculpe, tive um problema técnico. Pode tentar novamente?` |
+| `unsupported_media_message` | a batch holds only unsupported media (video, documents, stickers, ...) | `Por enquanto só consigo entender texto, áudios e imagens. Pode me mandar em texto?` |
+
+```bash
+curl -X PATCH http://localhost:8001/agents/$AGENT_ID \
+  -H "X-API-Key: $TENANT_API_KEY" -H "Content-Type: application/json" \
+  -d '{"error_message": "Sorry, something broke. Please try again."}'
+```
+
+The text is not translated for you: write it in your customers' language.
+Migration `0017` adds the two columns.
+
+**Placeholders.** Where the model gets text instead of the picture or the
+sound, the text is a placeholder: an image is written as the placeholder (then
+`: <caption>` when it has one), and an audio with no transcript is written as
+its placeholder. Two settings, in `.env`, change them:
+`IMAGE_PLACEHOLDER` (default `[imagem enviada pelo cliente]`) and
+`AUDIO_PLACEHOLDER` (default `[áudio enviado pelo cliente]`). They are
+deployment-wide, not per agent. `STT_LANGUAGE` (default `pt`) is a deployment
+setting too: transcription runs before an agent is known.
 
 ## Reliability
 
@@ -651,7 +734,7 @@ speech-to-text failure) puts the messages back for another attempt:
   meantime join the next attempt. Log event `scheduler.turn_retry`.
 - After the third failure the batch goes to the dead-letter list
   `harness:dlq:turns`, and the customer gets one error message
-  (`TURN_FAILED_MESSAGE`). Log event `scheduler.turn_dead_lettered`.
+  (the agent's `error_message`, else `TURN_FAILED_MESSAGE`). Log event `scheduler.turn_dead_lettered`.
 - If part of a reply was already delivered (the first bubble went out, the
   second failed), there is no retry: what was sent stays, the rest is dropped,
   the batch is dead-lettered with `partly_delivered` true and no error message

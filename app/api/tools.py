@@ -1,6 +1,6 @@
 """CRUD REST for tools. `auth_config` is write-only: encrypted on the way in
 via `app.security.secrets` and never returned by any response — this is a
-hard requirement (ticket 02's "done when"), not just a convention.
+hard requirement, not just a convention.
 """
 
 import json

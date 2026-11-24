@@ -44,7 +44,7 @@ def default_executors() -> list[ToolExecutor]:
     """What a production run gets, in priority order.
 
     `HttpToolExecutor.can_handle` claims every name, so it stays last:
-    `BuiltinExecutor` (`remember`, and `handoff_to_human` from ticket 08) is
+    `BuiltinExecutor` (`remember`, and `handoff_to_human`) is
     *prepended*, not appended, or it would never be reached.
     """
     return [BuiltinExecutor(), HttpToolExecutor()]

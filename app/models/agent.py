@@ -59,6 +59,10 @@ class Agent(Base, TenantScoped):
     boundary_check_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=sa.true()
     )
+    # Per-agent texts for a technical error and for unsupported media (migration
+    # 0017); null means "use the default constant".
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unsupported_media_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

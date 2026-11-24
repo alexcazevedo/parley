@@ -130,7 +130,7 @@ async def delete_contact(
     await db.commit()
 
 
-# --- Long-term memory CRUD (ticket 07) --------------------------------------
+# --- Long-term memory CRUD --------------------------------------
 
 
 class MemoryCreate(BaseModel):

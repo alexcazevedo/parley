@@ -257,6 +257,43 @@ plausible `/forge:idea` starting point. Not ordered by priority.
 - **`make db` ignores a `POSTGRES_PORT` set only in `.env`.** Make does not read
   `.env`, so the probe uses the shell environment or 5434.
 
+## From the ops run
+
+PRD epics E1 to E7 are now done. What is left over:
+
+- **E7.6 was left out.** Per-tenant LLM keys and base URL, token and cost
+  accounting, and metrics. A candidate for its own grill.
+- **Names still say `harness`.** The package, the API title and the docs say
+  parley. The Redis keys (`harness:jobs`, `harness:dlq:turns`, ...), the
+  database name and user (`harness`, and `harness_test` for the tests), the
+  compose defaults and the `harness_operator_api_key` browser storage key were
+  not renamed: renaming them needs a data migration.
+- **Transcription language is per deployment.** `STT_LANGUAGE` (default `pt`)
+  applies to every agent and tenant. Transcription runs before an agent is
+  known.
+- **The default texts are Portuguese only.** The technical-error, unsupported
+  media and boundary-refusal defaults, and the two placeholders, are not
+  translated, and there is no language setting that switches them. An agent can
+  set `error_message` and `unsupported_media_message`; the placeholders are
+  deployment-wide.
+- **An existing media volume needs one manual `chown`.** The image runs as `app`
+  (uid 10001). A `media_data` volume made by an older image stays owned by root
+  until the operator changes it (see README, "The stack").
+- **The image is not built in CI.** A broken `Dockerfile` or compose file is
+  still not caught, and the non-root user and the `migrate` start order are
+  checked only by tests that read the files.
+- **Default database credentials remain.** Compose falls back to
+  `harness`/`harness` when `POSTGRES_USER` and `POSTGRES_PASSWORD` are not set.
+  The database and Redis are no longer published unless the dev file is used.
+- **Leftover wording.** Comments in `app/agents/sentiment.py`,
+  `app/agents/runtime.py`, `app/repositories/messages.py`,
+  `app/models/agent.py`, `app/conversations/lock.py` and
+  `app/media/storage.py` still say "the ticket" or "later tickets". A few
+  others still name a ticket by number: `app/agents/context.py` ("Ticket 28"),
+  `app/static/chat.html`, and a comment in `docker-compose.yml` ("ticket 26").
+- **No test starts the stack.** Nothing in the suite runs `--scale api=2`; the
+  compose tests only read the files.
+
 ## Older known MVP limitations (README)
 
 - **SSRF DNS-rebinding TOCTOU.** The allowed-IP check resolves once;

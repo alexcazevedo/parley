@@ -1,24 +1,30 @@
 FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:0.12.6 /uv /uvx /bin/
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:${PATH}"
 # The image is built once with `uv sync --frozen --no-dev`; don't let
 # `uv run` re-resolve/sync (and pull dev-only deps like ruff/pytest) at
-# container start.
-ENV UV_NO_SYNC=1
+# container start. No cache: the app user needs nothing writable for `uv run`.
+ENV UV_NO_SYNC=1 \
+    UV_NO_CACHE=1
+
+RUN groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /home/app \
+        --shell /usr/sbin/nologin app \
+    && mkdir -p /home/app /srv/media \
+    && chown -R app:app /home/app /srv
 
 WORKDIR /srv
 
-COPY pyproject.toml uv.lock /srv/
-RUN uv sync --frozen --no-dev
+COPY --chown=app:app pyproject.toml uv.lock /srv/
+RUN chown app:app /srv && su -s /bin/sh app -c "uv sync --frozen --no-dev"
 
-COPY app /srv/app
-COPY migrations /srv/migrations
-COPY alembic.ini /srv/alembic.ini
+COPY --chown=app:app app /srv/app
+COPY --chown=app:app migrations /srv/migrations
+COPY --chown=app:app alembic.ini /srv/alembic.ini
 
 EXPOSE 8000
+
+USER app
 
 CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -38,8 +38,10 @@ SUMMARY_HEADER = "## Conversation summary"
 
 # How a media message reads when the model only gets text: either because
 # vision is off/unavailable (images) or because transcription produced nothing
-# (audio, ticket 28). The wording is addressed to the model, in the same
+# (audio). The wording is addressed to the model, in the same
 # language as the agent's prompts.
+# The defaults of the `image_placeholder` / `audio_placeholder` settings, which
+# are read at call time (`render_message_text`).
 IMAGE_PLACEHOLDER = "[imagem enviada pelo cliente]"
 AUDIO_PLACEHOLDER = "[áudio enviado pelo cliente]"
 
@@ -66,11 +68,12 @@ def render_message_text(message: Message) -> str:
     """
     content = (message.content or "").strip()
     if message.type == "image":
-        return f"{IMAGE_PLACEHOLDER}: {content}" if content else IMAGE_PLACEHOLDER
+        placeholder = get_settings().image_placeholder
+        return f"{placeholder}: {content}" if content else placeholder
     if message.type == "audio":
         # Ticket 28 stores the transcript as the content; until then (or on a
         # failed transcription) the model is told a voice note came in.
-        return content or AUDIO_PLACEHOLDER
+        return content or get_settings().audio_placeholder
     return message.content or ""
 
 
@@ -225,7 +228,7 @@ class ContextBuilder:
         caption = (message.content or "").strip()
         return [
             ImagePart(mime=message.media_mime or "", data=data),
-            TextPart(text=caption or IMAGE_PLACEHOLDER),
+            TextPart(text=caption or get_settings().image_placeholder),
         ]
 
     async def _load_image(self, message: Message) -> bytes | None:

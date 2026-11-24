@@ -1,6 +1,6 @@
 # Architecture
 
-This document is the map of the codebase for anyone extending the harness.
+This document is the map of the codebase for anyone extending parley.
 See `PRODUCT.md` for the product framing ("what/why") and `README.md` for
 how to run it.
 
@@ -41,7 +41,7 @@ app/
                    scripted provider for tests/offline demos).
   tools/          base.py (ToolExecutor Protocol, ToolResult, ToolContext),
                    registry.py (merges executors, first-match wins),
-                   builtin.py (remember, handoff_to_human — harness-provided),
+                   builtin.py (remember, handoff_to_human — parley-provided),
                    http.py (the tenant's own HTTP tools), ssrf.py (outbound
                    URL guard), validation.py (JSON Schema arg validation).
   media/          Channel-independent media pipeline: storage.py (local
@@ -71,7 +71,8 @@ app/
   models/         SQLAlchemy 2 declarative models, one file per table.
   repositories/   BaseRepository (get/list/create/update/delete, tenant_id
                    first) + per-model subclasses.
-  observability/  structlog config + request-id middleware.
+  observability/  structlog config + request-id middleware (see "Log
+                   context").
 ```
 
 ## Data model
@@ -223,7 +224,7 @@ same conversation.
      it calls `return_inflight` and schedules the conversation after the
      backoff (`RETRY_BACKOFF_SECONDS`: 2 s, then 8 s). At the limit it appends
      an entry to `harness:dlq:turns`, calls `finish`, and then stores and
-     sends `TURN_FAILED_MESSAGE` once. If part of the reply was already
+     sends the agent's `error_message` (else `TURN_FAILED_MESSAGE`) once. If part of the reply was already
      delivered it dead-letters the batch at once (`partly_delivered` true),
      with no retry and no error message;
    - **finish**: `debounce.finish` drops the in-flight list and removes the
@@ -268,8 +269,9 @@ same conversation.
    `AgentRunStatus.ERROR` / `error="max_iterations"` (no dedicated enum
    member — see the note in `app/agents/runtime.py`) and answers with a
    fixed "couldn't finish" message. A provider exception is caught the same
-   way, with a fixed "technical problem" message — a broken turn must not
-   cost the user a reply.
+   way; the reply is the agent's `error_message`, or the default "technical
+   problem" text when it is null — a broken turn must not cost the user a
+   reply.
 
 ### A turn is a series of short transactions
 
@@ -551,7 +553,7 @@ off; the `/chat` demo agent on).
 
 ## Categories and waiting lines
 
-The harness stores the facts: a conversation's category, since when it waits
+Parley stores the facts: a conversation's category, since when it waits
 and who claimed it. Operators, line visibility and priorities belong to the
 app that uses it.
 
@@ -684,13 +686,15 @@ barge-in) gets special-cased media behavior (PRODUCT.md).
    `LLM_VISION_ENABLED` is on, capped at the newest `VISION_MAX_IMAGES` in
    the prompt window; older images and any image when vision is off/the
    model can't see it degrade to the text placeholder
-   `"[imagem enviada pelo cliente]"` so the turn still answers.
+   the text placeholder (setting `IMAGE_PLACEHOLDER`, default
+   `"[imagem enviada pelo cliente]"`) so the turn still answers.
 5. **Degradation**: STT failure (or empty transcript) keeps the message as
    `audio` with a fixed placeholder content (`"[áudio não compreendido]"` /
-   `"[áudio sem fala detectada]"`) instead of costing the customer a reply.
-   Unsupported types get a fixed polite reply
-   (`app.conversations.turn.UNSUPPORTED_MEDIA_REPLY`) when a batch is
-   unsupported-only; mixed batches (e.g. a photo + an unsupported sticker)
+   `"[áudio sem fala detectada]"`; an audio still without content reaches the
+   model as `AUDIO_PLACEHOLDER`) instead of costing the customer a reply.
+   Unsupported types get a polite reply when a batch is unsupported-only: the
+   agent's `unsupported_media_message`, else the default
+   `app.conversations.turn.UNSUPPORTED_MEDIA_REPLY`; mixed batches (e.g. a photo + an unsupported sticker)
    run normally, with the unsupported item recorded as its own message.
 6. **Rendering**: `/chat` and `/operator` render `type=="image"` as an
    `<img>` thumbnail (click to open full-size) plus any caption, and
@@ -782,6 +786,55 @@ surface `/chat` gives an end user — see PRODUCT.md "Operator UI".
   assignment, no notifications/unread counts, no run/tool/sentiment views —
   same "Not included" list as PRODUCT.md. Auth is exactly the existing
   tenant `X-API-Key`; the page adds no new auth code.
+
+## Log context
+
+Logs are structlog only; `app/observability/logging.py` is the one module that
+imports stdlib `logging`. The processor `merge_contextvars` adds the bound keys
+to every line. Four keys come from context variables:
+
+| Key | Bound by | Unbound |
+|---|---|---|
+| `request_id` | `request_id_middleware`, per API request | `unbind_contextvars` in a `finally`, when the request ends |
+| `conversation_id` | `process_turn`, at its start | `reset_contextvars` in its `finally` |
+| `tenant_id` | `_run_turn`, once the conversation row has loaded | the same `reset_contextvars` |
+| `run_id` | `AgentRuntime.run_turn`, after the run row's first commit | `reset_contextvars` in its own `finally` |
+
+So every line logged while a turn runs has `conversation_id`, and `tenant_id`
+from the moment the conversation loads. A line from the agent run has `run_id`
+as well. A failure before the conversation loads has no `tenant_id`.
+
+The binding functions return tokens, and the `finally` blocks restore by token
+(`reset_contextvars`), never `clear_contextvars`. A key that was already bound
+before the turn comes back with its old value; one that was not is removed.
+The reset never raises, so it cannot hide the turn's outcome.
+
+Tasks do not leak the context. The scheduler runs each turn as its own asyncio
+task, and a task works on a copy of the context made when it is created: a key
+bound inside one turn is invisible to the scheduler loop and to the other turns.
+The `finally` blocks cover the case where a turn is run directly in the
+caller's context, as the tests do.
+
+`X-Request-ID` is kept only when the whole value matches
+`^[A-Za-z0-9._-]{1,64}$`; otherwise the middleware generates a UUID. The
+rejected value is neither logged nor echoed.
+
+## Start order
+
+`docker-compose.yml` brings the stack up in this order:
+
+1. `postgres` and `redis`, each with a health check.
+2. `migrate`, built from the same image. It waits for `postgres` to be healthy,
+   runs `uv run alembic upgrade head` and exits 0 (`restart: "no"`).
+3. `api` and `worker`. Each waits for `postgres` and `redis` (healthy), for
+   `migrate` (`service_completed_successfully`) and for `mock-tools` (started).
+   If `migrate` fails, neither starts.
+
+The API does not migrate at start, so any number of replicas can start without
+racing on the schema. The image runs as the user `app` (uid 10001); its
+`/srv/media` belongs to `app`, and a volume created earlier by root keeps its
+owner. `docker-compose.dev.yml` only adds the host ports of `postgres` and
+`redis`.
 
 ## Checks
 

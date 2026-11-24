@@ -11,10 +11,10 @@ Also: the "message truncated" webhook warning must not carry the sender's id.
 
 import copy
 import json
-import logging
 from pathlib import Path
 
 import respx
+import structlog.testing
 
 from app.conversations import turn as turn_module
 from app.conversations.turn import process_turn
@@ -77,13 +77,13 @@ async def test_sentiment_handoff_sends_the_default_text(
 
 
 @respx.mock
-async def test_truncated_webhook_warning_has_no_sender_id(client, fake_redis, caplog):
+async def test_truncated_webhook_warning_has_no_sender_id(client, fake_redis):
     tenant = await _create_tenant(client)
     channel_id = await _create_evolution_channel(client, _auth(tenant["api_key"]))
     payload = copy.deepcopy(json.loads((FIXTURES / "evolution_messages_upsert.json").read_text()))
     payload["data"]["message"]["conversation"] = "x" * 50_000
 
-    with caplog.at_level(logging.WARNING, logger="app.api.webhooks"):
+    with structlog.testing.capture_logs() as logs:
         response = await client.post(
             f"/webhooks/whatsapp/{channel_id}",
             json=payload,
@@ -91,8 +91,8 @@ async def test_truncated_webhook_warning_has_no_sender_id(client, fake_redis, ca
         )
 
     assert response.status_code == 200, response.text
-    [record] = [r for r in caplog.records if "truncated" in r.getMessage()]
-    text = record.getMessage()
+    [record] = [e for e in logs if e["event"] == "webhook.message_truncated"]
+    text = str(record)
     assert "5511999998888" not in text
     assert str(channel_id) in text
     assert "3EB0C767D26A1D5F9E1A" in text

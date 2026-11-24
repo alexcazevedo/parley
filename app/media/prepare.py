@@ -2,7 +2,7 @@
 
 For each audio message freshly ingested this turn, load its bytes from
 storage and transcribe them, writing the transcript into `Message.content` so
-`render_message_text` (ticket 27) — and everything that reads it downstream:
+`render_message_text` — and everything that reads it downstream:
 sentiment, the rolling summary, the operator page — treats it exactly like a
 text message. STT failure degrades to a fixed placeholder rather than costing
 the customer a reply (PRODUCT.md's graceful-degradation rule).

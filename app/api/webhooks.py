@@ -7,11 +7,11 @@ from the channel row, not from a header, so `get_current_tenant` is never
 used here.
 """
 
-import logging
 import secrets as pysecrets
 import uuid
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -27,7 +27,7 @@ from app.security.limits import check_message_size
 from app.security.ratelimit import inbound_over_limit
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @router.post("/whatsapp/{channel_id}", status_code=status.HTTP_200_OK)
@@ -60,7 +60,7 @@ async def whatsapp_webhook(
     try:
         incoming = adapter.parse_incoming(raw)
     except IgnoredEvent as exc:
-        logger.info("ignoring evolution webhook event: %s", exc)
+        logger.info("webhook.event_ignored", reason=str(exc))
         return {"status": "ignored"}
 
     # A repeated delivery is recognised before any other work: no rate-limit
@@ -89,9 +89,9 @@ async def whatsapp_webhook(
     )
     if not within_limit:
         logger.warning(
-            "webhook message truncated: channel_id=%s, external_message_id=%s",
-            channel_id,
-            incoming.external_message_id,
+            "webhook.message_truncated",
+            channel_id=str(channel_id),
+            external_message_id=incoming.external_message_id,
         )
         incoming.content = message_to_store
 
@@ -99,10 +99,10 @@ async def whatsapp_webhook(
         await ingest(db, RedisQueue(redis), incoming, enqueue=False)
         await db.commit()
         logger.warning(
-            "webhook.rate_limited: tenant_id=%s, channel_id=%s, external_message_id=%s",
-            channel.tenant_id,
-            channel_id,
-            incoming.external_message_id,
+            "webhook.rate_limited",
+            tenant_id=str(channel.tenant_id),
+            channel_id=str(channel_id),
+            external_message_id=incoming.external_message_id,
         )
         return {"status": "rate_limited"}
 

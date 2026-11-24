@@ -1,5 +1,5 @@
 [project]
-name = "conversational-harness"
+name = "parley"
 version = "0.1.0"
 description = "Headless, multi-tenant infrastructure for AI-powered conversational apps."
 requires-python = ">=3.12,<3.13"

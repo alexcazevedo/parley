@@ -9,7 +9,7 @@ generic over both tables.
 `handoff_to_human`'s `ToolResult.meta` carries `terminal=True` and
 `final_text=<agent.handoff_message>`: `AgentRuntime._loop` (app/agents/runtime.py)
 treats any terminal tool result as "stop calling the model, send this text
-instead" — the mechanism ticket 11 reuses for its own terminal tools.
+instead" — the mechanism any terminal tool uses.
 """
 
 import time
