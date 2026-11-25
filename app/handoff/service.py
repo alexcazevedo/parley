@@ -35,8 +35,26 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.events.outbox import (
+    CAUSE_AGENT_HANDOFF,
+    CAUSE_CLOSED,
+    CAUSE_OPERATOR,
+    CAUSE_RESUMED,
+    CAUSE_SENTIMENT,
+    CONVERSATION_AGENT,
+    CONVERSATION_HANDOFF,
+    record_event,
+)
 from app.models.conversation import Conversation, ConversationState
 from app.models.handoff import Handoff, HandoffRequestedBy
+
+# `conversation.agent` cause by who asked for the handoff, when the caller gives none.
+_CAUSE_BY_REQUESTER = {
+    HandoffRequestedBy.AGENT: CAUSE_AGENT_HANDOFF,
+    HandoffRequestedBy.SYSTEM: CAUSE_SENTIMENT,
+    HandoffRequestedBy.OPERATOR: CAUSE_OPERATOR,
+    HandoffRequestedBy.USER: CAUSE_OPERATOR,
+}
 
 _HANDOFF_SOURCE_STATES = (ConversationState.ACTIVE_AI, ConversationState.WAITING)
 
@@ -63,7 +81,14 @@ class HandoffService:
         conversation: Conversation,
         reason: str | None,
         requested_by: HandoffRequestedBy,
+        *,
+        cause: str | None = None,
+        brief: str | None = None,
     ) -> Handoff:
+        """Hand off. On an `external` channel the same transaction records
+        `conversation.handoff` and `conversation.agent` (`active` false); `cause`
+        defaults from `requested_by`, `brief` is the summary when already written.
+        """
         _check_can_handoff(await self._locked_state(conversation))
         self._set_state(conversation, ConversationState.HUMAN_HANDOFF)
         record = Handoff(
@@ -72,10 +97,23 @@ class HandoffService:
             conversation_id=conversation.id,
             reason=reason,
             requested_by=requested_by,
+            summary=brief,
         )
         self._session.add(record)
         await self._session.flush()
         await self._write_line_columns(conversation, entering=True)
+        await record_event(
+            self._session,
+            conversation,
+            CONVERSATION_HANDOFF,
+            {"reason": reason, "requested_by": str(requested_by), "brief": brief},
+        )
+        await record_event(
+            self._session,
+            conversation,
+            CONVERSATION_AGENT,
+            {"active": False, "cause": cause or _CAUSE_BY_REQUESTER[requested_by]},
+        )
         return record
 
     async def resume(self, conversation: Conversation) -> Conversation:
@@ -88,6 +126,12 @@ class HandoffService:
             open_handoff.resolved_at = datetime.now(UTC)
         await self._session.flush()
         await self._write_line_columns(conversation, entering=False)
+        await record_event(
+            self._session,
+            conversation,
+            CONVERSATION_AGENT,
+            {"active": True, "cause": CAUSE_RESUMED},
+        )
         return conversation
 
     async def close(self, conversation: Conversation) -> Conversation:
@@ -98,6 +142,12 @@ class HandoffService:
             open_handoff.resolved_at = datetime.now(UTC)
         await self._session.flush()
         await self._write_line_columns(conversation, entering=False)
+        await record_event(
+            self._session,
+            conversation,
+            CONVERSATION_AGENT,
+            {"active": False, "cause": CAUSE_CLOSED},
+        )
         return conversation
 
     async def _write_line_columns(self, conversation: Conversation, *, entering: bool) -> None:

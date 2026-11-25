@@ -644,6 +644,37 @@ refresh first.
 operator id is stored as given. An operator reply needs no claim and stores no
 operator id. See `docs/FOLLOW_UPS.md`.
 
+## Events
+
+An `external` channel is a project's own inbox. `ExternalAdapter.send_message`
+sends nothing: what the agent does reaches the project as events, in two ways,
+a push and a feed.
+
+**Outbox.** `record_event` (`app/events/outbox.py`) adds a `ChannelEvent` row to
+the caller's session, so the event is committed with the change it describes
+(the reply row, the state change in `HandoffService`, the category update). It
+does nothing for a channel that is not `external`. `seq` is a global identity
+column. Inserts of one channel take a transaction-scoped advisory lock keyed on
+the channel, so within a channel insert order is commit order and a reader of
+`seq > after` never skips a late commit.
+
+**Push.** `deliver_due` (`app/events/delivery.py`), run by `event_push_loop` in
+the worker, takes each channel's oldest unsent event (no `delivered_at`, no
+`gave_up_at`) and POSTs it to `config.events_url`, signed
+(`app/events/signing.py`). One event per channel is in flight: a failure moves
+`next_attempt_at` along `BACKOFF_SECONDS` and the later events wait. The
+`EVENT_PUSH_MAX_ATTEMPTS`th failure sets `gave_up_at`; the channel then goes on
+with the next event. A claim leases the event (`next_attempt_at` moved ahead,
+`FOR UPDATE SKIP LOCKED`) so two workers do not push it together, and no lock
+is held across the HTTP call. The URL is checked on every push like an
+Evolution `base_url`; redirects are not followed.
+
+**Feed.** `GET /channels/{channel_id}/events` (`app/api/external.py`) reads the
+same rows by `seq`, whatever their delivery state. Pushes are at least once, so
+the receiver dedupes on the event id. Staff messages and hand back go through
+`HandoffService` like an operator's, which is where `conversation.handoff` and
+`conversation.agent` are recorded.
+
 ## Paging, the poll and the indexes
 
 How callers page is in `docs/guides/api-conventions.md`.

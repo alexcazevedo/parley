@@ -104,6 +104,10 @@ before the rolling summary, a model call. Whatever happens to the
 summary afterwards — it raises, its commit fails, the lock is lost before its
 commit — only the summary is dropped: the turn still returns the reply.
 
+On an `external` channel every stored reply row (each bubble, the failure,
+unsupported-media and handoff texts) also records a `message.reply` event in
+the same transaction (`_record_reply`, `app/events/outbox.py`).
+
 Failures (PRODUCT.md E3.2): any exception inside a turn rolls back what was
 not committed and surfaces as `TurnFailed(delivered_parts)`, chained to the
 original. A failed send of any bubble stops the reply there; nothing after it
@@ -135,6 +139,7 @@ from app.config import get_settings
 from app.conversations.humanize import split_reply, typing_delay_seconds
 from app.conversations.summary import maybe_summarize
 from app.db import end_transaction
+from app.events.outbox import MESSAGE_REPLY, external_channel, record_event
 from app.handoff.service import IllegalTransitionError
 from app.handoff.summarizer import handoff_with_summary
 from app.llm.factory import get_provider
@@ -404,7 +409,9 @@ async def send_failure_notice(session: AsyncSession, conversation_id: uuid.UUID)
         if channel is None or contact is None:
             return False
         notice = await _failure_notice_text(session, conversation)
-        session.add(_build_reply(conversation, notice))
+        notice_row = _build_reply(conversation, notice)
+        session.add(notice_row)
+        await _record_reply(session, conversation, notice_row)
         conversation.last_message_at = datetime.now(UTC)
         await session.commit()
     except Exception:
@@ -1048,7 +1055,26 @@ async def _deliver(
     if sends is not None:
         sends.delivered += 1
     session.add(reply)
+    await _record_reply(session, conversation, reply)
     return _Delivery(message=reply, parts_sent=1, superseded=False)
+
+
+async def _record_reply(session: AsyncSession, conversation: Conversation, reply: Message) -> None:
+    """Record `message.reply` for a stored reply row, in the same transaction.
+
+    A no-op for channels that are not `external`. The row is
+    flushed first so its database-assigned `seq` is known; for any other
+    channel nothing happens here (the caller's commit inserts the row as before).
+    """
+    if await external_channel(session, conversation) is None:
+        return
+    await session.flush([reply])
+    await record_event(
+        session,
+        conversation,
+        MESSAGE_REPLY,
+        {"message_id": str(reply.id), "seq": reply.seq, "content": reply.content},
+    )
 
 
 def _build_reply(conversation: Conversation, content: str) -> Message:
@@ -1154,6 +1180,7 @@ async def _deliver_humanized(
         if sends is not None:
             sends.delivered += 1
         session.add(message)
+        await _record_reply(session, conversation, message)
         await session.commit()
         last = message
 

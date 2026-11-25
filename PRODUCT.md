@@ -5,80 +5,102 @@ parallel_default: sequential   # sequential | parallel
 owner: human                   # human | agent (set by comb:auto)
 ---
 
-# Docs an agent can follow
+# Project-owned channel (plug and play, milestone 1 of 5)
 
 ## What / why
 
-Parley's docs grew one run at a time. The README is 900 lines of setup,
-reference and history mixed together, and cites tickets and spec
-sections that no longer exist. An AI agent asked to "add parley to this
-project" has no entry point, no single list of what must be configured,
-and no ordered path from an empty stack to a working conversation. This
-run makes the docs say what is implemented, and adds an entry point and
-guides an agent can follow to wire parley into another application.
+Parley can talk to customers only through channels it owns: its web chat
+(text, replies polled) and a WhatsApp number it connects to itself. A
+project that already has its own inbox, staff and customer channel cannot
+use it. The first adopter, vendezap (a store's shared WhatsApp inbox), owns
+its numbers, its Conversas screen and its attendants. A clinic's reception
+system or a law firm's intake tool is in the same position.
 
-In scope (existing repo):
-
-- **An entry point for agents: `llms.txt`.** At the repo root, in the
-  llms.txt convention: what parley is in a few lines, then links to each
-  guide with one line on when to read it.
-- **Integration guides an agent can execute.** Ordered steps with exact
-  requests and expected responses: run the stack; configure it (every
-  environment variable, which are required, what each does); create a
-  tenant, an agent, a channel and tools; send and receive messages on
-  webchat and on WhatsApp through Evolution; hand a conversation to a
-  human and build an operator screen on the API (lines, claim, reply,
-  resume); categories; memory; boundaries; failure texts; errors,
-  paging and polling; health and readiness. Each guide says how to
-  check that its step worked.
-- **A running instance serves them.** `GET /llms.txt` and the guides it
-  links to, without authentication, beside the existing `/openapi.json`.
-  An agent given only a base URL can start from there.
-- **A short `AGENTS.md` for contributors.** For an agent changing
-  parley's own code: how to run the checks, where things live, the
-  rules that are easy to break.
-- **The existing docs are tightened.** README becomes a short overview,
-  a quick start and links. ARCHITECTURE keeps how the system works and
-  loses repetition and history asides. Statements that no longer match
-  the code are corrected or removed.
-- **Docs cannot drift silently.** A test fails when the docs name an
-  endpoint, an environment variable or an agent field the code does not
-  have.
-
-Decided in the grill:
-
-- Audience: integrators first; contributors get one short file.
-- Delivery: in the repo and served by the API.
-- History is kept: `docs/FOLLOW_UPS.md` keeps its per-run sections and
-  done markers, reorganized for reading; `PRD.md` is committed as a
-  record. Only README and ARCHITECTURE are cut down.
-- Proof: the drift test, plus one run by a fresh agent that sees only
-  `llms.txt` and its links, on a throwaway stack with a stub in place
-  of the model. Where it stumbles, the docs are fixed.
-- Docs stay in English.
+This milestone adds a channel the project owns: the project forwards what
+its customers and staff say, and parley pushes back what the agent does.
 
 ## Primary user story
 
-As a developer, I tell my coding agent "integrate parley into this app"
-and give it the repo or a base URL; it reads `llms.txt`, follows the
-guides, and ends with a configured tenant, a working channel and an
-operator screen talking to the API, without me explaining parley to it.
+As a developer (or an AI agent) integrating a business that already has an
+inbox, I follow one guide, forward my messages to parley, expose one URL,
+and my customers are answered by the agent inside my own inbox, with my
+staff able to take over at any moment.
+
+## In scope
+
+**Ownership.** The project's inbox is the source of truth and its staff
+are the only operators. Parley keeps a copy so the agent has context.
+Parley's waiting lines and operator page are not used by such a project.
+One tenant per installation of the project.
+
+**Messages in.** The project forwards every customer message and every
+message its staff sends. Customer messages may be text, image, voice note
+or PDF. Images and voice notes behave as on parley's WhatsApp channel
+today. PDFs are new: their text is given to the agent; a PDF without
+readable text, or over the size limit, gets the agent's standard
+"unsupported" answer. Agent replies are text.
+
+**Agent on and off.** The agent answers until it hands off by itself or a
+staff message arrives; either pauses it for that conversation. The project
+calls "hand back to agent" to resume. No automatic resume.
+
+**Departments.** Defined in parley. When the agent picks one, the project
+is told its id and name and shows it its own way (vendezap: an etiqueta of
+the same name). When staff changes it in the project, the project tells
+parley, and the agent stops deciding for that conversation.
+
+**Events out.** Parley pushes agent replies, handoffs (with the brief),
+department changes and agent on/off changes to a URL of the project.
+Pushes are signed with a secret parley generates and shows once, and are
+retried for a limited time. Every event is also kept in an ordered feed
+the project reads from its last position, so a long outage loses nothing.
+Events carry an id; a repeat must be harmless.
+
+**Proof and docs.** A small example project in this repo (its own tiny
+inbox) used by the tests and by a fresh-agent run. A guide,
+`docs/guides/project-channel.md`, linked from `llms.txt`, passing the
+drift and replay tests. A brief, `docs/integrations/vendezap.md`, ready to
+paste into `/comb:grill` in the vendezap repo: what vendezap must send,
+receive and show, mapped to its own code.
 
 ## Out of scope
 
-- Client libraries or SDKs; a generated API reference beyond what
-  `/openapi.json` already gives
-- A docs website, search, versioned docs, translations
-- Tutorials for building a whole product on parley; sample apps
-- New features or behaviour changes in the API (except serving the docs)
-- Rewriting `docs/FOLLOW_UPS.md` items or deleting history
-- An MCP server for parley
+Later milestones; this one must leave room for each:
+- **One-step setup** (one file, applied idempotently): the channel and its
+  push URL must be creatable by plain data, no manual step.
+- **Knowledge base**: nothing here; replies stay text.
+- **Business functions as tools**: the existing HTTP tools are unchanged.
+- **Admin UI**: every action here is a tenant-scoped endpoint.
+
+Never: changes in the vendezap repo (its own run), billing, marketplace,
+hosted SaaS, per-language SDKs, media in agent replies, reading scanned
+PDFs, automatic resume of the agent.
+
+## Constraints
+
+- Existing endpoints and channels keep working unchanged.
+- Everything is tenant-scoped.
+- Nothing is specific to retail: the guide shows the same flow for a
+  clinic in one paragraph.
 
 ## Success demo
 
-Done when I can give a fresh agent nothing but `llms.txt` (from the repo
-or from `GET /llms.txt` on a running instance) and watch it bring up a
-stack, create a tenant, agent, channel and tool, exchange a message,
-hand off to a human, answer as an operator and resume — reading only
-what `llms.txt` links to — and the suite fails when a doc names an
-endpoint, environment variable or agent field that does not exist.
+Done when a fresh agent, given only `llms.txt`, connects the example
+project to an empty parley stack running the stub model, and: a customer
+message is answered inside the example inbox by push; a staff message
+pauses the agent; "hand back" resumes it; the department chosen by the
+agent appears in the example inbox; and after the example project is
+stopped and restarted, the replies it missed arrive from the feed, each
+once.
+
+## Grill log
+
+| # | Question | Answer |
+|---|---|---|
+| 1 | Mode | mvp |
+| 2 | Source of truth for conversations and operators | The project |
+| 3 | Who turns the agent off and on | A staff message pauses; explicit hand back resumes |
+| 4 | Departments | Parley decides, project maps; staff changes are sent back |
+| 5 | Project down | Retries, then an ordered catch-up feed |
+| 6 | Where the milestone stops | Parley plus an example project, and a vendezap brief |
+| 7 | Media | Text, image, voice note and PDF in; text out |

@@ -1,0 +1,34 @@
+# The example project (examples/project_inbox/) next to parley:
+#   docker compose -f docker-compose.yml -f docker-compose.stub.yml -f docker-compose.example.yml up -d
+# See examples/project_inbox/README.md for the channel to create and the
+# variables to export (PARLEY_API_KEY, PARLEY_CHANNEL_ID, PARLEY_EVENTS_SECRET).
+services:
+  project-inbox:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ./examples:/srv/examples:ro
+    environment:
+      PARLEY_URL: http://api:8000
+      PARLEY_API_KEY: ${PARLEY_API_KEY:-}
+      PARLEY_CHANNEL_ID: ${PARLEY_CHANNEL_ID:-}
+      PARLEY_EVENTS_SECRET: ${PARLEY_EVENTS_SECRET:-}
+      # /tmp is the only writable place for the non-root user; it survives a
+      # restart of the container, not its removal.
+      INBOX_STATE_PATH: /tmp/inbox.json
+    ports:
+      - "9200:9200"
+    command: uv run uvicorn examples.project_inbox.app:app --host 0.0.0.0 --port 9200
+    depends_on:
+      api:
+        condition: service_started
+
+  # The worker pushes events to the project, so the SSRF rules must accept
+  # the compose-internal host name; the api validates events_url on create.
+  api:
+    environment:
+      CHANNEL_ALLOWED_HOSTS: project-inbox
+  worker:
+    environment:
+      CHANNEL_ALLOWED_HOSTS: project-inbox

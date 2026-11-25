@@ -1,4 +1,4 @@
-"""Channel model: one inbound/outbound surface (webchat, WhatsApp) bound to an agent."""
+"""Channel model: one inbound/outbound surface (webchat, WhatsApp, external) bound to an agent."""
 
 import enum
 import uuid
@@ -14,6 +14,8 @@ from app.models.base import Base, TenantScoped, pg_enum
 class ChannelType(enum.StrEnum):
     WEBCHAT = "webchat"
     WHATSAPP_EVOLUTION = "whatsapp_evolution"
+    # Owned by the project: it forwards messages in and reads replies as events.
+    EXTERNAL = "external"
 
 
 class Channel(Base, TenantScoped):

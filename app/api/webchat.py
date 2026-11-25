@@ -32,7 +32,7 @@ from app.api.deps import get_current_tenant, get_db, get_redis
 from app.channels.base import IncomingMedia
 from app.channels.registry import get_adapter
 from app.config import get_settings
-from app.media.sniff import sniff_mime
+from app.media.sniff import media_type_for, sniff_mime
 from app.messages.ingest import MediaRejected, ingest
 from app.models.channel import Channel, ChannelType
 from app.models.tenant import Tenant
@@ -107,14 +107,27 @@ class IngestOut(BaseModel):
     duplicate: bool
 
 
-async def resolve_channel(db: AsyncSession, tenant: Tenant, channel_id: uuid.UUID) -> Channel:
+_NOT_OF_TYPE = {
+    ChannelType.WEBCHAT: "channel is not a webchat channel",
+    ChannelType.EXTERNAL: "channel is not an external channel",
+}
+
+
+async def resolve_channel(
+    db: AsyncSession,
+    tenant: Tenant,
+    channel_id: uuid.UUID,
+    channel_type: ChannelType = ChannelType.WEBCHAT,
+) -> Channel:
+    """The tenant's channel `channel_id`: 404 when missing or another tenant's,
+    422 when it is not of `channel_type`."""
     channel = await ChannelsRepository(db).get(tenant.id, channel_id)
     if channel is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="channel not found")
-    if channel.type != ChannelType.WEBCHAT:
+    if channel.type != channel_type:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="channel is not a webchat channel",
+            detail=_NOT_OF_TYPE.get(channel_type, f"channel is not a {channel_type} channel"),
         )
     return channel
 
@@ -166,6 +179,26 @@ async def ingest_message(
     )
 
 
+async def ingest_text_message(
+    db: AsyncSession,
+    redis: Redis,
+    tenant: Tenant,
+    channel: Channel,
+    user_id: str,
+    message: str,
+    message_id: str | None = None,
+) -> IngestOut:
+    """A text message posted by a client: inbound limits, size limit (413), ingest."""
+    await enforce_inbound_limits(redis, tenant.id, channel.id, user_id)
+
+    # Size limit: strict enforcement (413 if exceeded)
+    within_limit, _message = check_message_size(message, enforce_strict=True)
+    if not within_limit:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+
+    return await ingest_message(db, redis, tenant, channel, user_id, message, message_id)
+
+
 @router.post("/messages", response_model=IngestOut, status_code=status.HTTP_201_CREATED)
 async def post_webchat_message(
     payload: WebChatMessageIn,
@@ -174,44 +207,28 @@ async def post_webchat_message(
     redis: Redis = Depends(get_redis),
 ) -> IngestOut:
     channel = await resolve_channel(db, tenant, payload.channel_id)
-
-    await enforce_inbound_limits(redis, tenant.id, channel.id, payload.user_id)
-
-    # Size limit: strict enforcement (413 if exceeded)
-    within_limit, _message = check_message_size(
-        payload.message, enforce_strict=True
-    )
-    if not within_limit:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
-        )
-
-    return await ingest_message(
+    return await ingest_text_message(
         db, redis, tenant, channel, payload.user_id, payload.message, payload.message_id
     )
 
 
-@media_router.post(
-    "/media",
-    response_model=IngestOut,
-    status_code=status.HTTP_201_CREATED,
-)
-async def post_webchat_media(
-    channel_id: uuid.UUID = Form(...),
-    user_id: str = Form(...),
-    file: UploadFile = File(...),
-    caption: str | None = Form(default=None),
-    message_id: str | None = Form(default=None),
-    tenant: Tenant = Depends(get_current_tenant),
-    db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis),
+async def receive_media_upload(
+    db: AsyncSession,
+    redis: Redis,
+    tenant: Tenant,
+    channel: Channel,
+    user_id: str,
+    file: UploadFile,
+    caption: str | None,
+    message_id: str | None,
+    *,
+    allow_documents: bool = False,
 ) -> IngestOut:
-    """Upload path for `/chat`'s attach-a-photo/voice-note flow. The type and
-    stored mime are decided from the file's content (magic bytes); the client's
-    content type is ignored. Unknown content is a 415, oversize a 413.
+    """A file posted by a client: inbound limits, caption size (413), the body
+    read up to `media_max_bytes` (413), the type decided from the file's
+    content (magic bytes; the client's content type is ignored), ingest. Unknown
+    content is a 415, and so is a PDF unless `allow_documents`.
     """
-    channel = await resolve_channel(db, tenant, channel_id)
-
     await enforce_inbound_limits(redis, tenant.id, channel.id, user_id)
 
     caption_text = caption or ""
@@ -231,12 +248,12 @@ async def post_webchat_media(
     data = bytes(buffer)
 
     sniffed = sniff_mime(data)
-    if sniffed is None:
+    media_type = media_type_for(sniffed) if sniffed is not None else None
+    if sniffed is None or (media_type == "document" and not allow_documents):
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="unsupported media content",
         )
-    media_type = sniffed.split("/", 1)[0]
     media = IncomingMedia(data=data, mime=sniffed, filename=file.filename)
 
     return await ingest_message(
@@ -249,6 +266,29 @@ async def post_webchat_media(
         message_id,
         media=media,
         media_type=media_type,
+    )
+
+
+@media_router.post(
+    "/media",
+    response_model=IngestOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_webchat_media(
+    channel_id: uuid.UUID = Form(...),
+    user_id: str = Form(...),
+    file: UploadFile = File(...),
+    caption: str | None = Form(default=None),
+    message_id: str | None = Form(default=None),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+) -> IngestOut:
+    """Upload path for `/chat`'s attach-a-photo/voice-note flow (images and
+    audio; a PDF is a 415)."""
+    channel = await resolve_channel(db, tenant, channel_id)
+    return await receive_media_upload(
+        db, redis, tenant, channel, user_id, file, caption, message_id
     )
 
 

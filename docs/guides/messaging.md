@@ -10,7 +10,7 @@ USER_ID=customer-1
 
 `$CONVERSATION_ID` and `$LAST_SEQ` are captured with `jq` in steps 1 and 2.
 
-Every request sends `X-API-Key: $TENANT_KEY`. Parley has no push transport: a client learns about replies by polling.
+Every request sends `X-API-Key: $TENANT_KEY`. On web chat and WhatsApp a client learns about replies by polling; a project that keeps its own inbox gets signed pushes instead, see [project-channel](project-channel.md).
 
 ## How a conversation works
 

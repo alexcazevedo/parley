@@ -59,6 +59,7 @@ Follow the guides in order; each one ends with a check that its step worked.
 - [Setup](docs/guides/setup.md): create a tenant, an agent, a channel and tools.
 - [Messaging](docs/guides/messaging.md): send and receive messages on web chat and WhatsApp; what the customer sees when something fails.
 - [Operators](docs/guides/operators.md): hand a conversation to a human; lines, claim, reply, resume, categories; a polling loop for an operator screen.
+- [Project channel](docs/guides/project-channel.md): connect a project with its own inbox: forward messages, signed event pushes, the event feed, departments, PDFs.
 - [Agent behaviour](docs/guides/agent-behaviour.md): instructions, memory, boundaries, sentiment escalation, failure texts, context window.
 - [API conventions](docs/guides/api-conventions.md): authentication, errors, paging, polling, limits.
 - [Operations](docs/guides/operations.md): replicas, the image user, upgrading, retries, dead letters, shutdown.

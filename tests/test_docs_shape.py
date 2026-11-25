@@ -12,6 +12,7 @@ GUIDES = [
     "setup",
     "messaging",
     "operators",
+    "project-channel",
     "agent-behaviour",
     "api-conventions",
     "operations",
@@ -21,6 +22,11 @@ GUIDES = [
 def test_line_limits():
     assert len((ROOT / "README.md").read_text().splitlines()) <= 200
     assert len((ROOT / "AGENTS.md").read_text().splitlines()) <= 120
+
+
+def test_vendezap_brief_is_short():
+    text = (ROOT / "docs" / "integrations" / "vendezap.md").read_text()
+    assert len(text.splitlines()) <= 150
 
 
 def test_no_history_references():

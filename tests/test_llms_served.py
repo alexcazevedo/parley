@@ -12,6 +12,7 @@ GUIDES = [
     "setup",
     "messaging",
     "operators",
+    "project-channel",
     "agent-behaviour",
     "api-conventions",
     "operations",

@@ -18,8 +18,9 @@ from app.models.contact import Contact
 # Media MIME types accepted for each `IncomingMessage.type`; a mime with a
 # `;codecs=` suffix is matched on the part before `;` (see
 # `app/messages/ingest.py`).
-MEDIA_TYPES = {"image", "audio"}
+MEDIA_TYPES = {"image", "audio", "document"}
 IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp"}
+DOCUMENT_MIMES = {"application/pdf"}
 AUDIO_MIMES = {
     "audio/ogg",
     "audio/mpeg",

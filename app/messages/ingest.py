@@ -16,16 +16,22 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.channels.base import AUDIO_MIMES, IMAGE_MIMES, IncomingMedia, IncomingMessage
+from app.channels.base import (
+    AUDIO_MIMES,
+    DOCUMENT_MIMES,
+    IMAGE_MIMES,
+    IncomingMedia,
+    IncomingMessage,
+)
 from app.config import get_settings
 from app.conversations.resolver import resolve_contact_and_conversation
-from app.media.sniff import sniff_mime
+from app.media.sniff import media_type_for, sniff_mime
 from app.media.storage import get_media_storage
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageDirection, MessageRole
 from app.queue.base import Job, Queue
 
-_MIMES_BY_TYPE = {"image": IMAGE_MIMES, "audio": AUDIO_MIMES}
+_MIMES_BY_TYPE = {"image": IMAGE_MIMES, "audio": AUDIO_MIMES, "document": DOCUMENT_MIMES}
 
 
 class MediaRejected(Exception):
@@ -64,7 +70,7 @@ def validate_media(message_type: str, media: IncomingMedia) -> str:
         raise MediaRejected("media exceeds max size")
 
     sniffed = sniff_mime(media.data)
-    if sniffed is None or sniffed.split("/", 1)[0] != message_type:
+    if sniffed is None or media_type_for(sniffed) != message_type:
         raise MediaRejected("unsupported media content")
     return sniffed
 

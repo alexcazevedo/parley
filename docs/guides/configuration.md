@@ -56,6 +56,8 @@ Parley calls any OpenAI-compatible chat-completions endpoint.
 - `VISION_MAX_IMAGES`: how many of the newest images in the context window are sent as real image data. Older ones become text. Default: `3`. Lower it to save tokens.
 - `IMAGE_PLACEHOLDER`: text the model reads in place of an image it cannot see. Default: `[imagem enviada pelo cliente]`. Change it to your customers' language. It is never sent to a customer.
 - `AUDIO_PLACEHOLDER`: text the model reads in place of a voice note it cannot hear. Default: `[áudio enviado pelo cliente]`. It is never sent to a customer.
+- `PDF_MAX_PAGES`: pages read from a PDF sent on an external channel. Default: `30`. Minimum 1.
+- `PDF_MAX_CHARS`: characters of PDF text the agent reads. The rest is cut. Default: `20000`. Minimum 1.
 - `MEDIA_ROOT`: directory on local disk where uploaded images and audio are stored. Default: `./media`. Point it at a persistent volume.
 - `MEDIA_MAX_BYTES`: largest accepted upload in bytes. Default: `16777216` (16 MiB).
 
@@ -84,8 +86,16 @@ Parley calls any OpenAI-compatible chat-completions endpoint.
 
 - `TOOL_ALLOWED_HOSTS`: comma-separated host names a tool may call. Default: empty. When set, only these hosts are allowed, and the private-address checks are skipped for them. When empty, private, loopback and link-local addresses are blocked and public hosts are allowed. `docker-compose.yml` sets it to `mock-tools` for `api` and `worker`, which overrides `.env` (see [setup](setup.md) step 2).
 - `TOOL_SSRF_DISABLED`: turn the tool address guard off. Default: `false`. Use it only in local development.
-- `CHANNEL_ALLOWED_HOSTS`: comma-separated host names an Evolution channel `base_url` may use even if the address is private, for example `evolution`. Default: empty, so only public hosts are allowed. It does not depend on the `TOOL_` settings.
+- `CHANNEL_ALLOWED_HOSTS`: comma-separated host names an Evolution channel `base_url` or an `external` channel `events_url` (checked on create and update, and again on every push) may use even if the address is private, for example `evolution`. Default: empty, so only public hosts are allowed. It does not depend on the `TOOL_` settings.
 - `BOUNDARY_FLOOR_FILE`: path to a JSON file of boundaries applied to every agent of every tenant. Tenants can add to it but not loosen it. Default: empty, so there is no floor. A missing or broken file stops start-up. Shape: `{"scope": "optional text", "never": ["text"]}`.
+
+## Events pushed to a project
+
+Used by `external` channels. How the pushes work is in [project-channel](project-channel.md).
+
+- `EVENT_PUSH_MAX_ATTEMPTS`: failed pushes of one event before parley stops pushing it (it stays in the feed). Default: `7`.
+- `EVENT_PUSH_TIMEOUT_SECONDS`: longest wait for the project's answer to one push. Default: `5`.
+- `EVENT_PUSH_INTERVAL_SECONDS`: pause between two passes of the push loop in the worker. Default: `1`.
 
 ## Demo
 

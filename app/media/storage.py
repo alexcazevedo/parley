@@ -17,6 +17,7 @@ _EXTENSIONS: dict[str, str] = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
     "image/webp": ".webp",
+    "application/pdf": ".pdf",
     "audio/ogg": ".ogg",
     "audio/mpeg": ".mp3",
     "audio/mp3": ".mp3",

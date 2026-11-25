@@ -16,6 +16,8 @@ AGENT_DOCS: list[Path] = [
     ROOT / "llms.txt",
     *sorted((ROOT / "docs" / "guides").glob("*.md")),
     *[p for p in (ROOT / "README.md", ROOT / "AGENTS.md") if p.exists()],
+    # Briefs for other repositories: checked like the guides.
+    *sorted((ROOT / "docs" / "integrations").glob("*.md")),
 ]
 
 # Guides linked from llms.txt but not written yet; later tickets remove names.
@@ -61,6 +63,18 @@ NON_SETTINGS_NAMES: set[str] = {
     "CATEGORY_ID",
     "MEMORY_ID",
     "EVOLUTION_KEY",
+    # Added by project-channel.md.
+    "PROJECT_USER",
+    "PROJECT_CHANNEL_ID",
+    "EVENTS_URL",
+    "EVENTS_SECRET",
+    "LAST_EVENT_SEQ",
+    # Read by examples/project_inbox/app.py, named in project-channel.md.
+    "PARLEY_API_KEY",
+    "PARLEY_CHANNEL_ID",
+    "PARLEY_EVENTS_SECRET",
+    # Settings the vendezap brief asks vendezap to add (docs/integrations/vendezap.md).
+    "PARLEY_URL",
 }
 
 _METHODS = "GET|POST|PUT|PATCH|DELETE"

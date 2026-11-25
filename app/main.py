@@ -14,6 +14,7 @@ from app.api import (
     contacts,
     conversations,
     dev,
+    external,
     health,
     lines,
     llms,
@@ -64,6 +65,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(conversations.router)
     app.include_router(lines.router)
     app.include_router(webchat.router)
+    app.include_router(external.router)
     app.include_router(media.router)
     if settings.demo_mode:
         app.include_router(chat.router)

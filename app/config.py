@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     audio_placeholder: str = "[áudio enviado pelo cliente]"
     media_root: str = "./media"
     media_max_bytes: int = 16 * 1024 * 1024
+    # PDFs (see app/media/pdf.py): pages read and characters kept per document.
+    pdf_max_pages: int = Field(default=30, ge=1)
+    pdf_max_chars: int = Field(default=20000, ge=1)
     # Vision (see app/agents/context.py): turn this off for a
     # deployment whose model has no image support — images then reach the
     # model as a text placeholder instead. `vision_max_images` caps how many
@@ -99,6 +102,12 @@ class Settings(BaseSettings):
     # though they are private. Additive: every other host must be public.
     # Separate from (and unaffected by) the TOOL_* settings above.
     channel_allowed_hosts: str = ""
+    # Event push to an external channel's `events_url` (see app/events/delivery.py):
+    # tries per event before it is given up (the feed still has it), time
+    # allowed per push, and how often the worker looks for due events.
+    event_push_max_attempts: int = Field(default=7, ge=1)
+    event_push_timeout_seconds: float = Field(default=5.0, gt=0)
+    event_push_interval_seconds: float = Field(default=1.0, gt=0)
 
 
 class InsecureSettingsError(RuntimeError):

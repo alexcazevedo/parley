@@ -30,6 +30,7 @@ from app.channels.base import OutgoingMessage
 from app.channels.registry import get_adapter
 from app.config import get_settings
 from app.db import end_transaction
+from app.events.outbox import CONVERSATION_CATEGORY, CONVERSATION_HANDOFF_BRIEF, record_event
 from app.handoff.service import HandoffService, IllegalTransitionError
 from app.handoff.summarizer import generate_handoff_summary
 from app.models.channel import Channel
@@ -429,6 +430,7 @@ async def handoff_conversation(
     if summary is not None:
         try:
             record.summary = summary
+            await record_event(db, conversation, CONVERSATION_HANDOFF_BRIEF, {"brief": summary})
             await db.commit()
         except Exception:
             # The handoff is committed already; only the brief is lost.
@@ -526,6 +528,7 @@ async def move_conversation_category(
     classifier leaves the conversation alone. Allowed in every state.
     """
     tenant_id = tenant.id  # read now: a rollback expires the tenant object
+    category = None
     if payload.category_id is not None:
         category = await CategoriesRepository(db).get(tenant_id, payload.category_id)
         if category is None:
@@ -536,6 +539,14 @@ async def move_conversation_category(
     # (the ORM skips a column whose new value equals the loaded one, which
     # would let a concurrent classifier write win) and returns the fresh row.
     try:
+        # Lock the row first: the previous category decides whether an event is due.
+        previous = (
+            await db.execute(
+                select(Conversation.category_id)
+                .where(Conversation.id == conversation_id, Conversation.tenant_id == tenant_id)
+                .with_for_update()
+            )
+        ).first()
         result = await db.execute(
             update(Conversation)
             .where(Conversation.id == conversation_id, Conversation.tenant_id == tenant_id)
@@ -547,6 +558,17 @@ async def move_conversation_category(
         if conversation is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="conversation not found"
+            )
+        if previous is not None and previous.category_id != payload.category_id:
+            await record_event(
+                db,
+                conversation,
+                CONVERSATION_CATEGORY,
+                {
+                    "category_id": None if category is None else str(category.id),
+                    "name": None if category is None else category.name,
+                    "source": "operator",
+                },
             )
         await db.commit()
     except IntegrityError:

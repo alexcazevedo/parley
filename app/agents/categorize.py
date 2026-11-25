@@ -37,6 +37,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from app.agents.sentiment import _ROLE_LABELS, _recent_messages
 from app.config import get_settings
 from app.db import end_transaction
+from app.events.outbox import CONVERSATION_CATEGORY, record_event
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage
 from app.llm.factory import get_provider, resolve_model
 from app.models.agent import Agent
@@ -115,6 +116,14 @@ async def categorize_conversation(
                 )
                 .values(category_id=category_id)
             )
+            if cast(CursorResult[Any], result).rowcount == 1:
+                # Same transaction as the update: the event exists iff the change does.
+                await record_event(
+                    session,
+                    conversation,
+                    CONVERSATION_CATEGORY,
+                    {"category_id": str(category_id), "name": chosen.name, "source": "agent"},
+                )
         await end_transaction(session)
     except Exception:
         logger.warning(

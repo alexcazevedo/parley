@@ -13,10 +13,16 @@ both against the real Redis/Postgres connections until `SIGTERM` or `SIGINT`.
 `job_loop` repeats `run_once` and survives errors: it logs
 `worker.job_loop_error` and pauses `JOB_LOOP_ERROR_PAUSE_SECONDS`.
 
+`event_push_loop` runs `app.events.delivery.deliver_due` every
+`EVENT_PUSH_INTERVAL_SECONDS` in its own task (pushes of `external` channel
+events); an error is logged as `worker.event_push_error` and the loop goes on.
+
 Shutdown (PRODUCT.md E3.4): the signal sets `stop`. The job loop ends after
 its current `run_once` (at most `DEQUEUE_TIMEOUT_SECONDS`) or at once if it is
 in the error pause; the scheduler
-claims nothing new and lets its running turns finish. `main` waits for it up
+claims nothing new and lets its running turns finish; the push loop ends
+after its current pass (cancelled past `EVENT_PUSH_SHUTDOWN_SECONDS`; a
+cancelled push is retried after its claim lease). `main` waits for it up
 to `SHUTDOWN_GRACE_SECONDS`, then cancels what is left: those turns release
 their locks, and their batches come back through the claim timeout. Last, the
 shared HTTP client and the Redis connection are closed.
@@ -40,7 +46,8 @@ from app.conversations.turn import AnyTurnRuntime
 # The worker runs outside FastAPI, so it owns its own session factory rather
 # than going through `app.api.deps.get_db`.
 from app.db import async_session_maker
-from app.http_client import close_shared_client
+from app.events.delivery import SessionFactory, deliver_due
+from app.http_client import close_shared_client, shared_client
 from app.observability.logging import configure_logging
 from app.queue.base import Job, Queue
 from app.queue.redis_queue import WORKER_TTL_SECONDS, RedisQueue
@@ -57,6 +64,8 @@ SHUTDOWN_GRACE_SECONDS = 90
 # next try, so a dead Redis is not hit in a tight loop.
 JOB_LOOP_ERROR_PAUSE_SECONDS = 1.0
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+# How long a stopping worker waits for the push loop's current pass.
+EVENT_PUSH_SHUTDOWN_SECONDS = 10.0
 
 
 async def run_once(
@@ -140,6 +149,36 @@ async def housekeeping_loop(
         await asyncio.sleep(interval)
 
 
+async def event_push_loop(
+    session_factory: SessionFactory, stop: asyncio.Event, interval: float
+) -> None:
+    """Run `deliver_due` every `interval` seconds until `stop` is set.
+
+    An error is logged as `worker.event_push_error`; the next pass comes after
+    the same interval. The wait is cut short by `stop`.
+    """
+    while not stop.is_set():
+        try:
+            await deliver_due(session_factory, shared_client())
+        except Exception:
+            logger.exception("worker.event_push_error")
+        try:
+            async with asyncio.timeout(interval):
+                await stop.wait()
+        except TimeoutError:
+            pass
+
+
+async def _stop_event_push(task: asyncio.Task) -> None:
+    """Wait for the push loop's current pass, then cancel it if still running."""
+    done, _ = await asyncio.wait({task}, timeout=EVENT_PUSH_SHUTDOWN_SECONDS)
+    if not done:
+        task.cancel()
+    results = await asyncio.gather(task, return_exceptions=True)
+    if isinstance(results[0], Exception):
+        logger.error("worker.event_push_failed", exc_info=results[0])
+
+
 def _install_stop_signals(
     loop: asyncio.AbstractEventLoop, stop: asyncio.Event
 ) -> Callable[[], None]:
@@ -217,12 +256,15 @@ async def main() -> None:
         )
     )
     housekeeping_task = asyncio.create_task(housekeeping_loop(queue))
+    push_task = asyncio.create_task(
+        event_push_loop(async_session_maker, stop, settings.event_push_interval_seconds)
+    )
     try:
         await job_loop(queue, redis, stop, settings.debounce_seconds)
     finally:
         stop.set()
         try:
-            await _stop_scheduler(scheduler_task)
+            await asyncio.gather(_stop_scheduler(scheduler_task), _stop_event_push(push_task))
         finally:
             housekeeping_task.cancel()
             await asyncio.gather(housekeeping_task, return_exceptions=True)

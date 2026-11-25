@@ -15,7 +15,14 @@ def _is_mpeg_frame_header(data: bytes) -> bool:
     return version != 0b01 and layer != 0b00 and bitrate != 0b1111 and sample_rate != 0b11
 
 
+def media_type_for(mime: str) -> str:
+    """Message `type` for a sniffed mime: `image`, `audio` or `document`."""
+    return "document" if mime == "application/pdf" else mime.split("/", 1)[0]
+
+
 def sniff_mime(data: bytes) -> str | None:
+    if data[:5] == b"%PDF-":
+        return "application/pdf"
     if data[:3] == b"\xff\xd8\xff":
         return "image/jpeg"
     if data[:8] == b"\x89PNG\r\n\x1a\n":

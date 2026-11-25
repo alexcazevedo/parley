@@ -113,10 +113,8 @@ async def handoff_with_summary(
     service = HandoffService(session)
     service.ensure_can_handoff(conversation)
     summary = await generate_handoff_summary(session, conversation, reason)
-    record = await service.handoff(conversation, reason, requested_by)
-    record.summary = summary
-    await session.flush()
-    return record
+    # The brief goes in with the transition so the `conversation.handoff` event carries it.
+    return await service.handoff(conversation, reason, requested_by, brief=summary)
 
 
 async def _build_prompt(

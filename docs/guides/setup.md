@@ -120,7 +120,7 @@ Check: `curl -s $BASE_URL/agents/$AGENT_ID -H "X-API-Key: $TENANT_KEY"` returns 
 
 | Field | Default | Meaning |
 |---|---|---|
-| `type` | required | `webchat` or `whatsapp_evolution`. |
+| `type` | required | `webchat`, `whatsapp_evolution` or `external` (a channel the project owns: see [project-channel](project-channel.md)). |
 | `name` | required | Label. |
 | `agent_id` | required | `$AGENT_ID`. An unknown or foreign id gives 422 `agent not found`. |
 | `config` | `{}` | Object, returned in every response, so put no secrets in it. |
@@ -130,6 +130,7 @@ Check: `curl -s $BASE_URL/agents/$AGENT_ID -H "X-API-Key: $TENANT_KEY"` returns 
 
 - `humanize` (any type): `true` splits a reply into several short messages with typing pauses. Tuned by the `HUMANIZE_*` settings in [configuration](configuration.md).
 - `whatsapp_evolution` also needs `base_url` (the Evolution server, public address, or a host listed in `CHANNEL_ALLOWED_HOSTS`) and `instance` (the Evolution instance name). Neither is checked for presence at creation; a missing one fails when a reply is sent. A bad `base_url` gives 422 `invalid base_url: ...`.
+- `external` takes `events_url`, where parley pushes events; the response to the create call also holds `events_secret`, shown once. Steps and details are in [project-channel](project-channel.md).
 - `secret` for `whatsapp_evolution` is the Evolution API key. Parley sends it to Evolution on every call and requires Evolution's webhook to send the same value in the `apikey` header to `POST /webhooks/whatsapp/{channel_id}`. Without a secret every webhook gets 401.
 
 Web chat:

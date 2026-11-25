@@ -44,6 +44,8 @@ _FLAGS_WITH_ARG = {"-X", "-H", "-d", "-F", "-o", "-w", "--data", "--data-raw"}
 
 # `file=@name` in a guide's curl is replaced with the bytes below.
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+# `file=@name.pdf`: a PDF with no readable text (the turn answers it as unsupported).
+PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n"
 
 
 @dataclass
@@ -153,6 +155,7 @@ class Agent:
         self.vars: dict[str, str] = {"BASE_URL": "http://test"}
         self.replayed = 0
         self.direct = 0
+        self.seen: set[tuple[str, str]] = set()
 
     def fill(self, text: str, placeholders: dict[str, str] | None = None) -> str:
         def lookup(match: re.Match) -> str:
@@ -175,11 +178,13 @@ class Agent:
             for form in curl.forms:
                 name, _, value = self.fill(form, placeholders).partition("=")
                 if value.startswith("@"):
-                    files[name] = (value[1:], JPEG, "application/octet-stream")
+                    content = PDF if value.endswith(".pdf") else JPEG
+                    files[name] = (value[1:], content, "application/octet-stream")
                 else:
                     data[name] = value
             kwargs.update(data=data, files=files)
         self.replayed += 1
+        self.seen.add((curl.method, curl.path))
         return await self.client.request(
             curl.method, self.fill(curl.url, placeholders), headers=headers, **kwargs
         )
@@ -410,6 +415,229 @@ async def test_the_guides_demo_path(
 
     assert me.replayed > 30
     print(f"curl requests replayed from the guides: {me.replayed}; called directly: {me.direct}")
+
+
+PROJECT = "project-channel"
+
+
+def _guide_python() -> str:
+    """The guide's Python sample (the signature check), as the guide gives it."""
+    blocks = re.findall(r"^```python\n(.*?)^```", _read(PROJECT), re.S | re.M)
+    assert len(blocks) == 1
+    return blocks[0]
+
+
+def _feed_types(events: list[dict]) -> list[str]:
+    return [e["type"] for e in events]
+
+
+async def test_the_project_channel_guide(
+    client, fake_redis, db_session, test_engine, monkeypatch, media_root, fake_handoff_brief
+):
+    """A project follows project-channel.md: forward, read the feed, receive a
+    signed push, hand back, departments, a PDF. Only the model is scripted."""
+    import os
+    from datetime import UTC, datetime
+
+    import httpx
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.conversations.turn import UNSUPPORTED_MEDIA_REPLY
+    from app.events.delivery import deliver_due
+    from app.events.signing import sign
+
+    _scripted_worker(monkeypatch)
+    me = Agent(client)
+    v = me.vars
+    v["ADMIN_API_KEY"] = os.environ["ADMIN_API_KEY"]
+    for guide in ("setup", PROJECT):
+        _, assigns = extract(guide)
+        for name, value in assigns.items():
+            if name not in ("BASE_URL", "ADMIN_API_KEY") and not value.startswith("<"):
+                v[name] = value
+    assert v["LAST_EVENT_SEQ"] == "0"
+
+    # setup.md: a tenant and an agent.
+    r = await me.run("setup", "POST", "/tenants", 201)
+    v["TENANT_KEY"] = r.json()["api_key"]
+    r = await me.run("setup", "POST", "/agents", 201)
+    v["AGENT_ID"] = r.json()["id"]
+
+    # 2. Create the channel: the secret is shown once.
+    r = await me.run(PROJECT, "POST", "/channels", 201)
+    created = r.json()
+    assert created["type"] == "external" and created["config"] == {"events_url": v["EVENTS_URL"]}
+    assert created["events_secret"]
+    v["PROJECT_CHANNEL_ID"], v["EVENTS_SECRET"] = created["id"], created["events_secret"]
+    r = await me.run(PROJECT, "GET", "/channels/$PROJECT_CHANNEL_ID", 200)
+    assert r.json()["config"]["events_url"] == v["EVENTS_URL"] and "events_secret" not in r.json()
+
+    # 3. A customer message; the reply is not in the response.
+    r = await me.run(PROJECT, "POST", "/channels/external/messages", 201, contains="in-1")
+    assert r.json()["duplicate"] is False
+    v["CONVERSATION_ID"] = first_conversation = r.json()["conversation_id"]
+    r = await me.run(PROJECT, "GET", "/conversations/$CONVERSATION_ID", 200)
+    assert r.json()["state"] == "ACTIVE_AI"
+
+    # 4 and 5. The agent answers; the feed holds the reply, once.
+    await _run_worker(fake_redis, db_session, "Your order left the warehouse today.")
+    r = await me.run(PROJECT, "GET", "/channels/$PROJECT_CHANNEL_ID/events", 200)
+    events = r.json()
+    assert _feed_types(events) == ["message.reply"]
+    assert set(events[0]) == {"id", "seq", "type", "conversation_id", "created_at", "data"}
+    assert events[0]["conversation_id"] == first_conversation
+    assert events[0]["data"]["content"] == "Your order left the warehouse today."
+    assert set(events[0]["data"]) == {"message_id", "seq", "content"}
+    v["LAST_EVENT_SEQ"] = str(_top_seq(events, int(v["LAST_EVENT_SEQ"])))
+    r = await me.run(PROJECT, "GET", "/channels/$PROJECT_CHANNEL_ID/events", 200)
+    assert r.json() == []
+
+    # 3. A staff message pauses the agent; a repeat of it records nothing.
+    r = await me.run(PROJECT, "POST", "/channels/external/messages", 201, contains="out-1")
+    assert r.json()["duplicate"] is False and r.json()["conversation_id"] == first_conversation
+    r = await me.run(PROJECT, "POST", "/channels/external/messages", 201, contains="out-1")
+    assert r.json()["duplicate"] is True
+    r = await me.run(PROJECT, "GET", "/conversations/$CONVERSATION_ID", 200)
+    assert r.json()["state"] == "HUMAN_HANDOFF"
+    r = await me.run(PROJECT, "GET", "/channels/$PROJECT_CHANNEL_ID/events", 200)
+    assert _feed_types(r.json()) == ["conversation.handoff", "conversation.agent"]
+    assert r.json()[0]["data"] == {
+        "reason": "staff message",
+        "requested_by": "operator",
+        "brief": None,
+    }
+    assert r.json()[1]["data"] == {"active": False, "cause": "staff_message"}
+    v["LAST_EVENT_SEQ"] = str(_top_seq(r.json()))
+
+    # 7. Hand back; a second hand back is refused as the guide says.
+    r = await me.run(PROJECT, "POST", "/conversations/$CONVERSATION_ID/resume", 200)
+    assert r.json()["state"] == "ACTIVE_AI"
+    again = await me.send(find(PROJECT, "POST", "/conversations/$CONVERSATION_ID/resume"))
+    assert again.status_code == 409
+    assert again.json()["error"]["message"] == "cannot resume a conversation in state ACTIVE_AI"
+    r = await me.run(PROJECT, "GET", "/channels/$PROJECT_CHANNEL_ID/events", 200)
+    assert [(e["type"], e["data"]) for e in r.json()] == [
+        ("conversation.agent", {"active": True, "cause": "resumed"})
+    ]
+    v["LAST_EVENT_SEQ"] = str(_top_seq(r.json()))
+
+    # 8. A department defined in parley, then the project's own change of it.
+    r = await me.run(PROJECT, "POST", "/categories", 201)
+    v["CATEGORY_ID"] = r.json()["id"]
+    r = await me.run(PROJECT, "PUT", "/conversations/$CONVERSATION_ID/category", 200)
+    assert r.json()["category_id"] == v["CATEGORY_ID"] and r.json()["category_locked"] is True
+    r = await me.run(PROJECT, "GET", "/channels/$PROJECT_CHANNEL_ID/events", 200)
+    assert [(e["type"], e["data"]) for e in r.json()] == [
+        (
+            "conversation.category",
+            {"category_id": v["CATEGORY_ID"], "name": "billing", "source": "operator"},
+        )
+    ]
+    v["LAST_EVENT_SEQ"] = str(_top_seq(r.json()))
+
+    # 7. Close; the next message opens a new conversation.
+    r = await me.run(PROJECT, "POST", "/conversations/$CONVERSATION_ID/close", 200)
+    assert r.json()["state"] == "CLOSED"
+    r = await me.run(PROJECT, "GET", "/channels/$PROJECT_CHANNEL_ID/events", 200)
+    assert [(e["type"], e["data"]) for e in r.json()] == [
+        ("conversation.agent", {"active": False, "cause": "closed"})
+    ]
+    v["LAST_EVENT_SEQ"] = str(_top_seq(r.json()))
+
+    # 9. A PDF with no text: stored as a document, then answered as unsupported.
+    r = await me.run(PROJECT, "POST", "/channels/external/media", 201)
+    assert r.json()["conversation_id"] != first_conversation
+    v["CONVERSATION_ID"] = r.json()["conversation_id"]
+    check = "/conversations/$CONVERSATION_ID/messages"
+    r = await me.run(PROJECT, "GET", check, 200, contains="limit=100")
+    documents = [m for m in r.json() if m["media_url"]]
+    assert [m["type"] for m in documents] == ["document"]
+    await _run_worker(fake_redis, db_session, "never used")
+    # Once the turn has run, the newest message is the reply: the check still finds the file.
+    r = await me.run(PROJECT, "GET", check, 200, contains="limit=100")
+    assert r.json()[-1]["media_url"] is None
+    assert [m["type"] for m in r.json() if m["media_url"]] == ["unsupported"]
+    r = await me.run(PROJECT, "GET", "/channels/$PROJECT_CHANNEL_ID/events", 200)
+    assert [(e["type"], e["data"]["content"]) for e in r.json()] == [
+        ("message.reply", UNSUPPORTED_MEDIA_REPLY)
+    ]
+
+    # Every curl of the guide was replayed.
+    guide_curls, _ = extract(PROJECT)
+    assert {(c.method, c.path) for c in guide_curls} <= me.seen
+
+    # 4. Push: what the guide's sample verifies is what parley sends.
+    namespace: dict = {}
+    exec(_guide_python(), namespace)  # noqa: S102 - the guide's own sample
+    verify_push = namespace["verify_push"]
+    secret = v["EVENTS_SECRET"]
+    pushed: list[tuple[dict, bytes, dict]] = []
+
+    def receive(request: httpx.Request) -> httpx.Response:
+        body = request.content
+        payload = json.loads(body)
+        if payload["channel_id"] == v["PROJECT_CHANNEL_ID"]:
+            headers = dict(request.headers)
+            assert str(request.url) == v["EVENTS_URL"]
+            assert verify_push(
+                secret, headers["x-parley-timestamp"], body, headers["x-parley-signature"]
+            )
+            assert not verify_push(
+                secret, headers["x-parley-timestamp"], body + b" ", headers["x-parley-signature"]
+            )
+            assert not verify_push(
+                secret + "x", headers["x-parley-timestamp"], body, headers["x-parley-signature"]
+            )
+            assert not verify_push(
+                secret, str(int(headers["x-parley-timestamp"]) - 301), body,
+                sign(secret, int(headers["x-parley-timestamp"]) - 301, body),
+            )
+            assert headers["x-parley-signature"] == sign(
+                secret, headers["x-parley-timestamp"], body
+            )
+            assert headers["x-parley-event-id"] == payload["id"]
+            assert headers["content-type"] == "application/json"
+            pushed.append((payload, body, headers))
+        return httpx.Response(204)
+
+    await db_session.rollback()
+    factory = async_sessionmaker(bind=test_engine, expire_on_commit=False)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(receive)) as http:
+        await deliver_due(factory, http, now=datetime.now(UTC))
+    feed = (
+        await client.get(
+            f"/channels/{v['PROJECT_CHANNEL_ID']}/events?limit=500",
+            headers={"X-API-Key": v["TENANT_KEY"]},
+        )
+    ).json()
+    assert [p["id"] for p, _, _ in pushed] == [e["id"] for e in feed]
+    assert [p["seq"] for p, _, _ in pushed] == sorted(p["seq"] for p, _, _ in pushed)
+    assert set(pushed[0][0]) == {
+        "id", "seq", "type", "channel_id", "conversation_id", "created_at", "data"
+    }
+    compact = json.dumps(pushed[0][0], separators=(",", ":"), ensure_ascii=False)
+    assert pushed[0][1] == compact.encode()
+    print(f"project-channel curls replayed: {me.replayed}; pushes verified: {len(pushed)}")
+
+
+def test_the_guides_event_table_matches_the_code():
+    from app.events import outbox
+
+    text = _read(PROJECT)
+    table = text.split("## 6. Events", 1)[1].split("\n## ", 1)[0]
+    types = set(re.findall(r"^\| `([a-z_]+\.[a-z_]+)` \|", table, re.M))
+    values = {name: getattr(outbox, name) for name in dir(outbox) if name.isupper()}
+    code_types = {
+        value for name, value in values.items()
+        if not name.startswith("CAUSE_") and isinstance(value, str) and "." in value
+    }
+    assert types == code_types
+    causes = {getattr(outbox, n) for n in dir(outbox) if n.startswith("CAUSE_")}
+    row = next(line for line in table.splitlines() if line.startswith("| `conversation.agent`"))
+    assert set(re.findall(r"`([a-z_]+)`", row.split("`cause`", 1)[1])) >= causes
+    names = ("message_id", "seq", "content", "reason", "requested_by", "brief", "active")
+    for name in (*names, "cause", "category_id", "name", "source"):
+        assert f"`{name}`" in table
 
 
 def test_llms_txt_lists_every_guide_on_disk_and_nothing_else():

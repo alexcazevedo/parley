@@ -31,4 +31,14 @@ async def get_media(
     if not path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="media not found")
 
+    # A PDF is never rendered in the browser: downloaded, and not sniffed into
+    # another type. Images and audio are served as before.
+    if message.media_mime == "application/pdf":
+        return FileResponse(
+            path,
+            media_type="application/pdf",
+            filename="document.pdf",
+            content_disposition_type="attachment",
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
     return FileResponse(path, media_type=message.media_mime)

@@ -2,7 +2,7 @@
 
 > Parley is a headless, multi-tenant service that runs AI conversations over HTTP. An application talks to it through a REST API; it is not a library.
 
-For a first integration follow quickstart, configuration, setup, messaging and operators in that order: each step ends with a check that it worked. The other guides are for tuning and running. Links are relative to the base URL of a running instance.
+For a first integration follow quickstart, configuration, setup, messaging and operators in that order: each step ends with a check that it worked. A project that keeps its own inbox follows project-channel after setup. The other guides are for tuning and running. Links are relative to the base URL of a running instance.
 
 ## Guides
 
@@ -11,6 +11,7 @@ For a first integration follow quickstart, configuration, setup, messaging and o
 - [Setup](docs/guides/setup.md): read to create a tenant, a tool, an agent, a channel and a contact.
 - [Messaging](docs/guides/messaging.md): read to send messages, poll for replies and send images or voice notes on web chat, to connect WhatsApp through Evolution, and to see what the customer receives when something fails.
 - [Operators](docs/guides/operators.md): read to hand a conversation to a human, read the waiting lines, claim, reply, resume or close, define categories, and build an operator screen.
+- [Project channel](docs/guides/project-channel.md): read to connect a project that has its own inbox and staff: forward messages, receive signed event pushes, read the event feed, hand back to the agent, departments and PDFs.
 - [Agent behaviour](docs/guides/agent-behaviour.md): read to tune instructions, memory, boundaries, sentiment escalation, the handoff message, failure texts and the context window.
 - [API conventions](docs/guides/api-conventions.md): read for authentication headers, the error shape and status codes, request ids, paging and limits.
 - [Operations](docs/guides/operations.md): read to run more than one replica, upgrade, or understand retries, dead letters and shutdown.
