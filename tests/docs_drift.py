@@ -76,6 +76,8 @@ NON_SETTINGS_NAMES: set[str] = {
     "PARLEY_EVENTS_SECRET",
     # Settings the vendezap brief asks vendezap to add (docs/integrations/vendezap.md).
     "PARLEY_URL",
+    # Vendezap's own setting, named in the same brief.
+    "PUBLIC_URL",
 }
 
 _METHODS = "GET|POST|PUT|PATCH|DELETE"
