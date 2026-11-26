@@ -15,8 +15,16 @@ request calls `handoff_to_human`, any other message calls `search_knowledge`
 when it is offered, and the reply after a search quotes the first passage
 found.
 
+A typed decision (a decision job set to `llm:<model>`, `app/llm/decisions.py`)
+comes as Pydantic AI's tool-mode structured output: one offered tool named
+`final_result` whose parameters are the answer type, and `tool_choice`
+`required`. The stub calls that tool with a fixed answer chosen by the
+answer's fields: allowed with no rule broken, the lowest frustration level,
+no department. This form is recognized before anything else.
+
 The fragments below duplicate the prompts in app/; tests/test_mock_llm_server.py
-fails when a prompt changes and a fragment stops matching.
+fails when a prompt changes and a fragment stops matching, and when the form
+Pydantic AI sends for a typed decision stops matching the one recognized here.
 
 Runs as the `mock-llm` service of docker-compose.stub.yml.
 Standalone: `uv run uvicorn scripts.mock_llm_server:app --port 9100`.
@@ -45,6 +53,16 @@ AUXILIARY_ANSWERS: list[tuple[str, str]] = [
         "brief for a human operator who is about to take over",
         "The customer asked for help and the assistant could not resolve it.",
     ),
+]
+
+# Pydantic AI's tool-mode structured output: the tool's name and, by a field
+# of the answer type, the fixed answer.
+STRUCTURED_TOOL = "final_result"
+STRUCTURED_CALL_ID = "call_stub_structured"
+STRUCTURED_ANSWERS: list[tuple[str, dict[str, Any]]] = [
+    ("allowed", {"allowed": True, "broken": "none"}),
+    ("level", {"level": 0}),
+    ("department", {"department": "none"}),
 ]
 
 HANDOFF_TOOL = "handoff_to_human"
@@ -81,6 +99,25 @@ def _offers(tools: Any, name: str) -> bool:
         and tool["function"].get("name") == name
         for tool in tools
     )
+
+
+def _structured_answer(body: dict[str, Any]) -> dict[str, Any] | None:
+    """The fixed typed answer when the request is a structured-output request, else None."""
+    if body.get("tool_choice") != "required":
+        return None
+    tools = body.get("tools")
+    for tool in tools if isinstance(tools, list) else []:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if not isinstance(function, dict) or function.get("name") != STRUCTURED_TOOL:
+            continue
+        parameters = function.get("parameters")
+        properties = parameters.get("properties") if isinstance(parameters, dict) else None
+        if not isinstance(properties, dict):
+            return None
+        for field, answer in STRUCTURED_ANSWERS:
+            if field in properties:
+                return answer
+    return None
 
 
 def _tool_name(messages: list[dict[str, Any]], call_id: Any) -> str:
@@ -143,6 +180,10 @@ def _answer(body: dict[str, Any]) -> dict[str, Any]:
     """The assistant message for one request: {"content": ...} or with tool_calls."""
     raw = body.get("messages")
     messages = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+
+    structured = _structured_answer(body)
+    if structured is not None:
+        return _call(STRUCTURED_CALL_ID, STRUCTURED_TOOL, structured)
 
     system = " ".join(_text(m.get("content")) for m in messages if m.get("role") == "system")
     for fragment, answer in AUXILIARY_ANSWERS:

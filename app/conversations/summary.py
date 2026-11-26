@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import end_transaction
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage, LLMProvider, LLMResponse
 from app.llm.jobs import (
+    NATIVE_KINDS,
     OUTCOME_OK,
     OUTCOME_UNUSABLE,
     CallTimer,
@@ -32,7 +33,9 @@ from app.llm.jobs import (
     job_model,
     job_target,
     record_job_call,
+    target_label,
     usage_of,
+    writing_provider,
 )
 from app.models.agent import Agent
 from app.models.conversation import Conversation
@@ -125,22 +128,26 @@ async def _summarize(
     # summarization wants a low-variance, deterministic-ish output regardless
     # of how the agent is tuned for conversation. Shortcut noted per mvp mode.
     # Reads done, writes not started: no transaction while the model runs.
-    # No setting: `agent.model`, exactly as before; `llm:<model>`: that model.
+    # No setting: `agent.model`, exactly as before; `llm:<model>`: that model;
+    # a native form: that model on its vendor (`NativeProvider`), recorded as set.
     model = agent.model
-    if job_target(Job.SUMMARY).kind == "llm":
+    target = job_target(Job.SUMMARY)
+    if target.kind == "llm" or target.kind in NATIVE_KINDS:
         model = job_model(Job.SUMMARY, agent)
+    recorded = target_label(target) if target.kind in NATIVE_KINDS else model
+    llm = writing_provider(target, llm)
     await end_transaction(session)
     called = CallTimer()
     try:
         response = await llm.complete(prompt, model=model, temperature=0.2, max_tokens=1024)
     except Exception as exc:
-        await _record(session, conversation, model, failure_outcome(exc), called)
+        await _record(session, conversation, recorded, failure_outcome(exc), called)
         raise
     summary = (response.content or "").strip()
     await _record(
         session,
         conversation,
-        model,
+        recorded,
         OUTCOME_OK if summary else OUTCOME_UNUSABLE,
         called,
         response,

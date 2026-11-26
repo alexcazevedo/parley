@@ -25,14 +25,18 @@ from app.handoff.service import HandoffService
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage
 from app.llm.factory import get_provider
 from app.llm.jobs import (
+    NATIVE_KINDS,
     OUTCOME_OK,
     OUTCOME_UNUSABLE,
     CallTimer,
     Job,
     failure_outcome,
     job_model,
+    job_target,
     record_job_call,
+    target_label,
     usage_of,
+    writing_provider,
 )
 from app.memory.service import MemoryService
 from app.models.agent import Agent
@@ -92,8 +96,11 @@ async def generate_handoff_summary(
             )
             return None
         prompt = await _build_prompt(session, agent, conversation, reason)
-        provider = get_provider(agent)
+        target = job_target(Job.HANDOFF_BRIEF)
         model = job_model(Job.HANDOFF_BRIEF, agent)
+        # A native form writes on its vendor (`NativeProvider`), recorded as set.
+        recorded = target_label(target) if target.kind in NATIVE_KINDS else model
+        provider = writing_provider(target, get_provider(agent))
         # No transaction open during the model call; the timeout wraps only it.
         await end_transaction(session)
         called = CallTimer()
@@ -111,7 +118,7 @@ async def generate_handoff_summary(
                 conversation_id=conversation_id,
                 agent_run_id=None,
                 job=Job.HANDOFF_BRIEF,
-                model=model,
+                model=recorded,
                 outcome=failure_outcome(exc),
                 latency_ms=called.elapsed_ms(),
             )
@@ -123,7 +130,7 @@ async def generate_handoff_summary(
         conversation_id=conversation_id,
         agent_run_id=None,
         job=Job.HANDOFF_BRIEF,
-        model=model,
+        model=recorded,
         outcome=OUTCOME_OK if summary else OUTCOME_UNUSABLE,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,

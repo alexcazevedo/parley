@@ -39,11 +39,12 @@ from app.config import get_settings
 from app.db import end_transaction
 from app.events.outbox import CONVERSATION_CATEGORY, record_event
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage
-from app.llm.decisions import DecisionUsage, HandOver, decide_category, target_label
+from app.llm.decisions import DecisionUsage, HandOver, Unusable, decide_category, target_label
 from app.llm.factory import get_provider
 from app.llm.jobs import (
     OUTCOME_OK,
     OUTCOME_UNUSABLE,
+    TYPED_KINDS,
     CallTimer,
     Job,
     failure_outcome,
@@ -109,12 +110,13 @@ async def categorize_conversation(
         current = conversation.category_id
         provider = get_provider(agent)
         model = job_model(Job.CATEGORY, agent, settings)
-        recorded = target_label(target) if target.kind == "typesafe" else model
+        recorded = target_label(target) if target.kind in TYPED_KINDS else model
         # No transaction open during the model call; the timeout wraps only it
-        # (on the decision path, the decision and any hand-over together).
+        # (on the typed path, the decision and any hand-over together; a chat
+        # model never hands over).
         await end_transaction(session)
         called = CallTimer()
-        if target.kind == "typesafe":
+        if target.kind in TYPED_KINDS:
             usage = DecisionUsage()
             async with asyncio.timeout(settings.category_timeout_seconds):
                 try:
@@ -127,6 +129,10 @@ async def categorize_conversation(
                     )
                     usable = True
                     prompt_tokens, completion_tokens = usage.prompt_tokens, usage.completion_tokens
+                except Unusable:
+                    # A chat model's answer that cannot be validated: no change.
+                    chosen, usable = None, False
+                    prompt_tokens = completion_tokens = None
                 except HandOver as handed:
                     logger.info("category.handed_over", why=handed.why)
                     handed_over, recorded = True, model

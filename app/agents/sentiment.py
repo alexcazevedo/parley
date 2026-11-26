@@ -28,6 +28,7 @@ from app.llm.factory import get_provider
 from app.llm.jobs import (
     OUTCOME_OK,
     OUTCOME_UNUSABLE,
+    TYPED_KINDS,
     CallTimer,
     Job,
     failure_outcome,
@@ -94,14 +95,16 @@ async def score_frustration(
         target = job_target(Job.SENTIMENT, settings)
         recorded = model
         images = 0
-        if target.kind == "typesafe":
+        if target.kind in TYPED_KINDS:
             recorded = target_label(target)
+        if target.kind == "typesafe":
             images = await evidence_images(session, conversation, messages, message_ids)
         # No transaction open during the model call; the timeout wraps only it
-        # (on the decision path, the decision and any hand-over together).
+        # (on the typed path, the decision and any hand-over together; a chat
+        # model never hands over).
         await end_transaction(session)
         called = CallTimer()
-        if target.kind == "typesafe":
+        if target.kind in TYPED_KINDS:
             usage = DecisionUsage()
             async with asyncio.timeout(settings.sentiment_timeout_seconds):
                 try:

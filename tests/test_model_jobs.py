@@ -45,6 +45,9 @@ from app.queue.redis_queue import JOBS_KEY, RedisQueue
 from app.tools.registry import ToolRegistry
 from app.workers.main import run_once
 from app.workers.scheduler import tick
+from tests import native_fakes
+
+native_model = native_fakes.native_model
 
 AGENT_MODEL = "gpt-4o-mini"
 BOUNDED = {
@@ -262,7 +265,20 @@ async def test_no_setting_uses_agent_model_and_records_it(job, client, db_sessio
     assert row.latency_ms is not None and row.latency_ms >= 0
 
 
-@pytest.mark.parametrize("job", DIRECT_JOBS)
+def _llm_chat_model(monkeypatch, script):
+    """`llm:` decision jobs are typed (`app.llm.decisions`): their chat model is a script."""
+    import app.llm.decisions as decisions_module
+
+    monkeypatch.setattr(
+        decisions_module,
+        "build_chat_model",
+        lambda target, settings=None: script.build("llm", target.model),
+    )
+
+
+# The writing jobs on `llm:` keep the text form; the decision jobs on `llm:` get
+# a typed answer (updated from the text form when `llm:` decisions became typed).
+@pytest.mark.parametrize("job", [Job.SUMMARY, Job.HANDOFF_BRIEF])
 async def test_llm_setting_calls_that_model(job, client, db_session, monkeypatch, job_env):
     job_env(**{JOB_ENV[job]: "llm:small"})
     provider = FakeLLMProvider([_usage(GOOD_ANSWER[job])])
@@ -271,6 +287,23 @@ async def test_llm_setting_calls_that_model(job, client, db_session, monkeypatch
     assert [call["model"] for call in provider.calls] == ["small"]
     [row] = await _rows(db_session, conversation.id)
     assert (row.job, row.model, row.outcome) == (job.value, "small", "ok")
+
+
+@pytest.mark.parametrize(
+    ("job", "answer"), [(Job.SENTIMENT, {"level": 1}), (Job.CATEGORY, {"department": "none"})]
+)
+async def test_llm_setting_on_a_decision_job_calls_that_model_typed(
+    job, answer, client, db_session, monkeypatch, job_env, native_model  # noqa: F811
+):
+    job_env(**{JOB_ENV[job]: "llm:small"})
+    _llm_chat_model(monkeypatch, native_model.call("final_result", answer))
+    provider = FakeLLMProvider([])
+    conversation = await _run_job(job, client, db_session, monkeypatch, provider)
+
+    assert provider.calls == []
+    assert [request.model for request in native_model.requests] == ["small"]
+    [row] = await _rows(db_session, conversation.id)
+    assert (row.job, row.model, row.outcome) == (job.value, "llm:small", "ok")
 
 
 @pytest.mark.parametrize("job", DIRECT_JOBS)
@@ -389,15 +422,19 @@ async def test_boundary_check_no_setting_uses_agent_model(client, fake_redis, db
 
 
 async def test_boundary_check_llm_setting_keeps_reply_on_agent_model(
-    client, fake_redis, db_session, job_env
+    client, fake_redis, db_session, job_env, monkeypatch, native_model  # noqa: F811
 ):
+    # Typed since `llm:` decisions went through `app.llm.decisions` (was text).
     job_env(BOUNDARY_CHECK_MODEL="llm:small")
-    provider = FakeLLMProvider([LLMResponse(content="Temos horário."), _usage("ALLOW")])
+    native_model.call("final_result", {"allowed": True, "broken": "none"})
+    _llm_chat_model(monkeypatch, native_model)
+    provider = FakeLLMProvider([LLMResponse(content="Temos horário.")])
     conversation_id = await _turn(client, fake_redis, db_session, provider, **BOUNDED)
 
-    assert [call["model"] for call in provider.calls] == [AGENT_MODEL, "small"]
+    assert [call["model"] for call in provider.calls] == [AGENT_MODEL]
+    assert [request.model for request in native_model.requests] == ["small"]
     [row] = await _check_rows(db_session, conversation_id)
-    assert (row.model, row.outcome) == ("small", "ok")
+    assert (row.model, row.outcome) == ("llm:small", "ok")
 
 
 @pytest.mark.parametrize(

@@ -19,7 +19,7 @@ dependencies = [
     "pypdf>=7.1.1",
     "pyyaml>=6.0.3",
     "mcp>=2.3.0",
-    "pydantic-ai-slim[typesafe]>=2.75.0",
+    "pydantic-ai-slim[anthropic,google,openai,typesafe]>=2.75.0",
 ]
 
 [dependency-groups]

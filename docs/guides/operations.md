@@ -94,6 +94,8 @@ A call with unknown outcome is visible only in the logs and in `tool_executions`
 
 Model calls, speech-to-text and `GET` tools are retried when the answer is 429, 500, 502, 503 or 504: up to `HTTP_RETRY_ATTEMPTS` tries in total, waiting `HTTP_RETRY_BASE_SECONDS` and doubling, up to `HTTP_RETRY_MAX_WAIT_SECONDS`; a numeric `Retry-After` sets the wait (log event `http.retry`). Non-`GET` tools and sends to the channel are never retried at this level, and nothing is retried after a timeout or a connection error, because the request may have been processed.
 
+On `openai`, `anthropic` and `google` there is one retry rule: the vendor's own client retries, `HTTP_RETRY_ATTEMPTS - 1` times, with the vendor's own waits, and parley adds nothing on top (no `http.retry` log events for them). It differs from `openai_compatible`, where parley retries 429 and 5xx itself as above. The turn deadline (60 seconds, fixed in the code) is the same on every provider and bounds the retries.
+
 ### The worker keeps running
 
 An error in the job loop (Redis down or restarting, a job that cannot be handled) is logged as `worker.job_loop_error`; the loop waits 1 second and tries again. The housekeeping pass and the scheduler loop also log their errors and go on.
@@ -166,5 +168,11 @@ The recorded results come from the check that ran then, so a disagreement is not
 4. Set the next job. To go back, empty the setting and restart; rows stay.
 
 `scripts/demo_decision_model.py` is a live check of the decision model, not part of the test suite: `uv run python scripts/demo_decision_model.py` with `TYPESAFE_API_KEY` set sends a few made-up examples (no real customer text) and prints what it decided; for the boundary examples it also prints the probability of "allowed". It exits 0 with `decision model demo: ok` when every example is decided as expected, 1 on an unexpected answer or a service error, 2 when there is no key. A few examples are a smoke test, not a measure of quality.
+
+### Native providers
+
+`agent_runs` has `provider` and `model` columns (migration `0030`): the provider and model that answered the run, null on older rows. Nothing changes for an existing deployment: agents stay on `openai_compatible`, and the migration only adds the columns.
+
+No real vendor was called while this was built, because no key was available. What is not verified: which image formats each vendor accepts, how each reports token use, whether a tool call id from one vendor is accepted after a switch to another, and whether OpenAI's strict mode accepts the schemas of the pick-one decisions. Before you put an agent on a new provider, run `uv run python scripts/demo_native_providers.py` with the vendor's key in `.env` or the environment, optionally with `--openai-model`, `--anthropic-model` or `--google-model`. For each provider whose key is set it sends a plain reply, a tool call and a typed boundary decision, with made-up examples, and prints the latency and token use; the keys are not printed. It exits 0 with `native providers demo: ok`, 1 on a failure, and 2 with `no provider key is set: live check not done` when no key is set. It is a smoke test, not part of the test suite.
 
 Check: after one message on an agent with `BOUNDARY_CHECK_MODEL` set, the query above shows a `boundary_check` row with that model.

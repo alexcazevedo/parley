@@ -48,7 +48,7 @@ from pydantic import ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.agents import agent_values
+from app.api.agents import agent_values, provider_problem
 from app.api.categories import category_values
 from app.api.channels import channel_secret
 from app.api.channels import endpoint_problem as channel_endpoint_problem
@@ -737,6 +737,8 @@ def _plan_agents(
         for j, name in enumerate(item.mcp_servers):
             if name not in known_servers:
                 problems.add(f"{path}.mcp_servers[{j}]", UNKNOWN_MCP_SERVER)
+        if (problem := provider_problem(item.provider)) is not None:
+            problems.add(f"{path}.provider", problem)
         record = state.records.get(("agent", item.key))
         row = state.agents.get(record.item_id) if record else None
         desired = agent_desired(item)

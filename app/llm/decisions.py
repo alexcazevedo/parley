@@ -1,7 +1,9 @@
-"""The three decision jobs on a decision model (TypeSafe's Jev, through Pydantic AI).
+"""The three decision jobs with typed answers, through Pydantic AI.
 
-The only module that imports `pydantic_ai`. A job set to `typesafe:<model>`
-(`app.llm.jobs`) asks its question as typed fields instead of a prompt:
+With `app.llm.providers.native`, the only module that imports `pydantic_ai`.
+A decision job set to a model (`app.llm.jobs`) asks its question as typed
+fields instead of a prompt, on TypeSafe's decision model (`typesafe:`) or on
+a chat model (`llm:`, `openai:`, `anthropic:`, `google:`):
 
 - boundary check: `allowed` (yes/no, against `BOUNDARY_CHECK_ALLOW_THRESHOLD`,
   which alone decides) and `broken` (pick one of `none`, `scope`, `role`,
@@ -19,8 +21,16 @@ than it picks from, an image in the evidence, a `DecisionHandOff`); the
 caller then runs the job's text path on the agent's own model. Any other
 failure propagates as it is: the caller applies today's failure behaviour.
 
-`build_decision_model` is the one place a model object is created; tests
-replace it (`tests/decision_fakes.py`), so no test reaches the service.
+On a chat model the answer type is the output of a Pydantic AI agent in tool
+mode (the library's default for these models: one `final_result` tool the
+model must call, `tool_choice` required). There is no option limit and no
+probability: `allowed` is the model's own yes or no, and the threshold does
+not apply. An answer the library cannot validate is retried once, then
+`Unusable` is raised; nothing is handed over.
+
+`build_decision_model` and `build_chat_model` are the only places a model
+object is created; tests replace them (`tests/decision_fakes.py`,
+`tests/native_fakes.py`), so no test reaches a service.
 """
 
 from __future__ import annotations
@@ -33,11 +43,13 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 import pydantic_ai
 from pydantic import BaseModel, Field, WithJsonSchema, create_model
 from pydantic_ai import Agent as DecisionAgent
+from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
 from pydantic_ai.models import Model
 from pydantic_ai.models.decision import DecisionHandOff, DecisionModelSettings
+from pydantic_ai.settings import ModelSettings
 
-from app.config import get_settings
-from app.llm.jobs import OUTCOME_OK, OUTCOME_UNUSABLE, JobTarget
+from app.config import Settings, get_settings
+from app.llm.jobs import NATIVE_KINDS, OUTCOME_OK, OUTCOME_UNUSABLE, JobTarget, target_label
 from app.models.category import Category
 
 if TYPE_CHECKING:
@@ -47,7 +59,12 @@ if TYPE_CHECKING:
 # A server owns its output: no first-run banner from Pydantic AI.
 pydantic_ai.BANNER_ENABLED = False
 
+__all__ = ["target_label"]  # re-exported: the callers import it from here
+
 TYPESAFE_PREFIX = "typesafe:"
+# One retry of an answer the library cannot validate, then `Unusable`.
+CHAT_OUTPUT_RETRIES = 1
+CHAT_MAX_TOKENS = 256
 
 REASON_SCOPE = "scope"
 REASON_ROLE = "role"
@@ -60,6 +77,10 @@ class HandOver(Exception):
     def __init__(self, why: str) -> None:
         super().__init__(why)
         self.why = why
+
+
+class Unusable(Exception):
+    """A chat model's structured answer could not be validated, after one retry."""
 
 
 @dataclass
@@ -80,9 +101,26 @@ def build_decision_model(target: JobTarget) -> Model:
     return TypeSafeModel(target.model, provider=provider)
 
 
-def target_label(target: JobTarget) -> str:
-    """The model name a job record carries, e.g. `typesafe:jev-latest`."""
-    return f"{TYPESAFE_PREFIX}{target.model}"
+def build_chat_model(target: JobTarget, settings: Settings | None = None) -> Model:
+    """The chat model for an `llm:` or native target. Tests replace this function.
+
+    `llm:` is `LLM_BASE_URL` with `LLM_API_KEY` through Pydantic AI's
+    OpenAI-compatible chat model; a native form is the vendor's model
+    (`app.llm.providers.native.build_native_model`).
+    """
+    settings = settings or get_settings()
+    assert target.model
+    if target.kind in NATIVE_KINDS:
+        from app.llm.providers import native
+
+        return native.build_native_model(target.kind, target.model, settings)
+    if target.kind == "llm":
+        from pydantic_ai.models.openai import OpenAIChatModel
+        from pydantic_ai.providers.openai import OpenAIProvider
+
+        provider = OpenAIProvider(base_url=settings.llm_base_url, api_key=settings.llm_api_key)
+        return OpenAIChatModel(target.model, provider=provider)
+    raise ValueError(f"not a chat model target: {target.kind!r}")
 
 
 def _choice_limit(model: Model) -> int | None:
@@ -113,6 +151,8 @@ async def _ask(
     usage: DecisionUsage | None = None,
     settings: DecisionModelSettings | None = None,
 ) -> Any:
+    if target.kind != "typesafe":
+        return await _ask_chat(target, output_type, evidence, usage=usage)
     if images:
         raise HandOver("image")
     model = build_decision_model(target)
@@ -128,6 +168,40 @@ async def _ask(
         run_usage = result.usage
         usage.prompt_tokens = run_usage.input_tokens
         usage.completion_tokens = run_usage.output_tokens
+    return result.output
+
+
+async def _ask_chat(
+    target: JobTarget,
+    output_type: type[BaseModel],
+    evidence: str,
+    *,
+    usage: DecisionUsage | None = None,
+) -> Any:
+    """The typed answer from a chat model; `Unusable` when it cannot be validated."""
+    server = get_settings()
+    model = build_chat_model(target, server)
+    agent = DecisionAgent(
+        model,
+        output_type=output_type,
+        instructions=output_type.__doc__,
+        retries={"output": CHAT_OUTPUT_RETRIES},
+    )
+    settings = ModelSettings(
+        temperature=0.0,
+        max_tokens=CHAT_MAX_TOKENS,
+        # The vendor's client retries a failed call; parley adds none on top.
+        max_retries=max(0, server.http_retry_attempts - 1),
+    )
+    try:
+        result = await agent.run(evidence, model_settings=settings)
+    except ModelAPIError:
+        raise  # the call failed: today's failure behaviour
+    except UnexpectedModelBehavior as exc:
+        raise Unusable(str(exc)) from exc
+    if usage is not None:
+        usage.prompt_tokens = result.usage.input_tokens
+        usage.completion_tokens = result.usage.output_tokens
     return result.output
 
 
@@ -204,6 +278,7 @@ async def decide_boundary(
     """The verdict on a reply. `evidence` is today's payload (user message and reply).
 
     Raises `HandOver`, or any error of the call (the caller blocks with `check_failed`).
+    A chat model's answer that cannot be validated blocks with `check_unparseable`.
     """
     from app.agents.boundaries import (
         REASON_CHECK_UNPARSEABLE,
@@ -212,13 +287,17 @@ async def decide_boundary(
     )
     answer_type, reasons = boundary_answer_type(boundaries)
     usage = DecisionUsage()
-    # `allowed` alone decides, against the owner's bar, applied by the library.
+    # `allowed` alone decides, against the owner's bar, applied by the library
+    # (a decision model only: a chat model's yes or no has no probability).
     settings = DecisionModelSettings(
         decision_boolean_threshold=get_settings().boundary_check_allow_threshold
     )
-    answer = await _ask(
-        target, answer_type, evidence, options=len(reasons) + 1, usage=usage, settings=settings
-    )
+    try:
+        answer = await _ask(
+            target, answer_type, evidence, options=len(reasons) + 1, usage=usage, settings=settings
+        )
+    except Unusable:
+        return Verdict(allowed=False, reason=REASON_CHECK_UNPARSEABLE, outcome=OUTCOME_UNUSABLE)
     if answer.allowed:
         # A rule picked beside a yes only names a rule; the reply goes out.
         verdict = Verdict(allowed=True, reason=None)
@@ -266,8 +345,12 @@ async def decide_sentiment(
     images: int = 0,
     usage: DecisionUsage | None = None,
 ) -> float | None:
-    """The frustration score in [0.0, 1.0]. Raises `HandOver`, or any error of the call."""
-    answer = await _ask(target, SentimentAnswer, evidence, images=images, usage=usage)
+    """The frustration score in [0.0, 1.0], or `None` for a chat model's answer that
+    cannot be validated. Raises `HandOver`, or any error of the call."""
+    try:
+        answer = await _ask(target, SentimentAnswer, evidence, images=images, usage=usage)
+    except Unusable:
+        return None
     return SENTIMENT_LEVELS[answer.level]
 
 
@@ -318,7 +401,8 @@ async def decide_category(
     images: int = 0,
     usage: DecisionUsage | None = None,
 ) -> Category | None:
-    """The picked category, or `None` for `none`. Raises `HandOver`, or any error."""
+    """The picked category, or `None` for `none`. Raises `HandOver`, `Unusable` (a chat
+    model's answer that cannot be validated), or any error."""
     answer_type, by_label = category_answer_type(categories)
     answer = await _ask(
         target,

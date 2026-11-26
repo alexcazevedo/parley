@@ -417,6 +417,8 @@ Problems found against the tenant:
 | `tools[0].endpoint` | `invalid endpoint: ...` |
 | `channels[0].config` | `invalid events_url: ...` or `invalid base_url: ...` |
 | `mcp_servers[0].url` | `invalid url: ...` |
+| `agents[0].provider` | `unknown provider: use openai_compatible, openai, anthropic or google` |
+| `agents[0].provider` | `provider 'openai' is not configured on this server: OPENAI_API_KEY is not set` (likewise `anthropic` with `ANTHROPIC_API_KEY`, `google` with `GOOGLE_API_KEY`) |
 | `agents[0].mcp_servers[0]` | `unknown MCP server: not in the file and not a server of the tenant` |
 | `agents[0].tool_names[0]` | `unknown tool: not in the file, not a tool of the tenant and not a built-in` |
 | `channels[0].agent` | `unknown agent: not an agent key in this file` |

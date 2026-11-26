@@ -1,6 +1,10 @@
 """Replay a tenant's stored replies through the boundary check on a candidate model.
 
-`uv run python -m app.llm.compare --tenant <id> --model <llm:name|typesafe:name> [--limit N]`
+`uv run python -m app.llm.compare --tenant <id> --model <form:name> [--limit N]`
+
+The model is written as a job setting is: `llm:`, `openai:`, `anthropic:`,
+`google:` or `typesafe:` followed by the model. Each gets the typed check the
+boundary job would run on it (`app.llm.decisions.decide_boundary`).
 
 Reads the tenant's newest successful agent runs of agents that have boundaries
 and the reply check on, judges each stored reply again on the candidate and
@@ -27,14 +31,19 @@ from app.agents.boundaries import (
     Boundaries,
     Verdict,
     check_payload,
-    check_reply,
     effective_boundaries,
 )
 from app.config import get_settings
 from app.http_client import close_shared_client
 from app.llm.decisions import HandOver, decide_boundary
-from app.llm.factory import get_provider, resolve_model
-from app.llm.jobs import Job, JobSettingsError, JobTarget, job_target
+from app.llm.jobs import (
+    NATIVE_KINDS,
+    Job,
+    JobSettingsError,
+    JobTarget,
+    job_target,
+    key_setting_of,
+)
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun, AgentRunStatus
 from app.models.conversation import Conversation
@@ -45,6 +54,10 @@ logger = structlog.get_logger(__name__)
 DEFAULT_LIMIT = 200
 REPLY_PREVIEW_CHARS = 120
 _FAILURE_REASONS = frozenset({REASON_CHECK_FAILED, REASON_CHECK_UNPARSEABLE})
+_FORMS = (
+    "--model: must be `llm:<model>`, `openai:<model>`, `anthropic:<model>`, "
+    "`google:<model>` or `typesafe:<model>`"
+)
 
 
 class CompareError(Exception):
@@ -72,16 +85,18 @@ class _StoredRun:
 
 
 def parse_target(raw: str) -> JobTarget:
-    """`llm:<name>` or `typesafe:<name>`; raises `CompareError` otherwise."""
+    """A job setting's form (`llm:<name>`, `openai:<name>`, ...); `CompareError` otherwise."""
     settings = get_settings().model_copy(update={"boundary_check_model": raw})
     try:
         target = job_target(Job.BOUNDARY_CHECK, settings)
     except JobSettingsError:
-        raise CompareError("--model: must be `llm:<model>` or `typesafe:<model>`") from None
+        raise CompareError(_FORMS) from None
     if target.kind == "agent":
-        raise CompareError("--model: must be `llm:<model>` or `typesafe:<model>`")
+        raise CompareError(_FORMS)
     if target.kind == "typesafe" and not settings.typesafe_api_key:
         raise CompareError("--model: `typesafe:` needs TYPESAFE_API_KEY")
+    if target.kind in NATIVE_KINDS and not getattr(settings, f"{target.kind}_api_key", ""):
+        raise CompareError(f"--model: `{target.kind}:` needs {key_setting_of(target.kind)}")
     return target
 
 
@@ -133,26 +148,18 @@ async def _load(engine: AsyncEngine, tenant_id: uuid.UUID, limit: int) -> list[_
 
 async def _candidate(target: JobTarget, run: _StoredRun, reply: str) -> Verdict | None:
     """The candidate's verdict, or None when it gave no decision."""
-    if target.kind == "typesafe":
-        try:
-            return await decide_boundary(
-                target, boundaries=run.boundaries, evidence=check_payload(run.user_text, reply)
-            )
-        except HandOver as handed:
-            logger.info("compare.handed_over", why=handed.why)
-            return None
-        except Exception as exc:
-            logger.warning("compare.call_failed", error=type(exc).__name__)
-            return None
-    assert target.model is not None
-    verdict = await check_reply(
-        get_provider(run.agent),
-        model=target.model or resolve_model(run.agent),
-        boundaries=run.boundaries,
-        user_text=run.user_text,
-        reply_text=reply,
-    )
-    if not verdict.allowed and verdict.reason in _FAILURE_REASONS:
+    try:
+        verdict = await decide_boundary(
+            target, boundaries=run.boundaries, evidence=check_payload(run.user_text, reply)
+        )
+    except HandOver as handed:
+        logger.info("compare.handed_over", why=handed.why)
+        return None
+    except Exception as exc:
+        logger.warning("compare.call_failed", error=type(exc).__name__)
+        return None
+    # A chat model's answer that could not be validated gave no decision.
+    if target.kind != "typesafe" and verdict.reason in _FAILURE_REASONS:
         return None
     return verdict
 
@@ -202,7 +209,9 @@ async def run(argv: list[str], engine: AsyncEngine) -> int:
     """The command on `engine`: prints, returns the exit code."""
     parser = _Parser(prog="python -m app.llm.compare")
     parser.add_argument("--tenant", required=True, help="tenant id")
-    parser.add_argument("--model", required=True, help="llm:<name> or typesafe:<name>")
+    parser.add_argument(
+        "--model", required=True, help="llm:, openai:, anthropic:, google: or typesafe:<name>"
+    )
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     try:
         args = parser.parse_args(argv)

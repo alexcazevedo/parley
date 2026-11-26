@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     # Name of the token-limit field in the chat-completions payload; some
     # models want `max_completion_tokens`. One per deployment, not per agent.
     llm_max_tokens_param: str = Field(default="max_tokens", min_length=1)
+    # Keys for the native providers (`provider` = `openai`, `anthropic`,
+    # `google`; see app/llm/providers/native.py). Per server; empty = that
+    # provider is unavailable. `openai_compatible` uses LLM_API_KEY only.
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
+    google_api_key: str = ""
     # Short retry on 429/5xx for model calls, speech-to-text and GET tools
     # (see app/http_retry.py). Attempts count the first try; the wait doubles
     # from the base, a numeric Retry-After replaces it, both capped by the max.

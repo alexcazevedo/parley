@@ -5,98 +5,102 @@ parallel_default: sequential   # sequential | parallel
 owner: agent                   # human | agent (set by comb:auto)
 ---
 
-# A model per job (milestone 5)
+# Native providers (milestone 6)
 
-The brief is `docs/roadmap/2-model-per-job.md`; the decisions common to the
-roadmap are in `docs/roadmap/README.md`. This file is the short form.
+The brief is `docs/roadmap/3-native-providers.md`; the decisions common to
+the roadmap are in `docs/roadmap/README.md`. This file is the short form.
 
 ## What / why
 
-A turn makes up to five model calls besides the reply: the boundary check,
-sentiment, the department, the rolling summary and the handoff brief. All
-run on the agent's own model, the most expensive and slowest choice for a
-yes-or-no answer. This milestone lets the server owner give each job its own
-model, and run the three decisions on TypeSafe's decision model (Jev), which
-answers typed questions instead of writing text.
+A reply can only run on an endpoint that speaks the OpenAI chat-completions
+format, with one endpoint and one key for the whole server. Models from
+Anthropic and Google are reachable only through a compatibility layer, and
+two agents cannot use two vendors. This milestone lets an agent run on
+OpenAI, Anthropic or Google through their own APIs, and gives typed answers
+to the auxiliary decisions when they run on a chat model.
 
 ## Primary user story
 
-As the owner of a parley server, I set one environment variable per job and
-the boundary check, sentiment and department run on a small decision model,
-while replies stay on the agent's model; I can read from the data which
-model served each call and what it cost, and compare a model's boundary
-decisions with the recorded ones before I trust it.
+As the owner of a parley server, I put one key per vendor in the
+environment; a tenant then sets an agent's `provider` and `model`, and that
+agent's replies, tool calls and handoffs work as on any other, while every
+agent I do not touch keeps running exactly as before.
 
 ## In scope
 
-**A setting per job**, in the environment, the same for every tenant; unset
-means the agent's own model, exactly as today. A value is either another
-chat model on the configured endpoint, or TypeSafe's decision model (with
-`TYPESAFE_API_KEY`). A wrong value stops the server at start with a message
-naming the setting; so does a writing job pointed at a decision model.
+**Providers.** An agent's `provider` accepts `openai`, `anthropic` and
+`google` beside `openai_compatible`, which stays the default. Credentials
+are per server: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`. An
+agent naming a provider with no key, or an unknown provider, is refused at
+creation, on update and in the manifest, with a message naming the setting.
 
-**Decisions on TypeSafe**, through Pydantic AI's own support for it, with
-typed answers:
-- Boundary check: allowed or not, and which rule was broken (the scope, one
-  of the `never` items, staying in role, or none). The recorded reason is
-  built from that pick; no free text, no second call.
-- Sentiment: a frustration scale, mapped onto the existing threshold.
-- Department: one of the tenant's departments, or none.
+**The reply on a native provider** goes through Pydantic AI as one model
+request per step. Parley's loop is unchanged: it executes the tool calls
+through its registry and ledger, ends on a terminal tool, and checks the
+reply before it is sent. The model layer never runs a tool.
 
-**When the decision model cannot take a call** (more options than it
-accepts, an image, an unsure answer), that call goes to the agent's own
-model and the hand-over is recorded. An error or a timeout does not hand
-over: the job fails as today. The boundary check blocks the reply; sentiment
-and department do nothing.
+**The same on every provider**, proven with the library's fakes: a plain
+reply, tool calls and their results in history, a history written under one
+provider and continued under another, images, the token limit, usage, the
+turn deadline, and the error path that sends the agent's `error_message`.
 
-**Recorded.** One row per job call: the job, the model that served it, token
-use, latency, the outcome, whether it was handed over.
+**The default path does not move.** `openai_compatible` stays on the
+existing hand-written provider, with `LLM_BASE_URL`, `LLM_API_KEY`,
+`LLM_MODEL` and `LLM_MAX_TOKENS_PARAM`.
 
-**Compared before trusted.** A command replays a tenant's stored replies
-through the boundary check on a candidate model and prints where it
-disagrees with what was recorded.
+**One retry rule.** A failed model call on a native provider is retried by
+the vendor's client up to the existing `HTTP_RETRY_ATTEMPTS`; parley adds
+none on top.
 
-**Docs.** Configuration (the settings, and what each job sends to TypeSafe),
-agent behaviour (the jobs and what a smaller model risks), operations (the
-command, reading the recorded calls).
+**Recorded.** The agent run records the provider beside the model.
+
+**Typed answers on chat models.** A job the server owner sets to a model
+(`llm:`, `openai:`, `anthropic:` or `google:` followed by the model) gets a
+structured answer for the three decisions; the stub model learns that form.
+A job left unset keeps today's text prompt and parsing on the agent's own
+model. The writing jobs accept the same forms and still write text.
+
+**Docs.** Configuration, setup, manifest, agent behaviour, operations.
 
 ## Out of scope
 
-Typed answers on a chat model (they come with native providers, brief 3;
-a chat model set for a job answers in today's text form). Moving the reply
-to another provider. Streaming. Settings per tenant or per agent. A
-pre-check that skips the model for simple messages. A free-text reason from
-a second call. Comparing sentiment or department decisions (their inputs are
-not stored). Changing what any job decides or its thresholds. Any framework
-owning the loop.
+Moving `openai_compatible` onto Pydantic AI and deleting the hand-written
+provider (a follow-up, after the new path has run in production). Streaming.
+Credentials per tenant. Fallback from one provider to another. Routing by
+difficulty. Provider-specific agent fields. Prompt caching and reasoning
+settings. Speech-to-text and embeddings, which stay as they are. Other
+vendors. Any framework owning the loop.
 
 ## Constraints
 
-- With none of the new settings, every existing test passes unchanged.
-- Pydantic AI is used only as the model layer for the decision jobs.
-- No test calls TypeSafe or any model: fakes only.
-- Timeouts of the three decision jobs are unchanged, hand-over included.
+- With `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL` as the only model
+  settings, every existing test passes unchanged.
+- No test calls a real model. A live check runs only for a provider whose
+  key is in `.env`; none is on this machine.
+- Pydantic AI is imported only in `app/llm/decisions.py` and the new native
+  provider module.
 
 ## Success demo
 
-Done when, on a stack where the reply runs on one model and the boundary
-check, sentiment and department are set to TypeSafe's decision model, a
-customer message is answered; the recorded calls show which model served
-each job and its use; a reply that breaks a boundary is blocked, and is
-blocked when the decision model errors or times out; an agent with more
-`never` items than the decision model accepts has its check handed to the
-agent's model and recorded so; the comparison command prints the stored
-replies on which a candidate model disagrees; and with no new setting every
-existing test passes unchanged. The decision model is a fake in tests; the
-real service is exercised only when `TYPESAFE_API_KEY` is set.
+Done when, on one stack with credentials for two vendors, two agents of one
+tenant, each on a different provider, answer a customer; each run records
+its provider and model; a turn with a tool call and a turn that hands off
+work on both; a conversation started on one provider continues correctly
+after the agent is switched to the other; an agent created with a provider
+that has no credentials is refused with a message naming the setting; a
+decision job set to a chat model returns a typed answer; and a deployment
+with only `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL` passes every
+existing test unchanged. The vendors are fakes in tests.
 
 ## Grill log
 
 | # | question | recommendation | answer | tag |
 |---|----------|----------------|--------|-----|
 | 1 | Mode | (given by the human) | mvp | AGREE |
-| 2 | How is the boundary reason kept useful without free text? | The pick of the broken rule; no second call | As recommended; `check_failed` and `check_unparseable` stay | AGREE |
-| 3 | Jobs set per agent too, or per server only? | Per server only | Per server only, in the environment | AGREE |
-| 4 | Do the two writing jobs get a setting? | Yes, same mechanism; refused at startup on a decision model | As recommended; the guide states the risk | AGREE |
-| 5 | Add a pre-check that skips the model for simple messages? | No, later, with data | No | AGREE |
-| 6 | What happens when the decision model cannot answer a call? | That call goes to the agent's model, for every cause including errors and timeouts | Hand over only what it cannot take (too many options, an image, unsure). An error or timeout fails as today, with no hand-over | DIVERGE: the brief already decides "failing the same way" and "timeouts unchanged"; a retry after an error would reopen that and add latency |
+| 2 | Which providers ship? | `openai`, `anthropic`, `google`, plus `openai_compatible` | As recommended | AGREE |
+| 3 | Speech-to-text and embeddings unchanged? | Yes | Yes | AGREE |
+| 4 | Provider-specific features? | None that needs a field or setting; no caching work | As recommended; caching a vendor applies by itself stays on; request-level caching is a follow-up | AGREE |
+| 5 | Credentials per server or per tenant? | Per server; per tenant is a follow-up | Per server | AGREE |
+| 6 | What serves `openai_compatible`? | The existing hand-written provider, untouched; only the new values go through Pydantic AI | As recommended; retiring the old path is a follow-up | AGREE |
+| 7 | Retire `LLM_MAX_TOKENS_PARAM`? | No; it belongs to the hand-written provider | It stays, for `openai_compatible` only | AGREE |
+| 8 | Which jobs get typed answers on a chat model? | A job the owner sets to a model; an unset job keeps the text form | As recommended; writing jobs accept the same forms and write text | AGREE |

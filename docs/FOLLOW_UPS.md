@@ -28,7 +28,10 @@ longer apply; check the code before relying on it.
 - Measure block and false-block rates on a real model (From the boundaries run).
 - A pre-check job: judge the customer's message before the agent answers (From the model per job run).
 - Comparing sentiment and department on a candidate model, as the boundary check can be (From the model per job run).
-- Typed answers on a chat model: a `llm:` job answers in text form; typed answers wait for native providers (From the model per job run).
+- Typed answers on a chat model: done for `llm:`, `openai:`, `anthropic:` and `google:` jobs; an unset job still answers in text (From the native providers run).
+- Retire the hand-written `openai_compatible` provider (From the native providers run).
+- Credentials per tenant for a native provider (From the native providers run).
+- Prompt caching, with measurements (From the native providers run).
 - Settings per agent or per tenant for a job's model; today one setting for the server (From the model per job run).
 
 **Turns, delivery and recovery**
@@ -461,6 +464,25 @@ PRD epics E1 to E7 are now done. What is left over:
 - **Typed answers on a chat model.** A job set to `llm:<model>` asks in text and parses
   the text, as before. Only `typesafe:` jobs get typed answers. They come to chat
   models with native providers (`docs/roadmap/3-native-providers.md`).
+  **Done** for `llm:`, `openai:`, `anthropic:` and `google:` jobs (the library's tool
+  mode, one retry, then `check_unparseable`). A job left unset still runs on the
+  agent's model in text; typed answers for it are open (see the next section).
+
+## From the native providers run
+
+- **Retire the hand-written provider.** `openai_compatible` is still
+  `app/llm/providers/openai_compatible.py`, with its own retry in `app/http_retry.py`.
+  Running it through Pydantic AI as well would leave one path; it was not done, so
+  that no existing deployment changes.
+- **Credentials per tenant.** `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and
+  `GOOGLE_API_KEY` are one per server. A tenant cannot bring its own.
+- **Prompt caching.** Not used on any provider. Add it only with measured cost and
+  latency from a real run.
+- **Typed answers for unset jobs.** A job with an empty setting keeps the agent's
+  model and the text prompt, whatever the provider.
+- **No real vendor was called.** Image formats, token reporting, tool call ids
+  across a switch and OpenAI's strict mode on the pick-one schemas are unverified
+  (`scripts/demo_native_providers.py`, see operations).
 - **Settings per agent or per tenant.** `BOUNDARY_CHECK_MODEL`, `SENTIMENT_MODEL`,
   `CATEGORY_MODEL`, `SUMMARY_MODEL` and `HANDOFF_BRIEF_MODEL` are environment
   settings, the same for every tenant and agent. A tenant that must not have its

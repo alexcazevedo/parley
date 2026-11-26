@@ -5,12 +5,18 @@ sentiment, category, the rolling summary and the handoff brief. Each has one
 setting (`<JOB>_MODEL`, the same for every tenant):
 
 - empty: the agent's own model, exactly as before;
-- `llm:<model>`: that chat model on `LLM_BASE_URL` with `LLM_API_KEY`, through
-  the existing provider, with the job's usual prompt and parsing;
+- `llm:<model>`: that chat model on `LLM_BASE_URL` with `LLM_API_KEY`;
+- `openai:<model>`, `anthropic:<model>`, `google:<model>`: that vendor's model
+  through its own API (`app.llm.providers.native`); the vendor's key
+  (`OPENAI_API_KEY`, ...) must be set;
 - `typesafe:<model>`: TypeSafe's decision model. Decision jobs only, and
-  `TYPESAFE_API_KEY` must be set. The job then runs through
-  `app/llm/decisions.py`; a call the decision model cannot take is handed
-  to the agent's model on the text path.
+  `TYPESAFE_API_KEY` must be set. A call the decision model cannot take is
+  handed to the agent's model on the text path.
+
+A decision job on any of these runs through `app/llm/decisions.py` and gets a
+typed answer (the four chat forms through Pydantic AI's chat models, never
+handed over). A writing job writes text: on `llm:` through the existing
+provider, on a native form through `NativeProvider`.
 
 `validate_job_settings` refuses anything else at start (API and worker).
 
@@ -31,7 +37,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings, get_settings
-from app.llm.base import LLMResponse
+from app.llm.base import LLMProvider, LLMResponse
 from app.llm.factory import resolve_model
 from app.models.agent import Agent
 from app.models.model_job_call import ModelJobCall
@@ -56,13 +62,21 @@ OUTCOME_TIMEOUT = "timeout"
 # An answer the job could not use (unparseable, out of range, empty).
 OUTCOME_UNUSABLE = "unusable"
 
-_PREFIX_LLM = "llm:"
-_PREFIX_TYPESAFE = "typesafe:"
+# Setting prefix -> target kind.
+_PREFIXES = ("llm", "openai", "anthropic", "google", "typesafe")
 
 # Recording waits at most this long for a lock; it must never hold up a turn.
 _RECORD_LOCK_TIMEOUT = "1s"
 
-TargetKind = Literal["agent", "llm", "typesafe"]
+TargetKind = Literal["agent", "llm", "openai", "anthropic", "google", "typesafe"]
+
+# Vendor APIs a job can name directly (`app.llm.providers.native.NATIVE_PROVIDERS`,
+# kept here so this module does not load Pydantic AI).
+NATIVE_KINDS: frozenset[str] = frozenset({"openai", "anthropic", "google"})
+# Chat models: a decision job on one gets a typed answer through Pydantic AI.
+CHAT_KINDS: frozenset[str] = NATIVE_KINDS | {"llm"}
+# Kinds whose decision jobs run through `app.llm.decisions` (typed answers).
+TYPED_KINDS: frozenset[str] = CHAT_KINDS | {"typesafe"}
 
 
 class JobSettingsError(RuntimeError):
@@ -85,7 +99,8 @@ def job_target(job: Job, settings: Settings | None = None) -> JobTarget:
     raw = (getattr(settings, f"{job.value}_model") or "").strip()
     if not raw:
         return JobTarget(kind="agent", model=None)
-    for prefix, kind in ((_PREFIX_LLM, "llm"), (_PREFIX_TYPESAFE, "typesafe")):
+    for kind in _PREFIXES:
+        prefix = f"{kind}:"
         if raw.startswith(prefix):
             model = raw[len(prefix) :].strip()
             if not model:
@@ -94,14 +109,31 @@ def job_target(job: Job, settings: Settings | None = None) -> JobTarget:
                 )
             return JobTarget(kind=kind, model=model)  # type: ignore[arg-type]
     raise JobSettingsError(
-        f"{setting_name(job)}: must be empty, `llm:<model>` or `typesafe:<model>`"
+        f"{setting_name(job)}: must be empty, `llm:<model>`, `openai:<model>`, "
+        "`anthropic:<model>`, `google:<model>` or `typesafe:<model>`"
     )
+
+
+def target_label(target: JobTarget) -> str:
+    """The setting's own text, e.g. `typesafe:jev-latest` or `openai:gpt-4o-mini`."""
+    return f"{target.kind}:{target.model}"
+
+
+def key_setting_of(kind: str) -> str:
+    """The setting holding a native kind's key, e.g. `ANTHROPIC_API_KEY`."""
+    return f"{kind.upper()}_API_KEY"
 
 
 def validate_job_settings(settings: Settings) -> None:
     """Refuse a bad job setting at start (API and worker)."""
     for job in Job:
         target = job_target(job, settings)
+        if target.kind in NATIVE_KINDS:
+            if not getattr(settings, f"{target.kind}_api_key", ""):
+                raise JobSettingsError(
+                    f"{setting_name(job)}: `{target.kind}:` needs {key_setting_of(target.kind)}"
+                )
+            continue
         if target.kind != "typesafe":
             continue
         if job not in DECISION_JOBS:
@@ -117,9 +149,18 @@ def job_model(job: Job, agent: Agent, settings: Settings | None = None) -> str:
     """The chat model name the job's text path uses."""
     settings = settings if settings is not None else get_settings()
     target = job_target(job, settings)
-    if target.kind == "llm" and target.model:
+    if target.kind in CHAT_KINDS and target.model:
         return target.model
     return resolve_model(agent, settings)
+
+
+def writing_provider(target: JobTarget, fallback: LLMProvider) -> LLMProvider:
+    """The provider a writing job uses: `NativeProvider` on a native form, else `fallback`."""
+    if target.kind in NATIVE_KINDS:
+        from app.llm.providers.native import NativeProvider
+
+        return NativeProvider(target.kind)
+    return fallback
 
 
 class CallTimer:

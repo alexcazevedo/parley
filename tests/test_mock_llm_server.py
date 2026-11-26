@@ -1,6 +1,7 @@
 """The stub model (scripts/mock_llm_server.py) against the real provider and parsers."""
 
 import json
+import uuid
 from types import SimpleNamespace
 from typing import Any
 
@@ -13,10 +14,17 @@ from app.agents.sentiment import SENTIMENT_SYSTEM_PROMPT, _parse_score
 from app.conversations.summary import SUMMARIZER_SYSTEM_PROMPT
 from app.handoff.summarizer import HANDOFF_SUMMARY_SYSTEM_PROMPT
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage, ToolSpec
+from app.llm.decisions import decide_boundary, decide_category, decide_sentiment
+from app.llm.jobs import JobTarget
 from app.llm.providers.openai_compatible import OpenAICompatibleProvider
 from app.tools.builtin import HANDOFF_SPEC, SEARCH_KNOWLEDGE_SPEC
 from app.tools.validation import validate_arguments
-from scripts.mock_llm_server import AUXILIARY_ANSWERS, app
+from scripts.mock_llm_server import (
+    AUXILIARY_ANSWERS,
+    STRUCTURED_ANSWERS,
+    STRUCTURED_TOOL,
+    app,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -293,3 +301,94 @@ async def test_reply_after_a_tool_command_result():
     message = body["choices"][0]["message"]
     assert message["content"] == 'Stub tool result: {"ok": true}'
     assert not message.get("tool_calls")
+
+
+# --- typed decisions (a decision job set to `llm:<model>`) ------------------------
+#
+# The stub's structured answers go through the real Pydantic AI chat model and
+# the real answer types: if the form the library sends stops matching what the
+# stub recognizes, the stub answers with text, the library cannot validate it
+# and these tests fail.
+
+
+@pytest.fixture
+async def stub_chat_model(monkeypatch):
+    """`build_chat_model` on the stub: the real OpenAI-compatible chat model of
+    Pydantic AI, over an ASGI transport. Records every request body."""
+    import httpx2
+    from pydantic_ai.models.openai import OpenAIChatModel
+    from pydantic_ai.providers.openai import OpenAIProvider
+
+    import app.llm.decisions as decisions_module
+
+    bodies: list[dict[str, Any]] = []
+
+    class Recording(httpx2.ASGITransport):
+        async def handle_async_request(self, request):
+            bodies.append(json.loads(request.content))
+            return await super().handle_async_request(request)
+
+    clients = []
+
+    def build(target, settings=None):
+        client = httpx2.AsyncClient(transport=Recording(app=app))
+        clients.append(client)
+        provider = OpenAIProvider(base_url="http://stub/v1", api_key="stub", http_client=client)
+        return OpenAIChatModel(target.model, provider=provider)
+
+    monkeypatch.setattr(decisions_module, "build_chat_model", build)
+    yield bodies
+    for client in clients:
+        await client.aclose()
+
+
+STUB = JobTarget(kind="llm", model="stub")
+
+
+def _assert_structured_form(body: dict[str, Any], field: str) -> None:
+    """The request shape the stub recognizes (scripts/mock_llm_server.py)."""
+    assert body["tool_choice"] == "required"
+    [tool] = body["tools"]
+    assert tool["function"]["name"] == STRUCTURED_TOOL
+    assert field in tool["function"]["parameters"]["properties"]
+
+
+async def test_typed_boundary_check_is_allowed(stub_chat_model):
+    boundaries = Boundaries(
+        scopes=("orders",), never=("refunds",), refusal_message="no", check_enabled=True
+    )
+    verdict = await decide_boundary(STUB, boundaries=boundaries, evidence='{"reply": "x"}')
+    assert (verdict.allowed, verdict.reason, verdict.outcome) == (True, None, "ok")
+    [body] = stub_chat_model
+    _assert_structured_form(body, "allowed")
+
+
+async def test_typed_sentiment_is_calm(stub_chat_model):
+    score = await decide_sentiment(STUB, evidence="Conversation transcript:\nuser: hi")
+    assert score == 0.0
+    [body] = stub_chat_model
+    _assert_structured_form(body, "level")
+
+
+async def test_typed_category_is_none(stub_chat_model):
+    category = SimpleNamespace(id=uuid.uuid4(), name="Billing", description="invoices")
+    chosen = await decide_category(
+        STUB, categories=[category], evidence="Conversation transcript:\nuser: hi"  # type: ignore[list-item]
+    )
+    assert chosen is None
+    [body] = stub_chat_model
+    _assert_structured_form(body, "department")
+
+
+async def test_every_structured_answer_validates():
+    """Each fixed answer is valid for its answer type."""
+    from app.llm.decisions import SentimentAnswer, boundary_answer_type, category_answer_type
+
+    boundary_type, _ = boundary_answer_type(
+        Boundaries(scopes=("a",), never=("b",), refusal_message="n", check_enabled=True)
+    )
+    category_type, _ = category_answer_type([])
+    types = {"allowed": boundary_type, "level": SentimentAnswer, "department": category_type}
+    assert [field for field, _ in STRUCTURED_ANSWERS] == list(types)
+    for field, answer in STRUCTURED_ANSWERS:
+        types[field].model_validate(answer)
