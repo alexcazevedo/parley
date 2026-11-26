@@ -1,5 +1,7 @@
 # Brief 4: streaming replies on web chat
 
+**Status: deferred (decided 2026-11-26).** A run was started for this brief and stopped at its first open item, "is this milestone wanted": the answer was no, and nothing was built. Reasons: the only tenant in production uses the `external` channel, which delivers whole messages, and streaming is web chat only; every production agent is on `openai_compatible`, whose provider does not stream; the reply check is on by default, so such agents would show "writing" and then the checked reply, with no streamed text; and briefs 1 to 3 were deployed but not yet in use. Reopen when a named web chat customer needs it, with agents whose reply check is off, or for whom "writing" followed by the checked reply is worth the work. A new question to settle then: streaming for the native providers only, or also for the hand-written provider that serves `openai_compatible`.
+
 Mode: `mvp`. Routing profile `cloud`, sequential. Needs brief 3 done. Build it only when a channel needs it: it is the least valuable of the four and the one most in tension with how parley protects a reply.
 
 ## The problem
