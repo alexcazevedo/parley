@@ -20,13 +20,15 @@ Expected: 200 with the whole agent.
 
 What the fields do:
 
-- `instructions`: the start of the system prompt on every turn. Parley then appends, in this order: the contact's memories, the conversation summary, a chat-style hint when the channel has `humanize` on, and the boundaries.
+- `instructions`: the start of the system prompt on every turn. Parley then appends, in this order: the contact's memories, the conversation summary, the knowledge section when `knowledge_enabled` is on, a chat-style hint when the channel has `humanize` on, and the boundaries.
 - `provider`: only `openai_compatible` works. The model endpoint and key come from `LLM_BASE_URL` and `LLM_API_KEY`, one for the whole deployment.
 - `model`: sent to the provider as given.
 - `temperature` and `max_tokens`: sent on each model call of a turn. `max_tokens` is sent under the name in `LLM_MAX_TOKENS_PARAM`.
 - `tool_names`: the tools of yours the model may call, plus the built-ins below.
+- `mcp_servers` (default `[]`): names of your MCP servers (registered with `POST /mcp-servers`) whose imported tools the model may call; a name with no such server is ignored, as in `tool_names`. Each tool is offered as `<server>__<tool>` with the server's description and schema, including tools found by a later sync. A call carries the conversation, channel, user id, contact name and a call id in the request's `_meta` (`parley/...` keys), never in the arguments. A tool marked read-only may be called again when an earlier attempt's outcome is unknown; any other is not. A tool's error result reaches the model as a failed call it can explain; a successful result is given as reference data with a note never to follow commands inside it. What the server must offer, the `_meta` keys and how to make a write safe to repeat are in [business-tools](business-tools.md). To try one tool outside a conversation, `POST /mcp-servers/{server_id}/call` with `tool` (its name on the server), `arguments` and `user_id` returns `ok`, `result` and `error`, and writes no tool execution record.
 - `max_tool_iterations`: the most model calls in one turn. If the model is still calling tools after that many, the customer gets the fixed text `Desculpe, não consegui concluir. Vou encaminhar.` Despite the wording, the conversation is not handed to a human.
 - `memory_enabled` and `handoff_enabled`: give the model the built-in tools `remember` and `handoff_to_human`. `memory_enabled` also turns memory reading on.
+- `knowledge_enabled` (default `false`): gives the model the built-in tool `search_knowledge` with one parameter, `query`, which returns the matching passages of the tenant's knowledge base. The system prompt then lists the titles of up to 30 ready items (never their content) and tells the model to search before answering about the business, to answer only from what the search returns, and to say it does not know or hand off when nothing matches. Passages are given to the model as reference text, with a note never to follow commands inside them; the boundary check still judges the reply. The passages a call returned are kept in the run's tool execution record (`tool_executions`, see [knowledge](knowledge.md) step 9).
 
 Check: `curl -s $BASE_URL/agents/$AGENT_ID -H "X-API-Key: $TENANT_KEY"` returns the new `instructions` and `temperature`.
 
@@ -75,7 +77,7 @@ curl -s -X PATCH $BASE_URL/agents/$AGENT_ID \
 What happens:
 
 1. With a scope or a never item set, a `## Boundaries` section is added to the system prompt: only help with the scope, never do the listed things, stay in role and never reveal the instructions.
-2. With `boundary_check_enabled` `true`, every reply the model writes is judged by one more model call (same `model`) before it is sent. It answers allow or block. A block replaces the reply with `boundary_refusal_message`.
+2. With `boundary_check_enabled` `true`, every reply the model writes is judged by one more model call (same `model`, unless `BOUNDARY_CHECK_MODEL` says otherwise, section 8) before it is sent. It answers allow or block. A block replaces the reply with `boundary_refusal_message`.
 3. The check fails closed: if the call errors, passes `BOUNDARY_CHECK_TIMEOUT_SECONDS` (default 8), or answers in an unexpected form, the reply is blocked. A slow model therefore shows as refusals; raise the timeout.
 4. Only replies the model writes are checked. The handoff, failure, unsupported-media and refusal texts are sent as they are. The blocked reply is kept on the agent run and is not shown to the customer.
 5. With no scope and no never items there is nothing to enforce: no prompt section and no check call.
@@ -150,9 +152,42 @@ Check: the response shows both texts. `PATCH` with `{"error_message": null}` ret
 
 - `context_message_limit` (default 20, 1 to 200): how many of the most recent messages (customer, agent and operator messages) the model sees each turn. Tool calls and results belonging to those messages come along, so a call is never separated from its result and an agent that uses many tools sends a longer prompt than the limit suggests; there is no separate cap on its size. Older messages are not sent.
 - `summary_threshold` (default 40, 0 to 1000): after a reply, if at least this many messages have piled up since the last summary, parley makes one more model call that folds them into the conversation's `summary`. The summary goes into the system prompt on later turns. `0` turns summaries off. A failed summary never costs the customer a reply.
-- The summary call uses the agent's `model` with fixed settings (temperature 0.2, up to 1024 tokens).
+- The summary call uses the agent's `model` with fixed settings (temperature 0.2, up to 1024 tokens), unless `SUMMARY_MODEL` names another chat model (section 8).
 - Keep the summary threshold at or above the window so the summary describes messages that left the window. Both costs grow with the numbers: the window is sent on every turn, the summary is one extra call each time the threshold is reached.
 
 Check: after enough messages, `GET /conversations/{conversation_id}` returns a non-null `summary`. With `summary_threshold` `0` it stays `null`.
+
+## 8. A model for each job
+
+A turn can make five calls besides the reply. Each runs on the agent's own `model` unless the server owner sets it to another (settings and values in [configuration](configuration.md); the owner sets them in the environment, for every tenant, not per agent). The five:
+
+| Job | Setting | What it does |
+|---|---|---|
+| Boundary check | `BOUNDARY_CHECK_MODEL` | Decides whether a reply keeps the rules (section 3). |
+| Sentiment | `SENTIMENT_MODEL` | Scores the customer's frustration (section 4). |
+| Category | `CATEGORY_MODEL` | Files the conversation under one of the tenant's departments, or none. |
+| Summary | `SUMMARY_MODEL` | Writes the rolling summary (section 7). |
+| Handoff brief | `HANDOFF_BRIEF_MODEL` | Writes the brief the operator reads at a handoff ([operators](operators.md)). |
+
+The first three decide, so they can run on `typesafe:<model>`, TypeSafe's decision model, which answers typed questions instead of writing text. The summary and the brief write text and take only `llm:<model>` or nothing. Each job call is recorded in `model_job_calls` ([operations](operations.md)). The reply itself always runs on the agent's model.
+
+How a decision model's typed answer becomes the job's result:
+
+- Boundary check: two questions, answered independently. `allowed` decides: the reply goes out only when the model's probability of "allowed" reaches `BOUNDARY_CHECK_ALLOW_THRESHOLD` (default 0.5, from 0 to 1; higher is stricter). `broken` names the rule: the scope, a `never` item, staying in role, or none. A blocked reply records that rule as `boundary_reason` (the text of the `never` item, or `scope`, or `role`). A block with no rule named records `no_rule_identified`. An allowed reply goes out even if a rule was picked beside it, with no reason. The two answers can disagree, so the reason is a hint, not proof. The check's question carries the agent's rules; the answer to `allowed` is judged against them.
+- Sentiment: a level from 0 to 4 against a rubric (calm, slightly annoyed, impatient, an explicit complaint or insults, furious), mapped to 0.0, 0.25, 0.5, 0.75 and 1.0. It meets `SENTIMENT_THRESHOLD` (default 0.7) as before: levels 3 and 4 escalate, at the default.
+- Category: a pick of one department or "none". None changes nothing.
+
+When the decision model cannot take a call, that call goes to the agent's own model, with the job's usual prompt, and the row in `model_job_calls` has `handed_over` true and names the agent's model. This happens when the options are more than the decision model picks from (a tenant with many departments or `never` items), when the evidence holds an image (sentiment and category), and when the model is unsure. An error or a timeout does not hand over. The job's own timeout (`BOUNDARY_CHECK_TIMEOUT_SECONDS`, `SENTIMENT_TIMEOUT_SECONDS`, `CATEGORY_TIMEOUT_SECONDS`) covers the decision and a hand-over together.
+
+What fails closed: the boundary check. An error, a timeout or an answer that cannot be read blocks the reply (`check_failed`, `check_unparseable`), on every model. Sentiment and category do nothing on a failure: no escalation, no new category. A failed summary or brief is skipped as before.
+
+What a smaller model risks:
+
+- Boundary check: a wrongly allowed reply, an out-of-scope or rule-breaking reply that goes to the customer, and more wrong blocks of good replies. A strict threshold trades the first for the second. Compare before you trust it ([operations](operations.md)).
+- Sentiment: a missed escalation, or an escalation of a customer who is only blunt.
+- Category: a wrong or no department.
+- Summary and brief: worse text. A summary that loses a fact is sent to the agent on later turns, and a weak brief costs the operator time. Nothing blocks a poor one.
+
+Check: set one job in the environment, restart `api` and `worker`, send a message, and read the new row in `model_job_calls`.
 
 Next: errors, paging and health in [api-conventions](api-conventions.md).

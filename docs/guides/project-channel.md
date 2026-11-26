@@ -30,7 +30,7 @@ Rules for this channel:
 - The project's inbox is the source of truth. Parley keeps a copy so the agent has context.
 - Agent replies are text only. Parley sends nothing to the customer itself: a reply reaches the customer only when the project shows it.
 - Parley's waiting lines and operator page are not used. A handoff also puts the conversation in parley's waiting line; ignore it.
-- A customer is the `user_id` the project sends. A conversation is reused while it is not `CLOSED`; after `POST /conversations/{conversation_id}/close` the next message opens a new conversation with a new id. Events name the conversation, so the project keeps a map from `conversation_id` to its own customer.
+- A customer is the `user_id` the project sends. It is also what the project's own MCP server receives as `parley/user_id` when the agent calls a business tool ([business-tools](business-tools.md)). A conversation is reused while it is not `CLOSED`; after `POST /conversations/{conversation_id}/close` the next message opens a new conversation with a new id. Events name the conversation, so the project keeps a map from `conversation_id` to its own customer.
 
 ## 2. Create the channel
 

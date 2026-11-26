@@ -43,6 +43,11 @@ class Agent(Base, TenantScoped):
         server_default=DEFAULT_HANDOFF_MESSAGE,
     )
     tool_names: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    # Names of the tenant's MCP servers whose imported tools the agent gets
+    # (app/tools/mcp.py); a name with no such server is ignored. Migration 0027.
+    mcp_servers: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=sa.text("'[]'::jsonb")
+    )
     context_message_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     summary_threshold: Mapped[int] = mapped_column(Integer, nullable=False, default=40)
     # Per-agent opt-in for the sentiment-triggered escalation classifier (see
@@ -63,6 +68,11 @@ class Agent(Base, TenantScoped):
     # 0017); null means "use the default constant".
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     unsupported_media_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Built-in `search_knowledge` tool and the knowledge section of the system
+    # prompt (app/tools/builtin.py, app/agents/context.py). Migration 0022.
+    knowledge_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa.false()
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -47,6 +47,18 @@ Create tools before the agent that uses them. Skip this step for an agent with n
 
 Arguments from the model go in the query string for `GET` and `DELETE`, and in a JSON body for `POST`, `PUT` and `PATCH`. Redirects are not followed. Tool requests send `Accept-Encoding: identity`; a response with any other `Content-Encoding` is a failed result (`unsupported response encoding`).
 
+Every tool request also carries who the call is for, in headers. The arguments, query string and body are not changed. To give the agent a whole set of tools from one MCP server, with discovery, see [business-tools](business-tools.md); the agent field for it is `mcp_servers`.
+
+| Header | Value |
+|---|---|
+| `X-Parley-Conversation-Id` | The conversation id. |
+| `X-Parley-Channel-Id` | The conversation's channel id. |
+| `X-Parley-User-Id` | The contact's `user_id`: the id your app gave parley for that customer. |
+| `X-Parley-Contact-Name` | The contact's name, percent-encoded (UTF-8). Left out when the contact has no name. |
+| `X-Parley-Call-Id` | A UUID, new for each call. Retries of a `GET` inside one call, and a repeat of a `GET` whose first outcome is unknown, send the same id. |
+
+The same values are stored on the call's record. If `header_name` below is one of these names, the context header is sent instead of the token.
+
 `auth_config` is an object with `type` and `token`. `{"type": "bearer", "token": "..."}` sends `Authorization: Bearer ...`. `{"type": "header", "token": "...", "header_name": "X-Key"}` sends the token in that header (`Authorization` when `header_name` is omitted). Any other `type` sends no auth. It is encrypted with `SECRETS_KEY`; with a placeholder key the request fails with 500.
 
 The endpoint must pass the address guard (422 `invalid endpoint: ...` otherwise):
@@ -85,6 +97,7 @@ Check: `curl -s $BASE_URL/tools -H "X-API-Key: $TENANT_KEY"` lists it, and the r
 | `max_tool_iterations` | `5` | 1 to 20 | Most model calls in one turn; each may call tools. |
 | `memory_enabled` | `true` | | Gives the agent the built-in `remember` tool and long-term memories. |
 | `handoff_enabled` | `true` | | Gives the agent the built-in `handoff_to_human` tool. |
+| `knowledge_enabled` | `false` | | Gives the agent the built-in `search_knowledge` tool, which reads the tenant's knowledge base. Fill it first: [knowledge](knowledge.md). |
 | `tool_names` | `[]` | | Names of your tools this agent may call. Not checked at creation: a name with no such tool is silently never called. |
 | `context_message_limit` | `20` | 1 to 200 | Recent messages sent to the model each turn. |
 | `summary_threshold` | `40` | 0 to 1000 | Message count that triggers a summary of older messages. `0` turns summaries off. |
@@ -183,5 +196,7 @@ Check: `curl -s $BASE_URL/contacts/$CONTACT_ID -H "X-API-Key: $TENANT_KEY"` retu
 | `$CONTACT_ID` | step 5 `id` | memories, contact edits |
 
 The admin key is needed only to create more tenants.
+
+Optional: give the agent facts about the business (hours, prices, policies, documents) in [knowledge](knowledge.md), then switch it on with `knowledge_enabled`.
 
 Next: send messages through the channel in [messaging](messaging.md).

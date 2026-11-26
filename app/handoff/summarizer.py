@@ -23,7 +23,17 @@ from app.agents.loading import load_conversation_agent
 from app.db import end_transaction
 from app.handoff.service import HandoffService
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage
-from app.llm.factory import get_provider, resolve_model
+from app.llm.factory import get_provider
+from app.llm.jobs import (
+    OUTCOME_OK,
+    OUTCOME_UNUSABLE,
+    CallTimer,
+    Job,
+    failure_outcome,
+    job_model,
+    record_job_call,
+    usage_of,
+)
 from app.memory.service import MemoryService
 from app.models.agent import Agent
 from app.models.conversation import Conversation
@@ -71,6 +81,8 @@ async def generate_handoff_summary(
     Never raises: any exception (including a timeout) is logged and turned
     into `None` so a broken/slow summarizer never blocks the handoff.
     """
+    tenant_id, conversation_id = conversation.tenant_id, conversation.id
+    called: CallTimer | None = None
     try:
         # Missing or another tenant's agent: no brief (the loader logs a mismatch).
         agent = await load_conversation_agent(session, conversation)
@@ -81,18 +93,43 @@ async def generate_handoff_summary(
             return None
         prompt = await _build_prompt(session, agent, conversation, reason)
         provider = get_provider(agent)
-        model = resolve_model(agent)
+        model = job_model(Job.HANDOFF_BRIEF, agent)
         # No transaction open during the model call; the timeout wraps only it.
         await end_transaction(session)
+        called = CallTimer()
         response = await asyncio.wait_for(
             provider.complete(prompt, model=model, temperature=0.2, max_tokens=512),
             timeout=SUMMARY_TIMEOUT_SECONDS,
         )
         summary = (response.content or "").strip()
-        return summary or None
-    except Exception:
-        logger.exception("handoff.summary_failed", conversation_id=str(conversation.id))
+    except Exception as exc:
+        logger.exception("handoff.summary_failed", conversation_id=str(conversation_id))
+        if called is not None:
+            await record_job_call(
+                session,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                agent_run_id=None,
+                job=Job.HANDOFF_BRIEF,
+                model=model,
+                outcome=failure_outcome(exc),
+                latency_ms=called.elapsed_ms(),
+            )
         return None
+    prompt_tokens, completion_tokens = usage_of(response)
+    await record_job_call(
+        session,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        agent_run_id=None,
+        job=Job.HANDOFF_BRIEF,
+        model=model,
+        outcome=OUTCOME_OK if summary else OUTCOME_UNUSABLE,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        latency_ms=called.elapsed_ms(),
+    )
+    return summary or None
 
 
 async def handoff_with_summary(

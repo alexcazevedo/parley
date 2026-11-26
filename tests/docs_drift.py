@@ -37,6 +37,8 @@ HIDDEN_ROUTES: set[tuple[str, str]] = {
 
 # Upper-snake names in the docs that are not fields of Settings.
 NON_SETTINGS_NAMES: set[str] = {
+    # Shell variable of the demo stack (docker-compose.demo.yml), not a setting.
+    "DEMO_SECRETS_KEY",
     # Read by docker-compose.yml, not by the app.
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
@@ -74,8 +76,16 @@ NON_SETTINGS_NAMES: set[str] = {
     "PARLEY_API_KEY",
     "PARLEY_CHANNEL_ID",
     "PARLEY_EVENTS_SECRET",
+    # Added by knowledge.md.
+    "ENTRY_ID",
+    "DOCUMENT_ID",
+    "NEW_DOCUMENT_ID",
+    # Added by business-tools.md.
+    "SERVER_ID",
     # Settings the vendezap brief asks vendezap to add (docs/integrations/vendezap.md).
     "PARLEY_URL",
+    # Vendezap's own setting, named in the same brief.
+    "PUBLIC_URL",
 }
 
 _METHODS = "GET|POST|PUT|PATCH|DELETE"

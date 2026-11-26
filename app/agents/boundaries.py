@@ -3,13 +3,14 @@ and the reply check that enforces it before a reply is sent."""
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 
 import structlog
 
 from app.config import Settings, get_settings
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage, LLMProvider
+from app.llm.jobs import OUTCOME_OK, OUTCOME_UNUSABLE, CallTimer, failure_outcome, usage_of
 from app.models.agent import Agent
 
 logger = structlog.get_logger(__name__)
@@ -116,6 +117,9 @@ def render_boundaries(boundaries: Boundaries) -> str:
 
 REASON_CHECK_FAILED = "check_failed"
 REASON_CHECK_UNPARSEABLE = "check_unparseable"
+# A decision model blocked the reply (its `allowed` decides) without picking a
+# rule: the check worked, it just named none (`app.llm.decisions`).
+REASON_NO_RULE_IDENTIFIED = "no_rule_identified"
 CHECK_MAX_TOKENS = 64
 # A model-written reason is stored on the run; keep it bounded.
 _REASON_MAX_CHARS = 500
@@ -125,6 +129,16 @@ _REASON_MAX_CHARS = 500
 class Verdict:
     allowed: bool
     reason: str | None
+    # How the call went, for the job record (`app.llm.jobs.record_job_call`);
+    # not part of the verdict itself, so left out of comparisons.
+    outcome: str = field(default=OUTCOME_OK, compare=False)
+    prompt_tokens: int | None = field(default=None, compare=False)
+    completion_tokens: int | None = field(default=None, compare=False)
+    latency_ms: int | None = field(default=None, compare=False)
+    # Set by the decision path (`app.llm.decisions`): the model that answered,
+    # and whether the call was handed over to the agent's own model.
+    model: str | None = field(default=None, compare=False)
+    handed_over: bool = field(default=False, compare=False)
 
 
 def _check_system_prompt(boundaries: Boundaries) -> str:
@@ -174,6 +188,11 @@ def _parse_verdict(content: str | None) -> Verdict:
     return Verdict(allowed=False, reason=REASON_CHECK_UNPARSEABLE)
 
 
+def check_payload(user_text: str, reply_text: str) -> str:
+    """The data the check judges: the user message and the reply, as JSON."""
+    return json.dumps({"user_message": user_text, "reply": reply_text}, ensure_ascii=False)
+
+
 async def check_reply(
     provider: LLMProvider,
     *,
@@ -188,11 +207,12 @@ async def check_reply(
     `check_failed`, any answer other than `ALLOW` / `BLOCK: <reason>` blocks
     with `check_unparseable`.
     """
-    payload = json.dumps({"user_message": user_text, "reply": reply_text}, ensure_ascii=False)
+    payload = check_payload(user_text, reply_text)
     messages = [
         LLMMessage(role=ROLE_SYSTEM, content=_check_system_prompt(boundaries)),
         LLMMessage(role=ROLE_USER, content=f"Data to judge:\n{payload}"),
     ]
+    called = CallTimer()
     try:
         response = await asyncio.wait_for(
             provider.complete(messages, model=model, temperature=0.0, max_tokens=CHECK_MAX_TOKENS),
@@ -200,5 +220,19 @@ async def check_reply(
         )
     except Exception as exc:
         logger.warning("boundary.check_failed", error=type(exc).__name__)
-        return Verdict(allowed=False, reason=REASON_CHECK_FAILED)
-    return _parse_verdict(response.content)
+        return Verdict(
+            allowed=False,
+            reason=REASON_CHECK_FAILED,
+            outcome=failure_outcome(exc),
+            latency_ms=called.elapsed_ms(),
+        )
+    verdict = _parse_verdict(response.content)
+    prompt_tokens, completion_tokens = usage_of(response)
+    unusable = not verdict.allowed and verdict.reason == REASON_CHECK_UNPARSEABLE
+    return replace(
+        verdict,
+        outcome=OUTCOME_UNUSABLE if unusable else OUTCOME_OK,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        latency_ms=called.elapsed_ms(),
+    )

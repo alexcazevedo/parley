@@ -62,3 +62,24 @@ up from the feed after a restart or a given-up event. It imports nothing from pa
 - `GET /inbox`: per customer, `messages`, `agent_active`, `department`, `handoff_brief`.
 
 State lives in a JSON file, so a restart keeps the inbox, the feed position and the applied event ids (newest 1000). The position `seq` moves only when the feed is read, never on a push: after parley gives up on an event it pushes later ones, and a position moved by them would skip it. A push is applied and its id remembered; a feed read skips ids already applied.
+
+## MCP tools
+
+The same app serves an MCP server (`tools.py`) at `http://project-inbox:9200/mcp`,
+as a model of what an app implements to give an agent business tools:
+
+- `search_product(query)`: read-only; words match ignoring case and accents; up to five products from a fixed catalog (`CATALOG`) as JSON with their ids.
+- `add_to_quote(product_id, quantity=1)`: adds to the quote of the customer in `_meta["parley/user_id"]`. A `parley/call_id` already seen changes nothing and returns the same answer. An unknown or out-of-stock product, or a call with no user id, is an error result with a pt-BR message (a `ToolError`) the agent can pass on.
+- `GET /quotes`: every quote by user id. Quotes and seen call ids live in the same state file.
+- Set `PARLEY_TOOLS_TOKEN` and the endpoint refuses a request without `Authorization: Bearer <token>` (401). The SDK also checks the `Host` header: the app allows `project-inbox:*`, `localhost:*` and `127.0.0.1:*`.
+
+Register it in parley (`docker-compose.example.yml` lists `project-inbox` in `TOOL_ALLOWED_HOSTS`),
+then put `shop` in the agent's `mcp_servers`; its tools are offered as `shop__search_product` and `shop__add_to_quote`:
+
+```
+POST /mcp-servers
+{"name": "shop", "url": "http://project-inbox:9200/mcp",
+ "auth_config": {"type": "bearer", "token": "<PARLEY_TOOLS_TOKEN>"}}
+```
+
+(Leave `auth_config` out when no token is set.)

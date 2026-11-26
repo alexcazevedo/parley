@@ -1,6 +1,6 @@
 # Brief: answer vendezap customers with a parley agent
 
-Paste this into `/comb:grill` in the vendezap repository. It is a brief for a new milestone. It names the files it expects to change; read each before you plan. Vendezap's interface is pt-BR, so interface labels are quoted in pt-BR. Labels marked "suggested" do not exist yet.
+Run `/comb:auto` in the vendezap repository with this file as the brief. The grill is already done: the mode and every product decision are below, so there is nothing left to ask. The brief names the files it expects to change; read each before you plan. Vendezap's interface is pt-BR, so interface labels are quoted in pt-BR. Labels marked "suggested" do not exist yet. A `PRODUCT.md` for another milestone may already be in the vendezap repository: do not overwrite unfinished work; stop and say so if its tickets are not archived.
 
 ## What parley is, and where to read first
 
@@ -43,22 +43,33 @@ Attendants reply to any conversa without claiming it: vendezap has no assignee a
 10. **Tell parley when an attendant changes it.** When the attendant adds, removes or swaps a mapped etiqueta in `ChatPane.tsx` (`addConversationTag`, `removeConversationTag` in `frontend/src/api/tags.ts`), the backend calls parley's category update (guide, step 8). Removing it sends a null category. Parley echoes a `conversation.category` event back with `source` `operator`; applying it must change nothing.
 11. **Show the handoff brief.** On `conversation.handoff` (and the later `conversation.handoff_brief`), store the brief on the conversa and show it above the message list in `ChatPane.tsx`, with a suggested title "Resumo para quem assume". Only the attendants see it; it is never sent to the customer.
 
-## Open questions for the grill
+## Decided for vendezap (grill outcome, do not re-ask)
 
-- Which numbers get the agent: all, or a switch per number on the Números screen (`frontend/src/pages/ChannelsPage.tsx`)? A per-number switch is likely, since one channel serves all.
-- What attendants see while the agent is active. Today a conversa "aguarda" while its newest message is from the customer (`waiting_since_map`). Agent replies clear that and the counters on Hoje and in the sidebar. Should an agent-answered conversa still count?
-- When parley is unreachable: the forward fails; retry, queue, or skip? The customer message must stay stored and visible either way. If it is skipped, the agent never sees it. Attendants should not be blocked.
-- When the number is disconnected: `send_text` answers 409 "Número desconectado" and the agent's reply cannot go out. Keep the event pending and retry, or drop it?
-- The agent's own reply comes back from Evolution as a `from_me` message with no author. It must never be forwarded as staff, or the agent would pause itself. The echo can arrive before `send_text` stores the row (`store_message` upserts on `wa_message_id`). How is the row recognised in both orders?
-- Staff or phone messages that are files, photos or stickers, and customer messages of kind `unsupported` or media in status `unavailable`: parley takes only text, image, voice note and PDF from the customer, and no media from staff. What text stand-in, if any?
-- Messages that exist before the feature is switched on: forward history, or only new ones? Switching on for a conversa that already has an attendant talking in it.
-- A department name that is longer than 40 characters (`Tag.name`), an etiqueta renamed or deleted in vendezap that is mapped to a department, and a department that parley later removes.
-- Several customers or webhooks arriving at once: the order in which events are applied to one conversa.
-- Not determined from the code: how the app is deployed in production (the compose file, the VPS), so whether parley can reach vendezap's push route directly. How fast the Evolution webhook is in practice, and whether the push route should hand off to a background task.
+Mode: `mvp`. Routing profile `cloud`, sequential.
+
+- **Which numbers.** A switch per number on the Números screen (`frontend/src/pages/ChannelsPage.tsx`), suggested label "Agente", off by default, stored on `Channel`. With the switch off, nothing for that number is forwarded and nothing changes.
+- **Waiting.** While the agent is active a conversa never counts as "aguarda" (`waiting_since_map`, the counters on Hoje and in the sidebar). While it is paused, today's rule applies. A handoff makes the conversa wait at once, even when the agent spoke last. A conversa also waits while its forward is stuck or a reply could not be sent (next two items).
+- **Parley unreachable.** Forwards go through a new table of pending forwards, sent by a background task in order per conversa, with retries. A webhook or an attendant is never blocked or failed by it. A customer message that is still unsent after 15 minutes is dropped from the queue (parley has no way to take a message without answering it), and the conversa counts as waiting. Staff messages are never dropped for age: they are what pauses the agent.
+- **Number disconnected.** When `send_text` answers 409 for an agent reply, keep the reply pending and retry for 10 minutes. After that, drop it, store it in the conversa marked "não enviada" (suggested), visible to attendants only, and count the conversa as waiting. Never send a reply late.
+- **Stand-ins.** What parley cannot take is forwarded as a short pt-BR text. Customer: `[O cliente enviou uma figurinha]`, `[O cliente enviou um vídeo]`, and the like for location, contact, kind `unsupported` and media in status `unavailable`. Attendant or phone: `[Atendente enviou uma imagem]` (or `um arquivo`, `um áudio`), followed by the caption if there is one. A staff stand-in pauses the agent like any staff message.
+- **Messages from the phone.** A `from_me` message with no author that is not an agent reply is a person: forward it as `sender` `staff` with the name "Celular".
+- **Switching on.** No history is forwarded; only messages stored after the switch. A conversa in which an attendant or the phone sent a message in the 24 hours before the switch starts paused: before its first forward, send its most recent staff message as `sender` `staff` (a staff message for a customer parley has not seen opens the conversation already paused). Every other conversa, and every new one, starts with the agent active.
+- **Deploy.** Parley runs on the same VPS under its own public https name. `PARLEY_URL` is that https URL and parley pushes to `PUBLIC_URL`; no private-network setting on either side. `PARLEY_EVENTS_SECRET` follows the existing 32-character rule when `PUBLIC_URL` is https.
+
+Decided from the code, with the reason:
+
+- **The agent's own echo.** `store_message` upserts on `channel_id` and `wa_message_id`. Before calling Evolution, record the parley event `id` as "being sent" for the conversa; after `send_text` returns, record its `wa_message_id` as an agent message. A `from_me` row with no author is forwarded as staff only after a short delay (suggested 5 seconds) and only if its `wa_message_id` was not recorded as an agent message by then. That covers the echo arriving before or after `send_text` stores the row.
+- **Order.** Apply events to a conversa in the order of the feed `seq`; a push that arrives ahead of a missing earlier event waits for the feed read. Serialise the work per conversa (a row lock on `Conversation`).
+- **Push route.** Verify, store the event, answer 2xx; send to Evolution from the background task, not inside the request.
+- **Departments.** A department name longer than 40 characters (`Tag.name`) is cut to 40. The mapping is by etiqueta id, so renaming an etiqueta keeps it mapped. Deleting a mapped etiqueta sends a null category for its conversas and removes the mapping. A department that parley removed leaves its etiqueta in place, unmapped.
+
+## Business tools: a follow-up brief
+
+Parley's agent can call tools that vendezap serves as an MCP server; how to build one is in parley's guide `docs/guides/business-tools.md` ([the guide](../guides/business-tools.md)). Vendezap serves one with `search_product` and `add_to_quote` first. It is keyed by the conversa id vendezap already sends as `user_id`: parley passes it to every call as `parley/user_id`, so a search and a quote are for that conversa. Write the guide's checklist into the follow-up: `readOnlyHint` on the search, the call id remembered for the add, a refusal as an error result in pt-BR ("sem estoque"). Pedido and kit tools can follow the same way. This is a separate brief for the vendezap repository, run after the integration above; it changes nothing in that one.
 
 ## Out of scope
 
-Catalog, pedido and kit tools for the agent, and a knowledge base. Replies with files or images. Closing conversations: vendezap has no closed state. Changes to the Evolution setup. Any change in the parley repository: ask for it instead.
+A knowledge base: parley has one (entries, question-and-answer pairs and documents, searched by the agent), and vendezap builds its own screen on that API when it wants one; see `docs/guides/knowledge.md`. Replies with files or images. Closing conversations: vendezap has no closed state. Changes to the Evolution setup. Any change in the parley repository: ask for it instead.
 
 ## Success demo
 

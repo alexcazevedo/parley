@@ -45,6 +45,26 @@ Parley calls any OpenAI-compatible chat-completions endpoint.
 - `HTTP_RETRY_BASE_SECONDS`: first wait between tries. It doubles each time. A numeric `Retry-After` header replaces it. Default: `0.5`.
 - `HTTP_RETRY_MAX_WAIT_SECONDS`: longest single wait. Default: `10.0`.
 
+### A model per job
+
+Besides the reply, a turn can make five more model calls ("jobs"). Each has a setting, the same for every tenant. Empty (the default) runs the job on the agent's own model, as before. `llm:<model>` runs it on that chat model at `LLM_BASE_URL` with `LLM_API_KEY`, with the same prompt. `typesafe:<model>` runs a decision job on TypeSafe's decision model and needs `TYPESAFE_API_KEY`. Any other value, `typesafe:` without the key, or `typesafe:` on a job that writes text stops the API and the worker at start, with a message naming the setting. Every job call is recorded in `model_job_calls` with the model that served it, its token use, latency and outcome.
+
+- `BOUNDARY_CHECK_MODEL`: the reply check against boundaries (a decision). Default: empty.
+- `BOUNDARY_CHECK_ALLOW_THRESHOLD`: on a decision model, how likely "allowed" must be for a reply to go out, from 0 to 1. Higher is stricter: more replies are blocked. Default: `0.5`. It applies only to the boundary check on `typesafe:`; a chat model answers `ALLOW` or `BLOCK` and ignores it. A value outside 0 to 1 stops the API and the worker at start. A blocked reply records the rule the model picked, or `no_rule_identified` when it picked none.
+- `SENTIMENT_MODEL`: the frustration score (a decision). Default: empty.
+- `CATEGORY_MODEL`: the category classifier (a decision). Default: empty.
+- `SUMMARY_MODEL`: the rolling summary (writes text; `typesafe:` is refused). Default: empty.
+- `HANDOFF_BRIEF_MODEL`: the brief for the operator at handoff (writes text; `typesafe:` is refused). Default: empty.
+- `TYPESAFE_API_KEY`: key for TypeSafe's decision model. Required when any job is set to `typesafe:`. Default: empty.
+
+What a job sends to TypeSafe, when it is set to `typesafe:<model>` (the key is sent to TypeSafe too). TypeSafe is a second vendor, besides your `LLM_BASE_URL` endpoint, and it receives conversation text:
+
+- `BOUNDARY_CHECK_MODEL`: the customer's message and the agent's reply, and the agent's rules: its `boundary_scope` and `boundary_never` items, with the deployment floor's added.
+- `SENTIMENT_MODEL`: the conversation text the sentiment check reads, both the customer's and the agent's side: the last 10 messages and the new ones (see [agent behaviour](agent-behaviour.md) section 4).
+- `CATEGORY_MODEL`: the same kind of conversation text, and the name and description of each of the tenant's departments (categories).
+
+Nothing is sent to TypeSafe unless `TYPESAFE_API_KEY` is set and a job is set to `typesafe:`. `llm:` values and the two writing jobs go only to your `LLM_BASE_URL` endpoint. A call the decision model cannot take is handed to the agent's model, so conversation text goes there as it does today; see [agent behaviour](agent-behaviour.md) section 8.
+
 ## Speech-to-text and vision
 
 - `STT_BASE_URL`: base URL for voice-note transcription. Default: unset, so `LLM_BASE_URL` is used. Set it to use a different transcription backend.
@@ -89,6 +109,12 @@ Parley calls any OpenAI-compatible chat-completions endpoint.
 - `CHANNEL_ALLOWED_HOSTS`: comma-separated host names an Evolution channel `base_url` or an `external` channel `events_url` (checked on create and update, and again on every push) may use even if the address is private, for example `evolution`. Default: empty, so only public hosts are allowed. It does not depend on the `TOOL_` settings.
 - `BOUNDARY_FLOOR_FILE`: path to a JSON file of boundaries applied to every agent of every tenant. Tenants can add to it but not loosen it. Default: empty, so there is no floor. A missing or broken file stops start-up. Shape: `{"scope": "optional text", "never": ["text"]}`.
 
+## MCP servers
+
+A tenant's MCP servers are checked with the same address rules as tools (`TOOL_ALLOWED_HOSTS`, `TOOL_SSRF_DISABLED`), when registered and before every connection.
+
+- `MCP_SYNC_INTERVAL_SECONDS`: how old a server's last discovery may get before the worker discovers its tools again. A server whose discovery failed is tried again after the same time. Default: `300`.
+
 ## Events pushed to a project
 
 Used by `external` channels. How the pushes work is in [project-channel](project-channel.md).
@@ -96,6 +122,21 @@ Used by `external` channels. How the pushes work is in [project-channel](project
 - `EVENT_PUSH_MAX_ATTEMPTS`: failed pushes of one event before parley stops pushing it (it stays in the feed). Default: `7`.
 - `EVENT_PUSH_TIMEOUT_SECONDS`: longest wait for the project's answer to one push. Default: `5`.
 - `EVENT_PUSH_INTERVAL_SECONDS`: pause between two passes of the push loop in the worker. Default: `1`.
+
+## Knowledge base
+
+Counted per tenant, the same for every tenant. A request past a limit is refused with 422 naming the setting.
+
+- `KNOWLEDGE_MAX_ITEMS`: most knowledge items (entries, pairs and documents) of one tenant. Default: `500`.
+- `KNOWLEDGE_MAX_ITEM_CHARS`: longest text of one entry or answer, in characters. Default: `20000`.
+- `KNOWLEDGE_MAX_TOTAL_CHARS`: most characters of knowledge text stored by one tenant. Default: `2000000`.
+- `KNOWLEDGE_INGEST_INTERVAL_SECONDS`: pause between two passes of the worker loop that splits new and edited items into passages. Default: `2`.
+
+Semantic search is optional. With an embeddings endpoint set, the worker stores a vector for every passage and a search also ranks passages by meaning, merged with the keyword ranking (`mode` `hybrid`). It needs the Postgres `vector` extension: the compose image `pgvector/pgvector:pg16` has it; on plain `postgres:16` search stays keyword only. After changing the model, or to embed passages written before the endpoint was set, run `uv run python -m app.knowledge.reindex` (`--all` re-embeds every passage).
+
+- `EMBEDDINGS_BASE_URL`: base URL of an OpenAI-compatible embeddings endpoint (parley calls `{base}/embeddings`). Default: empty, which turns semantic search off.
+- `EMBEDDINGS_API_KEY`: bearer key for that endpoint. Default: empty.
+- `EMBEDDINGS_MODEL`: embeddings model. Vectors of another model are ignored until re-indexed. Default: `text-embedding-3-small`.
 
 ## Demo
 

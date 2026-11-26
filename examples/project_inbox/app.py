@@ -14,7 +14,10 @@ database. The position moves only when the feed is read, never on a push: after
 parley gives up on one event it pushes the later ones, and a position moved by
 them would skip it. Catch-up also runs every CATCH_UP_SECONDS (default 30),
 because a given-up event produces no signal.
-Config: PARLEY_URL, PARLEY_API_KEY, PARLEY_CHANNEL_ID, PARLEY_EVENTS_SECRET.
+Business tools: the same app serves MCP tools at /mcp (tools.py); quotes and
+the call ids already seen live in the same state file.
+Config: PARLEY_URL, PARLEY_API_KEY, PARLEY_CHANNEL_ID, PARLEY_EVENTS_SECRET,
+PARLEY_TOOLS_TOKEN (when set, /mcp needs `Authorization: Bearer <it>`).
 """
 
 import asyncio
@@ -30,8 +33,11 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel
+
+from . import tools
 
 logger = logging.getLogger("project_inbox")
 
@@ -73,6 +79,8 @@ class Inbox:
         self.path = path
         empty: dict[str, Any] = {"seq": 0, "applied": [], "customers": {}, "conversations": {}}
         self.state = json.loads(path.read_text()) if path.exists() else empty
+        self.state.setdefault("quotes", {})  # user id -> quote lines
+        self.state.setdefault("calls", {})  # call id -> answer already given
 
     def save(self) -> None:
         # write then rename, so a crash never leaves half a file
@@ -138,6 +146,21 @@ class Inbox:
             self.save()
 
 
+class BearerGuard:
+    """ASGI wrapper: 401 unless `Authorization: Bearer <token>` (when a token is set)."""
+
+    def __init__(self, app: Any, token: str) -> None:
+        self.app, self.token = app, token
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and self.token:
+            given = dict(scope["headers"]).get(b"authorization", b"").decode()
+            if not hmac.compare_digest(given, f"Bearer {self.token}"):
+                reply = JSONResponse({"detail": "bad token"}, status_code=401)
+                return await reply(scope, receive, send)
+        await self.app(scope, receive, send)
+
+
 def create_app(
     state_path: str | Path | None = None,
     client: httpx.AsyncClient | None = None,
@@ -147,6 +170,7 @@ def create_app(
     channel_id: str | None = None,
     events_secret: str | None = None,
     catch_up_seconds: float | None = None,
+    tools_token: str | None = None,
 ) -> FastAPI:
     """Build the app. Arguments default to the environment; tests inject a
     client (with a MockTransport standing in for parley) and a state path."""
@@ -155,6 +179,7 @@ def create_app(
     channel_id = channel_id or os.environ.get("PARLEY_CHANNEL_ID", "")
     events_secret = events_secret or os.environ.get("PARLEY_EVENTS_SECRET", "")
     every = catch_up_seconds or float(os.environ.get("CATCH_UP_SECONDS", "30"))
+    tools_token = tools_token or os.environ.get("PARLEY_TOOLS_TOKEN", "")
     inbox = Inbox(Path(state_path or os.environ.get("INBOX_STATE_PATH", "/tmp/inbox.json")))
     http = client or httpx.AsyncClient(timeout=10.0)
     headers = {"X-API-Key": api_key}
@@ -185,10 +210,21 @@ def create_app(
                 logger.warning("catch-up failed", exc_info=True)
             await asyncio.sleep(every)
 
+    tools.bind(inbox.state, inbox.save)
+    # The SDK refuses a Host it does not know (421). Another container reaches
+    # this one as project-inbox:9200, so that name must be allowed.
+    mcp_app = tools.server.streamable_http_app(
+        transport_security=TransportSecuritySettings(
+            allowed_hosts=["project-inbox:*", "localhost:*", "127.0.0.1:*", "testserver"],
+            allowed_origins=[],
+        )
+    )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         task = asyncio.create_task(catch_up_forever())  # first run is at start
-        yield
+        async with mcp_app.router.lifespan_context(mcp_app):  # the MCP session manager
+            yield
         task.cancel()
         if client is None:
             await http.aclose()
@@ -251,10 +287,15 @@ def create_app(
     async def show_inbox() -> dict[str, Any]:
         return {"seq": inbox.state["seq"], "customers": inbox.state["customers"]}
 
+    @app.get("/quotes")
+    async def show_quotes() -> dict[str, Any]:
+        return inbox.state["quotes"]
+
     @app.get("/", response_class=HTMLResponse)
     async def page() -> str:
         return PAGE
 
+    app.mount("/", BearerGuard(mcp_app, tools_token))  # last: its only route is /mcp
     return app
 
 

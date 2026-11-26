@@ -15,10 +15,12 @@ import json
 import re
 import shlex
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import app.handoff.summarizer as summarizer_module
 from app.agents.runtime import AgentRuntime
@@ -31,6 +33,7 @@ from app.tools.builtin import BuiltinExecutor
 from app.tools.registry import ToolRegistry
 from app.workers.main import run_once
 from app.workers.scheduler import tick
+from tests.mcp_fakes import SHOP_URL, mcp_connect  # noqa: F401 - fixture
 from tests.test_categorize_turn import DEBOUNCE_SECONDS, _session_factory
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,6 +46,12 @@ _VAR = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)\}?")
 _FLAGS_WITH_ARG = {"-X", "-H", "-d", "-F", "-o", "-w", "--data", "--data-raw", "--data-binary"}
 
 # `file=@name` in a guide's curl is replaced with the bytes below.
+# `file=@name.txt` and `file=@name.md`: the text the guide writes with `cat`.
+TEXT = (
+    b"Returns policy\n\nYou may return any item within 30 days of delivery. The item must be "
+    b"unused and in its original packaging.\n\nRefunds are paid to the original payment method "
+    b"within 10 business days after we receive the item.\n"
+)
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 # `file=@name.pdf`: a PDF with no readable text (the turn answers it as unsupported).
 PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n"
@@ -200,7 +209,12 @@ class Agent:
             for form in curl.forms:
                 name, _, value = self.fill(form, placeholders).partition("=")
                 if value.startswith("@"):
-                    content = PDF if value.endswith(".pdf") else JPEG
+                    if value.endswith(".pdf"):
+                        content = PDF
+                    elif value.endswith((".txt", ".md")):
+                        content = TEXT
+                    else:
+                        content = JPEG
                     files[name] = (value[1:], content, "application/octet-stream")
                 else:
                     data[name] = value
@@ -827,7 +841,15 @@ async def test_the_manifest_guide(client):
 
     # The inline checks, last.
     r = await step("GET", "/manifest/schema", 200)
-    assert set(r.json()["properties"]) == {"version", "agents", "departments", "tools", "channels"}
+    assert set(r.json()["properties"]) == {
+        "version",
+        "agents",
+        "departments",
+        "tools",
+        "channels",
+        "mcp_servers",
+        "knowledge",
+    }
     r = await step("GET", "/agents", 200)
     assert [a["name"] for a in r.json()] == ["Acme support"]
     r = await step("GET", "/channels", 200)
@@ -837,6 +859,203 @@ async def test_the_manifest_guide(client):
     assert next(queue, None) is None, "a curl of manifest.md was not replayed"
     assert len(replayed) == len(curls)
     print(f"manifest.md curls replayed: {len(replayed)}")
+
+
+KNOWLEDGE = "knowledge"
+
+
+@pytest.fixture
+def factory(test_engine):
+    return async_sessionmaker(bind=test_engine, expire_on_commit=False)
+
+
+async def test_the_knowledge_guide(client, fake_redis, db_session, factory, media_root):
+    """An integrator follows knowledge.md: an entry, a pair, a document and its status,
+    the replacement of the document, a limit, a search, the switch and the record of what
+    the agent was given. Every curl of the guide is replayed in the guide's order (the
+    inline checks last); only the model is scripted and the worker is driven by hand."""
+    import os
+
+    from sqlalchemy import text as sql
+
+    from app.knowledge.ingest import process_due
+    from app.llm.base import ToolCall
+
+    me = Agent(client)
+    v = me.vars
+    v["ADMIN_API_KEY"] = os.environ["ADMIN_API_KEY"]
+    r = await me.run("setup", "POST", "/tenants", 201)
+    v["TENANT_ID"], v["TENANT_KEY"] = r.json()["id"], r.json()["api_key"]
+    r = await me.run("setup", "POST", "/agents", 201)
+    v["AGENT_ID"] = r.json()["id"]
+    assert r.json()["knowledge_enabled"] is False
+    r = await me.run("setup", "POST", "/channels", 201, contains="webchat")
+    v["CHANNEL_ID"] = r.json()["id"]
+    text = _read(KNOWLEDGE)
+    for line in TEXT.decode().split("\n\n"):
+        assert line.strip() in text
+
+    curls, _ = extract(KNOWLEDGE)
+    queue = iter(curls)
+    replayed: list[Curl] = []
+
+    async def step(method: str, path: str, status: int):
+        curl = next(queue)
+        assert (curl.method, curl.path) == (method, path), f"{curl.method} {curl.path}"
+        replayed.append(curl)
+        response = await me.send(curl)
+        assert response.status_code == status, f"{method} {path}: {response.text}"
+        return response
+
+    item_keys = {
+        "id", "kind", "title", "text", "filename", "status", "error", "chars", "passages",
+        "truncated", "created_at", "updated_at",
+    }
+
+    # 2. An entry.
+    r = await step("POST", "/knowledge/entries", 201)
+    v["ENTRY_ID"] = r.json()["id"]
+    assert set(r.json()) == item_keys
+    assert (r.json()["kind"], r.json()["status"], r.json()["passages"]) == (
+        "entry", "processing", 0,
+    )
+    assert r.json()["chars"] == 135 and '"chars": 135' in text
+    again = await me.client.post(
+        "/knowledge/entries",
+        json={"title": "Opening hours", "text": "x"},
+        headers={"X-API-Key": v["TENANT_KEY"]},
+    )
+    assert again.status_code == 409 and again.json()["error"]["message"] == "title already exists"
+    # 3. A pair.
+    r = await step("POST", "/knowledge/qa", 201)
+    assert (r.json()["kind"], r.json()["title"]) == ("qa", "Do you deliver on Sundays?")
+    assert r.json()["text"].startswith("No. Deliveries")
+    # 4. A document.
+    r = await step("POST", "/knowledge/documents", 201)
+    v["DOCUMENT_ID"] = r.json()["id"]
+    assert (r.json()["kind"], r.json()["status"], r.json()["text"]) == (
+        "document", "processing", None,
+    )
+    assert (r.json()["filename"], r.json()["title"]) == ("returns.txt", "Returns policy")
+    headers = {"X-API-Key": v["TENANT_KEY"]}
+    unsupported = "unsupported file: send a PDF, a .txt or a .md file"
+    refused = await client.post(
+        "/knowledge/documents", files={"file": ("a.png", JPEG, "image/png")}, headers=headers
+    )
+    assert (refused.status_code, refused.json()["error"]["message"]) == (415, unsupported)
+    assert unsupported in text
+    # 5. Statuses: the worker makes everything ready; a file with no text fails.
+    await process_due(factory)
+    r = await step("GET", "/knowledge/$DOCUMENT_ID", 200)
+    assert (r.json()["status"], r.json()["error"], r.json()["truncated"]) == ("ready", None, False)
+    assert r.json()["passages"] >= 1
+    empty = await client.post(
+        "/knowledge/documents",
+        files={"file": ("empty.txt", b"  \n", "text/plain")},
+        headers=headers,
+    )
+    await process_due(factory)
+    failed = await client.get(f"/knowledge/{empty.json()['id']}", headers=headers)
+    assert (failed.json()["status"], failed.json()["error"]) == (
+        "failed", "no text found in the file (scanned, empty or protected PDF)",
+    )
+    from app.knowledge import ingest
+
+    reasons = (ingest.NO_TEXT, "the file is not UTF-8 text", "KNOWLEDGE_MAX_TOTAL_CHARS reached")
+    for reason in reasons:
+        assert f"`{reason}`" in text
+    await client.delete(f"/knowledge/{empty.json()['id']}", headers=headers)
+    # 6. Replace the document under the same title.
+    r = await step("POST", "/knowledge/documents", 201)
+    v["NEW_DOCUMENT_ID"] = r.json()["id"]
+    assert v["NEW_DOCUMENT_ID"] != v["DOCUMENT_ID"] and r.json()["title"] == "Returns policy"
+    await process_due(factory)
+    r = await me.get(f"/knowledge/{v['NEW_DOCUMENT_ID']}")
+    assert r.json()["status"] == "ready"
+    r = await step("DELETE", "/knowledge/$DOCUMENT_ID", 204)
+    assert r.text == ""
+    gone = await me.get(f"/knowledge/{v['DOCUMENT_ID']}", 404)
+    assert gone.json()["error"]["message"] == "knowledge item not found"
+    patched = await client.patch(
+        f"/knowledge/{v['NEW_DOCUMENT_ID']}", json={"text": "x"}, headers=headers
+    )
+    assert patched.status_code == 422 and patched.json()["error"]["message"] == (
+        "the text of a document cannot be changed; upload a new document"
+    )
+    assert patched.json()["error"]["message"] in text
+    # 7. The limit names the setting and its value.
+    settings = get_settings()
+    too_long = await client.post(
+        "/knowledge/entries",
+        json={"title": "Long", "text": "a" * (settings.knowledge_max_item_chars + 1)},
+        headers=headers,
+    )
+    limit = settings.knowledge_max_item_chars
+    message = f"knowledge limit exceeded: KNOWLEDGE_MAX_ITEM_CHARS is {limit}"
+    assert too_long.status_code == 422 and too_long.json()["error"]["message"] == message
+    items = f"knowledge limit exceeded: KNOWLEDGE_MAX_ITEMS is {settings.knowledge_max_items}"
+    assert items in text and (settings.knowledge_max_items, settings.pdf_max_chars) == (500, 20000)
+    # 8. A search, the way the agent does it.
+    await process_due(factory)
+    r = await step("POST", "/knowledge/search", 200)
+    assert r.json()["mode"] == "keyword"
+    first = r.json()["results"][0]
+    assert set(first) == {
+        "passage_id", "item_id", "kind", "title", "text", "score", "keyword_rank", "semantic_rank",
+    }
+    assert (first["title"], first["kind"], first["item_id"]) == (
+        "Returns policy", "document", v["NEW_DOCUMENT_ID"],
+    )
+    assert first["text"].startswith("Returns policy\n") and "30 days" in first["text"]
+    assert (first["keyword_rank"], first["semantic_rank"]) == (1, None) and first["score"] > 0
+    nothing = await client.post(
+        "/knowledge/search", json={"query": "zebra"}, headers=headers
+    )
+    assert nothing.json() == {"mode": "keyword", "results": []}
+    # 9. Switch the agent on; the run records what it was given.
+    r = await step("PATCH", "/agents/$AGENT_ID", 200)
+    assert r.json()["knowledge_enabled"] is True
+    sent = await client.post(
+        "/channels/webchat/messages",
+        json={"channel_id": v["CHANNEL_ID"], "user_id": "u-1", "message": "Days to return?"},
+        headers=headers,
+    )
+    assert sent.status_code == 201, sent.text
+    call = ToolCall(
+        id="call_1", name="search_knowledge", arguments={"query": "days to return an item"}
+    )
+    provider = FakeLLMProvider([LLMResponse(tool_calls=[call]), LLMResponse(content="30 days.")])
+    runtime = AgentRuntime(provider=provider, registry=ToolRegistry())
+    queue_ = RedisQueue(fake_redis)
+    while await fake_redis.llen(JOBS_KEY) > 0:
+        assert await run_once(queue_, timeout=1, debounce_seconds=DEBOUNCE_SECONDS) is not None
+    await tick(fake_redis, _session_factory(db_session), runtime, now=time.time() + 5)
+    assert "search_knowledge" in [spec.name for spec in provider.calls[0]["tools"]]
+    system = provider.calls[0]["messages"][0].content
+    assert "## Knowledge base" in system and "Opening hours" in system and "30 days" not in system
+    query = re.search(r"^(SELECT created_at.*?;)$", text, re.S | re.M).group(1)
+    rows = (
+        await db_session.execute(
+            sql(query.replace("<your tenant id>", v["TENANT_ID"]).rstrip(";"))
+        )
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].query == "days to return an item"
+    [passage] = [p for p in rows[0].passages if p["item_id"] == v["NEW_DOCUMENT_ID"]][:1]
+    assert set(passage) == {"id", "item_id", "title", "text", "score"}
+    assert "30 days" in passage["text"]
+    # The inline checks, last.
+    r = await step("GET", "/knowledge/$ENTRY_ID", 200)
+    assert r.json()["id"] == v["ENTRY_ID"] and r.json()["status"] == "ready"
+    r = await step("GET", "/knowledge", 200)
+    assert [i["kind"] for i in r.json()] == ["qa"]
+    r = await step("GET", "/knowledge", 200)
+    assert r.json() == []
+    r = await step("GET", "/knowledge", 200)
+    assert [i["id"] for i in r.json()] == [v["NEW_DOCUMENT_ID"]]
+    assert next(queue, None) is None, "a curl of knowledge.md was not replayed"
+    assert len(replayed) == len(curls)
+    print(f"knowledge.md curls replayed: {len(replayed)}")
 
 
 def test_the_manifest_guide_names_every_problem_the_code_can_give():
@@ -862,3 +1081,216 @@ def test_the_manifest_guide_names_every_problem_the_code_can_give():
         assert template in text, template
     assert "secret 'orders_token' is not set" in text
     assert "is the agent of channel 'Project inbox'; delete the channel or bind it" in text
+
+
+BUSINESS_TOOLS = "business-tools"
+_JSON_BLOCK = re.compile(r"^```json\n(.*?)^```", re.S | re.M)
+_PYTHON_BLOCK = re.compile(r"^```python\n(.*?)^```", re.S | re.M)
+
+
+async def test_the_business_tools_guide(client, fake_redis, db_session, mcp_connect):  # noqa: F811
+    """An app developer follows business-tools.md against the example's MCP server, wired in
+    process: register, sync, try a search and a write, attach to an agent, a customer turn
+    and the ledger row. Every curl of the guide is replayed in the guide's order (the inline
+    checks last); only the model is scripted. The names the guide promises are checked
+    against the code."""
+    import os
+
+    from sqlalchemy import text as sql
+
+    import app.mcp.client as mcp_client
+    from app.llm.base import ToolCall
+    from app.main import app as api
+    from app.tools.context import HEADER_NAMES, CallContext
+    from examples.project_inbox import tools
+    from scripts import mock_llm_server
+
+    tools.bind({}, lambda: None)
+    mcp_connect[SHOP_URL] = tools.server
+
+    me = Agent(client)
+    v = me.vars
+    v["ADMIN_API_KEY"] = os.environ["ADMIN_API_KEY"]
+    r = await me.run("setup", "POST", "/tenants", 201)
+    v["TENANT_ID"], v["TENANT_KEY"] = r.json()["id"], r.json()["api_key"]
+    r = await me.run("setup", "POST", "/agents", 201)
+    v["AGENT_ID"] = r.json()["id"]
+    r = await me.run("setup", "POST", "/channels", 201, contains="webchat")
+    v["CHANNEL_ID"] = r.json()["id"]
+    text = _read(BUSINESS_TOOLS)
+    headers = {"X-API-Key": v["TENANT_KEY"]}
+    blocks = [json.loads(b) for b in _JSON_BLOCK.findall(text)]
+
+    curls, _ = extract(BUSINESS_TOOLS)
+    queue = iter(curls)
+    replayed: list[Curl] = []
+
+    async def step(method: str, path: str, status: int):
+        curl = next(queue)
+        assert (curl.method, curl.path) == (method, path), f"{curl.method} {curl.path}"
+        replayed.append(curl)
+        response = await me.send(curl)
+        assert response.status_code == status, f"{method} {path}: {response.text}"
+        return response
+
+    # 4. Register: the response is the one the guide shows.
+    r = await step("POST", "/mcp-servers", 201)
+    v["SERVER_ID"] = r.json()["id"]
+    server = r.json()
+    shown = next(b for b in blocks if "exposed_name" in json.dumps(b))
+    assert set(server) == set(shown)
+    for key in ("name", "url", "allowed_tools", "timeout_seconds", "status", "error", "skipped"):
+        assert server[key] == shown[key], key
+    assert "auth_config" not in server and "<your-token>" not in json.dumps(server)
+    add, search = server["tools"]
+    assert add == shown["tools"][0] and add["read_only"] is False
+    assert (search["exposed_name"], search["read_only"]) == ("shop__search_product", True)
+    assert [shown["tools"][1][k] for k in ("exposed_name", "read_only")] == [
+        "shop__search_product", True,
+    ]
+    for refusal in ("MCP server name already exists", "invalid url: "):
+        assert refusal in text
+    again = await client.post(
+        "/mcp-servers", json={"name": "shop", "url": SHOP_URL}, headers=headers
+    )
+    assert (again.status_code, again.json()["error"]["message"]) == (
+        409, "MCP server name already exists",
+    )
+    private = await client.post(
+        "/mcp-servers", json={"name": "lan", "url": "http://localhost/mcp"}, headers=headers
+    )
+    assert private.status_code == 422 and private.json()["error"]["message"].startswith(
+        "invalid url: "
+    )
+    # 5. Sync.
+    r = await step("POST", "/mcp-servers/$SERVER_ID/sync", 200)
+    assert r.json()["status"] == "ok" and r.json()["tools"] == server["tools"]
+    # 6. Try a search and a write.
+    r = await step("POST", "/mcp-servers/$SERVER_ID/call", 200)
+    answer = next(b for b in blocks if b.get("ok") is True and "cartolina" in b["result"])
+    assert r.json() == answer
+    products = json.loads(r.json()["result"])
+    assert [p["id"] for p in products] == ["cartolina-branca-150g", "cartolina-branca-180g"]
+    write = await step("POST", "/mcp-servers/$SERVER_ID/call", 200)
+    added = "Adicionado ao orçamento: 1 x Cartolina branca 150g."
+    assert write.json() == {"ok": True, "result": added, "error": None} and added in text
+    await me.send(replayed[-1])  # each try is a new call: the quote has two
+    assert tools._state["quotes"]["ana"][0]["quantity"] == 2
+    for body, error in (
+        ({"tool": "add_to_quote", "arguments": {"product_id": "nao-existe"}},
+         "Error executing tool add_to_quote: Produto nao-existe não encontrado."),
+        ({"tool": "add_to_quote", "arguments": {}},
+         "invalid arguments: 'product_id' is a required property"),
+    ):
+        refused = await client.post(
+            f"/mcp-servers/{v['SERVER_ID']}/call", json=body | {"user_id": "ana"}, headers=headers
+        )
+        assert refused.json() == {"ok": False, "result": None, "error": error}
+        assert f'"error": "{error}"' in text
+    unknown = await client.post(
+        f"/mcp-servers/{v['SERVER_ID']}/call",
+        json={"tool": "nope", "user_id": "ana"},
+        headers=headers,
+    )
+    assert (unknown.status_code, unknown.json()["error"]["message"]) == (404, "MCP tool not found")
+    assert "404 `MCP tool not found`" in text
+    # 7. Attach to the agent; a customer turn; the ledger row.
+    r = await step("PATCH", "/agents/$AGENT_ID", 200)
+    assert r.json()["mcp_servers"] == ["shop"]
+    sent = await client.post(
+        "/channels/webchat/messages",
+        json={"channel_id": v["CHANNEL_ID"], "user_id": "u-1", "message": "Quero a primeira."},
+        headers=headers,
+    )
+    assert sent.status_code == 201, sent.text
+    conversation_id = sent.json()["conversation_id"]
+    call = ToolCall(
+        id="call_1",
+        name="shop__add_to_quote",
+        arguments={"product_id": "cartolina-branca-150g", "quantity": 1},
+    )
+    provider = FakeLLMProvider([LLMResponse(tool_calls=[call]), LLMResponse(content="Anotado.")])
+    runtime = AgentRuntime(provider=provider, registry=ToolRegistry())
+    queue_ = RedisQueue(fake_redis)
+    while await fake_redis.llen(JOBS_KEY) > 0:
+        assert await run_once(queue_, timeout=1, debounce_seconds=DEBOUNCE_SECONDS) is not None
+    await tick(fake_redis, _session_factory(db_session), runtime, now=time.time() + 5)
+    offered = {spec.name for spec in provider.calls[0]["tools"]}
+    assert {"shop__search_product", "shop__add_to_quote"} <= offered
+    given = json.loads([m for m in provider.calls[1]["messages"] if m.role == "tool"][0].content)
+    assert given["ok"] is True and given["data"]["result"] == added
+    assert "reference data" in given["data"]["note"]
+    query = re.search(r"^(SELECT created_at.*?;)$", text, re.S | re.M).group(1)
+    rows = (
+        await db_session.execute(
+            sql(query.replace("<your tenant id>", v["TENANT_ID"]).rstrip(";"))
+        )
+    ).all()
+    assert len(rows) == 1 and (rows[0].tool_name, rows[0].status) == ("shop__add_to_quote", "ok")
+    assert rows[0].call_id is not None
+    assert rows[0].context == {
+        "conversation_id": conversation_id, "channel_id": v["CHANNEL_ID"], "user_id": "u-1",
+    }
+    assert tools._state["quotes"]["u-1"][0]["quantity"] == 1
+    # The inline check, last.
+    r = await step("GET", "/mcp-servers/$SERVER_ID", 200)
+    assert r.json()["id"] == v["SERVER_ID"] and r.json()["status"] == "ok"
+    assert next(queue, None) is None, "a curl of business-tools.md was not replayed"
+    assert len(replayed) == len(curls)
+
+    # 10. A server that cannot be reached: the reason is the one the guide lists.
+    mcp_connect["https://down.example.com/mcp"] = mcp_client.McpError(
+        "could not reach the server", sent=False
+    )
+    down = await client.post(
+        "/mcp-servers", json={"name": "down", "url": "https://down.example.com/mcp"},
+        headers=headers,
+    )
+    assert down.status_code == 201
+    assert (down.json()["status"], down.json()["error"]) == ("error", "could not reach the server")
+    for reason in (
+        mcp_client.OAUTH_REASON,
+        "the server refused the token (HTTP 401)",
+        "the server did not answer in time",
+        "could not reach the server",
+        "address refused: ",
+    ):
+        assert f"`{reason}" in text, reason
+    gone = await client.delete(f"/mcp-servers/{down.json()['id']}", headers=headers)
+    assert gone.status_code == 204
+    missing = await client.get(f"/mcp-servers/{down.json()['id']}", headers=headers)
+    assert (missing.status_code, missing.json()["error"]["message"]) == (
+        404, "MCP server not found",
+    )
+
+    # The names the guide promises exist in the code, and the guide names every one.
+    routes = {
+        (method.upper(), path)
+        for path, operations in api.openapi()["paths"].items()
+        if path.startswith("/mcp-servers")
+        for method in operations
+    }
+    assert len(routes) == 7
+    for method, path in routes:
+        assert f"`{method} {path}" in text, (method, path)
+    sample = CallContext(uuid.uuid4(), uuid.uuid4(), "u", "Ana")
+    for key in sample.as_meta(uuid.uuid4()):
+        assert f"`{key}`" in text, key
+    for header in HEADER_NAMES:
+        assert f"`{header}`" in text, header
+    for name in (
+        "mcp_servers", "MCP_SYNC_INTERVAL_SECONDS", "TOOL_ALLOWED_HOSTS",
+        "TOOL_MAX_RESPONSE_BYTES", "readOnlyHint", "ToolError", "/tool", "421", "OAuth",
+        mock_llm_server.TOOL_RESULT_PREFIX, "Stub: tool <name> is not offered.",
+        mock_llm_server.TOOL_INVALID, "business tools demo: ok",
+    ):
+        assert name in text, name
+    not_offered = mock_llm_server.TOOL_NOT_OFFERED.format(name="<name>")
+    assert not_offered == "Stub: tool <name> is not offered."
+    # The code sample is the example's own.
+    example = (ROOT / "examples" / "project_inbox" / "tools.py").read_text()
+    source = {line.strip() for line in example.splitlines()}
+    for line in _PYTHON_BLOCK.search(text).group(1).splitlines():
+        if line.strip() and not line.strip().startswith("# ..."):
+            assert line.strip() in source, line
+    print(f"business-tools.md curls replayed: {len(replayed)}")

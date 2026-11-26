@@ -49,6 +49,7 @@ class AgentCreate(BaseModel):
     memory_enabled: bool = True
     handoff_enabled: bool = True
     tool_names: list[str] = Field(default_factory=list)
+    mcp_servers: list[str] = Field(default_factory=list)
     context_message_limit: ContextLimit = 20
     summary_threshold: SummaryThreshold = 40
     boundary_scope: Scope | None = None
@@ -56,6 +57,7 @@ class AgentCreate(BaseModel):
     boundary_refusal_message: RefusalMessage | None = None
     boundary_check_enabled: bool = True
     sentiment_escalation_enabled: bool = False
+    knowledge_enabled: bool = False
     handoff_message: HandoffMessage | None = None
     error_message: FailureText | None = None
     unsupported_media_message: FailureText | None = None
@@ -72,6 +74,7 @@ class AgentUpdate(BaseModel):
     memory_enabled: bool | None = None
     handoff_enabled: bool | None = None
     tool_names: list[str] | None = None
+    mcp_servers: list[str] | None = None
     context_message_limit: ContextLimit | None = None
     summary_threshold: SummaryThreshold | None = None
     boundary_scope: Scope | None = None
@@ -79,6 +82,7 @@ class AgentUpdate(BaseModel):
     boundary_refusal_message: RefusalMessage | None = None
     boundary_check_enabled: bool | None = None
     sentiment_escalation_enabled: bool | None = None
+    knowledge_enabled: bool | None = None
     handoff_message: HandoffMessage | None = None
     # An explicit null clears these two back to the default text.
     error_message: FailureText | None = None
@@ -97,6 +101,7 @@ class AgentOut(BaseModel):
     memory_enabled: bool
     handoff_enabled: bool
     tool_names: list[str]
+    mcp_servers: list[str]
     context_message_limit: int
     summary_threshold: int
     boundary_scope: str | None
@@ -104,6 +109,7 @@ class AgentOut(BaseModel):
     boundary_refusal_message: str | None
     boundary_check_enabled: bool
     sentiment_escalation_enabled: bool
+    knowledge_enabled: bool
     handoff_message: str
     error_message: str | None
     unsupported_media_message: str | None
@@ -183,7 +189,9 @@ async def update_agent(
         "boundary_never",
         "boundary_check_enabled",
         "sentiment_escalation_enabled",
+        "knowledge_enabled",
         "handoff_message",
+        "mcp_servers",
     ):
         if key in changes and changes[key] is None:
             del changes[key]

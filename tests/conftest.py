@@ -13,6 +13,7 @@ import pytest_asyncio
 from cryptography.fernet import Fernet
 from fakeredis import FakeAsyncRedis
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # `harness_test` is a separate database from the one docker-compose's api/
@@ -269,9 +270,13 @@ async def test_engine():
     await _ensure_test_database_exists()
     engine = create_async_engine(TEST_DATABASE_URL, pool_pre_ping=True)
     async with engine.begin() as conn:
+        # Outside the ORM (app/knowledge/embeddings.py), created by the tests
+        # that need it; dropped first since it references knowledge_passages.
+        await conn.execute(text("DROP TABLE IF EXISTS knowledge_embeddings"))
         await conn.run_sync(Base.metadata.create_all)
     yield engine
     async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS knowledge_embeddings"))
         await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
 

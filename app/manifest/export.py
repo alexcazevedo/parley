@@ -18,10 +18,13 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.agents import AgentCreate
+from app.api.mcp_servers import McpServerCreate
 from app.api.tools import ToolCreate, decode_auth_config
 from app.manifest.apply import TenantState, load_state, unmanaged_items
 from app.models.agent import DEFAULT_HANDOFF_MESSAGE, Agent
 from app.models.channel import Channel, ChannelType
+from app.models.knowledge_item import KnowledgeItemKind
+from app.models.mcp_server import McpServer
 from app.models.tenant import Tenant
 from app.models.tool import Tool
 from app.repositories.secrets import SecretsRepository
@@ -121,6 +124,36 @@ def _tool_entry(
     return _without_defaults(ToolCreate, values)
 
 
+def _mcp_entry(
+    server: McpServer,
+    secrets: set[str],
+    taken: set[str],
+    warnings: list[str],
+    remembered: dict[str, str],
+) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        name: getattr(server, name)
+        for name in McpServerCreate.model_fields
+        if name != "auth_config"
+    }
+    stored: Any = None
+    try:
+        stored = decode_auth_config(server.auth_config_encrypted)
+    except Exception:  # unreadable (key rotated): exported without it
+        warnings.append(
+            f"the credentials of MCP server '{server.name}' cannot be read; not exported"
+        )
+    values["auth_config"] = None
+    if isinstance(stored, dict):
+        auth = {k: stored[k] for k in _AUTH_PLAIN_KEYS if k in stored}
+        if stored.get("token"):
+            name = remembered.get("token") or secret_name("mcp_", server.name, "_token", taken)
+            auth["token"] = {"secret": name}
+            secrets.add(name)
+        values["auth_config"] = auth
+    return _without_defaults(McpServerCreate, values)
+
+
 def _channel_entry(
     channel: Channel,
     key: str,
@@ -206,12 +239,19 @@ async def export_manifest(session: AsyncSession, tenant: Tenant) -> ExportResult
     remembered: dict[tuple[str, uuid.UUID], dict[str, str]] = {
         (kind, r.item_id): dict(r.secret_names or {})
         for (kind, _), r in state.records.items()
-        if kind in ("tool", "channel")
+        if kind in ("tool", "channel", "mcp_server")
     }
     taken_secrets: set[str] = {n for names in remembered.values() for n in names.values()}
     tools = [
         _tool_entry(t, referenced, taken_secrets, warnings, remembered.get(("tool", t.id), {}))
         for t in sorted(state.tools.values(), key=lambda t: t.name)
+    ]
+
+    mcp_servers = [
+        _mcp_entry(
+            m, referenced, taken_secrets, warnings, remembered.get(("mcp_server", m.id), {})
+        )
+        for m in sorted(state.mcp_servers.values(), key=lambda m: m.name)
     ]
 
     channels = sorted(
@@ -229,7 +269,11 @@ async def export_manifest(session: AsyncSession, tenant: Tenant) -> ExportResult
         key=lambda e: e["key"],
     )
 
-    for kind, rows in (("department", state.departments), ("tool", state.tools)):
+    for kind, rows in (
+        ("department", state.departments),
+        ("tool", state.tools),
+        ("mcp_server", state.mcp_servers),
+    ):
         for (record_kind, key), record in state.records.items():
             row = rows.get(record.item_id)
             if record_kind == kind and row is not None and row.name != key:
@@ -238,15 +282,37 @@ async def export_manifest(session: AsyncSession, tenant: Tenant) -> ExportResult
                     "apply the manifest to adopt the new name"
                 )
 
+    by_title = sorted(state.knowledge_items, key=lambda i: i.title)
+    entries = [
+        {"title": i.title, "text": i.body or ""}
+        for i in by_title
+        if i.kind == KnowledgeItemKind.ENTRY
+    ]
+    qa = [
+        {"question": i.title, "answer": i.body or ""}
+        for i in by_title
+        if i.kind == KnowledgeItemKind.QA
+    ]
+    warnings += [
+        f"document '{i.title}' is not in the manifest: documents are uploaded through the API"
+        for i in by_title
+        if i.kind == KnowledgeItemKind.DOCUMENT
+    ]
+
     manifest: dict[str, Any] = {"version": 1}
     for section, items in (
         ("agents", agents),
         ("departments", departments),
         ("tools", tools),
         ("channels", channels),
+        ("mcp_servers", mcp_servers),
     ):
         if items:
             manifest[section] = items
+
+    knowledge = {name: items for name, items in (("entries", entries), ("qa", qa)) if items}
+    if knowledge:
+        manifest["knowledge"] = knowledge
 
     present = {s.name for s in await SecretsRepository(session).names(tenant.id)}
     return ExportResult(

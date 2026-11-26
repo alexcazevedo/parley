@@ -2,112 +2,101 @@
 mode: mvp                      # prototype | mvp | production
 routing_profile: cloud         # cloud | cloud+local (local is opt-in, never a default)
 parallel_default: sequential   # sequential | parallel
-owner: human                   # human | agent (set by comb:auto)
+owner: agent                   # human | agent (set by comb:auto)
 ---
 
-# One-step setup (plug and play, milestone 2 of 5)
+# A model per job (milestone 5)
+
+The brief is `docs/roadmap/2-model-per-job.md`; the decisions common to the
+roadmap are in `docs/roadmap/README.md`. This file is the short form.
 
 ## What / why
 
-Setting up a business in parley takes about ten ordered API calls: agent,
-tools, attaching tools, departments, channels. Each project repeats them by
-hand or in a script, nothing records what the setup should be, and changing
-it later means finding ids and patching one item at a time.
-
-This milestone lets a project describe its business in one file (the
-manifest) and apply it with one call, as often as it wants. The file can
-live in the project's repository and is the record of the setup.
+A turn makes up to five model calls besides the reply: the boundary check,
+sentiment, the department, the rolling summary and the handoff brief. All
+run on the agent's own model, the most expensive and slowest choice for a
+yes-or-no answer. This milestone lets the server owner give each job its own
+model, and run the three decisions on TypeSafe's decision model (Jev), which
+answers typed questions instead of writing text.
 
 ## Primary user story
 
-As a developer (or an AI agent) integrating a business, I write one file
-with the agent's persona, the departments, the tools and the channels, apply
-it with my tenant key, and the agent works. To change anything I edit the
-file and apply it again.
+As the owner of a parley server, I set one environment variable per job and
+the boundary check, sentiment and department run on a small decision model,
+while replies stay on the agent's model; I can read from the data which
+model served each call and what it cost, and compare a model's boundary
+decisions with the recorded ones before I trust it.
 
 ## In scope
 
-**The manifest.** One document, accepted as JSON or YAML, with a version
-number. It holds: agents (every field the agents API accepts, including the
-persona), departments (name and the description the agent routes by), tools
-(every field the tools API accepts), which tools each agent uses, and
-channels of every type (web chat, WhatsApp through Evolution, external),
-each bound to an agent. Agents and channels carry a key chosen by the
-author, because their names are not unique; departments and tools are
-identified by name.
+**A setting per job**, in the environment, the same for every tenant; unset
+means the agent's own model, exactly as today. A value is either another
+chat model on the configured endpoint, or TypeSafe's decision model (with
+`TYPESAFE_API_KEY`). A wrong value stops the server at start with a message
+naming the setting; so does a writing job pointed at a decision model.
 
-**Apply.** One call with the tenant key. The whole file is validated first,
-with every problem reported at once; then all changes are made together or
-none are. Applying the same file twice changes nothing. The answer lists
-what was created, updated, deleted and left alone. A secret that parley
-generates (an external channel's signing secret) is returned once, on the
-apply that creates the channel.
+**Decisions on TypeSafe**, through Pydantic AI's own support for it, with
+typed answers:
+- Boundary check: allowed or not, and which rule was broken (the scope, one
+  of the `never` items, staying in role, or none). The recorded reason is
+  built from that pick; no free text, no second call.
+- Sentiment: a frustration scale, mapped onto the existing threshold.
+- Department: one of the tenant's departments, or none.
 
-**Dry run.** The same call in a mode that changes nothing and returns the
-same list.
+**When the decision model cannot take a call** (more options than it
+accepts, an image, an unsure answer), that call goes to the agent's own
+model and the hand-over is recorded. An error or a timeout does not hand
+over: the job fails as today. The boundary check blocks the reply; sentiment
+and department do nothing.
 
-**Removed items.** Parley remembers which items the manifest manages. An
-item removed from the file is deleted on the next apply; the dry run shows
-it first. Items created by hand through the API are never touched. An
-agent or channel that has any conversation, open or closed, is refused
-(deleting it would erase that history), as is a department used by an open
-conversation; the message says why and nothing is changed.
+**Recorded.** One row per job call: the job, the model that served it, token
+use, latency, the outcome, whether it was handed over.
 
-**Secrets.** The file never holds a credential. It names secrets; their
-values are set separately through a write-only endpoint, stored encrypted,
-replaceable, never readable. Apply fails with the list of missing names.
+**Compared before trusted.** A command replays a tenant's stored replies
+through the boundary check on a candidate model and prints where it
+disagrees with what was recorded.
 
-**Existing tenants.** Export writes the manifest of a tenant as it is now
-(secrets as names to be set, never values). Applying a file adopts an
-existing item with the same name or key instead of duplicating it; from
-then on the manifest manages it.
-
-**Tenant.** Created first by the server owner with the admin key, as
-today. The manifest applies to that tenant only.
-
-**Docs.** A guide, `docs/guides/manifest.md`, linked from `llms.txt`,
-passing the drift and replay tests, with one complete example manifest for
-a store, and shorter ones for a clinic and a law firm. The quickstart
-points to it as the fast path.
+**Docs.** Configuration (the settings, and what each job sends to TypeSafe),
+agent behaviour (the jobs and what a smaller model risks), operations (the
+command, reading the recorded calls).
 
 ## Out of scope
 
-Later milestones; this one must leave room for each:
-- **Knowledge base**: the manifest's version number and layout must allow a
-  knowledge section to be added without breaking older files.
-- **Business functions as tools** (importing an OpenAPI spec, confirmation
-  before risky actions): tools in the manifest are today's HTTP tools.
-- **Admin UI**: export and apply are the one document a UI will read and
-  write; nothing here is possible only through the file.
-
-Never: creating tenants from the manifest, a command-line tool, conversations
-or contacts or memories in the manifest, history of past manifests or
-rollback, applying to several tenants at once, billing, hosted SaaS.
+Typed answers on a chat model (they come with native providers, brief 3;
+a chat model set for a job answers in today's text form). Moving the reply
+to another provider. Streaming. Settings per tenant or per agent. A
+pre-check that skips the model for simple messages. A free-text reason from
+a second call. Comparing sentiment or department decisions (their inputs are
+not stored). Changing what any job decides or its thresholds. Any framework
+owning the loop.
 
 ## Constraints
 
-- Existing endpoints keep working; hand-made setups are unaffected until a
-  manifest adopts them.
-- Everything is tenant-scoped.
-- The manifest goes through the same validation as the existing endpoints
-  (bounds, tool name rules, address checks): nothing is possible through
-  the file that the API refuses.
+- With none of the new settings, every existing test passes unchanged.
+- Pydantic AI is used only as the model layer for the decision jobs.
+- No test calls TypeSafe or any model: fakes only.
+- Timeouts of the three decision jobs are unchanged, hand-over included.
 
 ## Success demo
 
-Done when a fresh agent, given only `llms.txt` and one paragraph describing
-a made-up clinic, writes a manifest, sets its one secret, runs the dry run,
-applies it to an empty tenant on a stack running the stub model, and a
-customer message is answered; then removes a department and changes the
-persona in the file, applies again, and the dry run of a third apply
-reports nothing to do; with no other setup call.
+Done when, on a stack where the reply runs on one model and the boundary
+check, sentiment and department are set to TypeSafe's decision model, a
+customer message is answered; the recorded calls show which model served
+each job and its use; a reply that breaks a boundary is blocked, and is
+blocked when the decision model errors or times out; an agent with more
+`never` items than the decision model accepts has its check handed to the
+agent's model and recorded so; the comparison command prints the stored
+replies on which a candidate model disagrees; and with no new setting every
+existing test passes unchanged. The decision model is a fake in tests; the
+real service is exercised only when `TYPESAFE_API_KEY` is set.
 
 ## Grill log
 
-| # | Question | Answer |
-|---|---|---|
-| 1 | Mode | mvp |
-| 2 | Items removed from the file | Delete only what the manifest created; refuse if in use |
-| 3 | Secrets | Named in the file, values set separately, write-only |
-| 4 | Tenants already set up by hand | Export, and adopt by name or key |
-| 5 | Creating the tenant | Server owner first; the manifest applies with the tenant key |
+| # | question | recommendation | answer | tag |
+|---|----------|----------------|--------|-----|
+| 1 | Mode | (given by the human) | mvp | AGREE |
+| 2 | How is the boundary reason kept useful without free text? | The pick of the broken rule; no second call | As recommended; `check_failed` and `check_unparseable` stay | AGREE |
+| 3 | Jobs set per agent too, or per server only? | Per server only | Per server only, in the environment | AGREE |
+| 4 | Do the two writing jobs get a setting? | Yes, same mechanism; refused at startup on a decision model | As recommended; the guide states the risk | AGREE |
+| 5 | Add a pre-check that skips the model for simple messages? | No, later, with data | No | AGREE |
+| 6 | What happens when the decision model cannot answer a call? | That call goes to the agent's model, for every cause including errors and timeouts | Hand over only what it cannot take (too many options, an image, unsure). An error or timeout fails as today, with no hand-over | DIVERGE: the brief already decides "failing the same way" and "timeouts unchanged"; a retry after an error would reopen that and add latency |

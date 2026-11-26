@@ -31,6 +31,7 @@ import json
 import time
 import uuid
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -38,13 +39,30 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.boundaries import check_reply, effective_boundaries
-from app.agents.context import ContextBuilder
+from app.agents.boundaries import (
+    REASON_CHECK_FAILED,
+    Boundaries,
+    Verdict,
+    check_payload,
+    check_reply,
+    effective_boundaries,
+)
+from app.agents.context import KNOWLEDGE_PROMPT_TITLES, ContextBuilder
 from app.agents.loading import load_conversation_agent
 from app.config import Settings, get_settings
 from app.db import end_transaction
 from app.llm.base import ROLE_ASSISTANT, ROLE_TOOL, ROLE_USER, LLMMessage, LLMProvider, ToolCall
+from app.llm.decisions import HandOver, decide_boundary, target_label
 from app.llm.factory import get_provider, resolve_model
+from app.llm.jobs import (
+    CallTimer,
+    Job,
+    JobTarget,
+    failure_outcome,
+    job_model,
+    job_target,
+    record_job_call,
+)
 from app.media.storage import get_media_storage
 from app.memory.service import MemoryService
 from app.models.agent import DEFAULT_HANDOFF_MESSAGE, Agent
@@ -53,7 +71,9 @@ from app.models.channel import Channel
 from app.models.conversation import Conversation
 from app.models.memory import Memory
 from app.models.message import Message, MessageDirection, MessageRole
+from app.repositories.knowledge import KnowledgeItemsRepository
 from app.tools.base import ToolContext
+from app.tools.context import load_call_context
 from app.tools.registry import ToolRegistry
 
 logger = structlog.get_logger(__name__)
@@ -210,6 +230,12 @@ class AgentRuntime:
         memories = await self._load_memories(session, agent, conversation)
         history = await self._recent_messages(session, agent, conversation)
         builder = self._context_builder or self._default_context_builder()
+        # Passed only with the flag on, so a flag-off prompt is built exactly as before.
+        knowledge: dict[str, Any] = {}
+        if agent.knowledge_enabled:
+            knowledge["knowledge_titles"] = await KnowledgeItemsRepository(session).titles(
+                conversation.tenant_id, KNOWLEDGE_PROMPT_TITLES
+            )
         messages = await builder.build(
             agent,
             conversation,
@@ -217,6 +243,7 @@ class AgentRuntime:
             memories,
             tool_specs,
             style_hint=await self._style_hint(session, conversation),
+            **knowledge,
         )
         if not any(message.role == ROLE_USER for message in messages):
             # The batch isn't visible on this session (or was pruned); the model
@@ -233,6 +260,7 @@ class AgentRuntime:
             agent=agent,
             agent_run_id=run.id,
             message_ids=message_ids,
+            call=await load_call_context(session, conversation.tenant_id, conversation.id),
         )
 
         for _ in range(max(1, agent.max_tool_iterations or 1)):
@@ -341,11 +369,42 @@ class AgentRuntime:
         await end_transaction(session)
         # `check_reply` makes only the model call (no database work) and has a
         # timeout of its own; the turn's deadline bounds it as well.
-        verdict = await asyncio.wait_for(
-            check_reply(
-                provider, model=model, boundaries=boundaries, user_text=input_text, reply_text=reply
-            ),
-            timeout=_time_left(deadline),
+        target = job_target(Job.BOUNDARY_CHECK, self._settings)
+        check_model = job_model(Job.BOUNDARY_CHECK, agent, self._settings)
+        called = CallTimer()
+        try:
+            if target.kind == "typesafe":
+                check = self._decide_check(
+                    provider, target, check_model, boundaries, input_text, reply
+                )
+            else:
+                check = check_reply(
+                    provider,
+                    model=check_model,
+                    boundaries=boundaries,
+                    user_text=input_text,
+                    reply_text=reply,
+                )
+            verdict = await asyncio.wait_for(check, timeout=_time_left(deadline))
+        except Exception as exc:
+            # The turn's deadline cut the check off: recorded, then the turn fails.
+            recorded = target_label(target) if target.kind == "typesafe" else check_model
+            await self._record_check(
+                session, conversation, run, recorded, failure_outcome(exc), called.elapsed_ms()
+            )
+            raise
+        await record_job_call(
+            session,
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+            agent_run_id=run.id,
+            job=Job.BOUNDARY_CHECK,
+            model=verdict.model or check_model,
+            outcome=verdict.outcome,
+            prompt_tokens=verdict.prompt_tokens,
+            completion_tokens=verdict.completion_tokens,
+            latency_ms=verdict.latency_ms,
+            handed_over=verdict.handed_over,
         )
         run.llm_calls += 1
         if verdict.allowed:
@@ -359,6 +418,72 @@ class AgentRuntime:
             reason=verdict.reason,
         )
         return boundaries.refusal_message
+
+    async def _decide_check(
+        self,
+        provider: LLMProvider,
+        target: JobTarget,
+        check_model: str,
+        boundaries: Boundaries,
+        user_text: str,
+        reply: str,
+    ) -> Verdict:
+        """The check on the decision model; what it cannot take goes to `check_model`
+        through today's text path. One timeout covers both. Never raises: an error
+        or a timeout blocks with `check_failed`, and is not handed over."""
+        label = target_label(target)
+        called = CallTimer()
+        try:
+            async with asyncio.timeout(get_settings().boundary_check_timeout_seconds):
+                try:
+                    verdict = await decide_boundary(
+                        target, boundaries=boundaries, evidence=check_payload(user_text, reply)
+                    )
+                except HandOver as handed:
+                    logger.info("boundary.check_handed_over", why=handed.why)
+                    verdict = await check_reply(
+                        provider,
+                        model=check_model,
+                        boundaries=boundaries,
+                        user_text=user_text,
+                        reply_text=reply,
+                    )
+                    return replace(
+                        verdict,
+                        model=check_model,
+                        handed_over=True,
+                        latency_ms=called.elapsed_ms(),
+                    )
+        except Exception as exc:
+            logger.warning("boundary.check_failed", error=type(exc).__name__, model=label)
+            return Verdict(
+                allowed=False,
+                reason=REASON_CHECK_FAILED,
+                outcome=failure_outcome(exc),
+                latency_ms=called.elapsed_ms(),
+                model=label,
+            )
+        return replace(verdict, model=label, latency_ms=called.elapsed_ms())
+
+    async def _record_check(
+        self,
+        session: AsyncSession,
+        conversation: Conversation,
+        run: AgentRun,
+        model: str,
+        outcome: str,
+        latency_ms: int,
+    ) -> None:
+        await record_job_call(
+            session,
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+            agent_run_id=run.id,
+            job=Job.BOUNDARY_CHECK,
+            model=model,
+            outcome=outcome,
+            latency_ms=latency_ms,
+        )
 
     def _default_context_builder(self) -> ContextBuilder:
         settings = self._settings or get_settings()
