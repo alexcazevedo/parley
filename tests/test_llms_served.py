@@ -10,6 +10,7 @@ GUIDES = [
     "quickstart",
     "configuration",
     "setup",
+    "manifest",
     "messaging",
     "operators",
     "project-channel",
@@ -92,3 +93,59 @@ def test_dockerfile_copies_docs_and_dockerignore_allows_them():
     assert "llms.txt /srv/llms.txt" in dockerfile
     assert "docs /srv/docs" in dockerfile
     assert "docs" not in (root / ".dockerignore").read_text().split()
+
+
+EXAMPLES = ["store", "clinic", "law-firm"]
+
+
+@pytest.mark.parametrize("name", EXAMPLES)
+async def test_example_manifest_is_served_as_it_is_on_disk(client, name):
+    response = await client.get(f"/examples/manifests/{name}.yaml")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/yaml; charset=utf-8"
+    assert response.text == (llms.EXAMPLES_DIR / f"{name}.yaml").read_text()
+    assert "/examples/manifests/{name}.yaml" not in (await client.get("/openapi.json")).text
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "missing",
+        "Store",
+        "a" * 65,
+        "..%2FREADME",
+        "../store",
+        "%2e%2e/store",
+        "store.md",
+        "a%00b",
+        "demo.txt",
+    ],
+)
+async def test_bad_example_names_are_404(client, tmp_path, monkeypatch, name):
+    (tmp_path / "Store.yaml").write_text("x")
+    (tmp_path / "demo.txt.yaml").write_text("x")
+    (tmp_path / "store.md.yaml").write_text("x")
+    (tmp_path.parent / "README.yaml").write_text("outside")
+    monkeypatch.setattr(llms, "EXAMPLES_DIR", tmp_path)
+    response = await client.get(f"/examples/manifests/{name}.yaml")
+    assert response.status_code == 404
+
+
+async def test_example_symlink_escape_is_404(client, tmp_path, monkeypatch):
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("secret")
+    examples = tmp_path / "examples"
+    examples.mkdir()
+    (examples / "link.yaml").symlink_to(outside)
+    monkeypatch.setattr(llms, "EXAMPLES_DIR", examples)
+    assert (await client.get("/examples/manifests/link.yaml")).status_code == 404
+
+
+def test_dockerfile_copies_the_examples_and_dockerignore_allows_them():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    dockerfile = (root / "docker" / "Dockerfile").read_text()
+    assert "examples/manifests /srv/examples/manifests" in dockerfile
+    ignored = (root / ".dockerignore").read_text().split()
+    assert "examples" not in ignored and "examples/manifests" not in ignored

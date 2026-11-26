@@ -57,6 +57,7 @@ Follow the guides in order; each one ends with a check that its step worked.
 - [Quickstart](docs/guides/quickstart.md): bring up the stack and confirm it is healthy.
 - [Configuration](docs/guides/configuration.md): every environment variable, and which are required.
 - [Setup](docs/guides/setup.md): create a tenant, an agent, a channel and tools.
+- [Manifest](docs/guides/manifest.md): describe a business in one file and apply it with one call; secrets, dry run, export of a tenant set up by hand, three example files.
 - [Messaging](docs/guides/messaging.md): send and receive messages on web chat and WhatsApp; what the customer sees when something fails.
 - [Operators](docs/guides/operators.md): hand a conversation to a human; lines, claim, reply, resume, categories; a polling loop for an operator screen.
 - [Project channel](docs/guides/project-channel.md): connect a project with its own inbox: forward messages, signed event pushes, the event feed, departments, PDFs.

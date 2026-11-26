@@ -78,22 +78,39 @@ _ENDPOINT_KEYS = {
 }
 
 
-def _check_endpoint(channel_type: ChannelType, config: dict[str, Any] | None) -> None:
-    """Refuse a non-public Evolution `base_url` (PRODUCT.md F1), or an external
-    channel's `events_url`, before any write.
-
-    Static check only (no DNS); the adapter re-checks with DNS on every call.
+def endpoint_problem(channel_type: ChannelType, config: dict[str, Any] | None) -> str | None:
+    """Static check (no DNS) of an Evolution `base_url` (PRODUCT.md F1) or an
+    external channel's `events_url`: the refusal message, or None when allowed.
+    The adapter re-checks with DNS on every call. Shared with `app/manifest/apply.py`.
     """
     key = _ENDPOINT_KEYS.get(channel_type)
     if key is None or not config or key not in config:
-        return
+        return None
     try:
         validate_channel_base_url(str(config[key]))
     except SSRFError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"invalid {key}: {exc}",
-        ) from exc
+        return f"invalid {key}: {exc}"
+    return None
+
+
+def _check_endpoint(channel_type: ChannelType, config: dict[str, Any] | None) -> None:
+    """Refuse a non-public endpoint in `config` before any write."""
+    problem = endpoint_problem(channel_type, config)
+    if problem is not None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=problem)
+
+
+def channel_secret(
+    channel_type: ChannelType, secret: str | None
+) -> tuple[str | None, str | None]:
+    """`(secret_encrypted, events_secret)` of a new channel. An `external`
+    channel's secret is generated, never chosen by the caller, and is the
+    `events_secret` shown once. Shared with `app/manifest/apply.py`."""
+    events_secret: str | None = None
+    if channel_type == ChannelType.EXTERNAL:
+        events_secret = secrets.token_urlsafe(32)
+        secret = events_secret
+    return (secrets_crypto.encrypt(secret) if secret is not None else None), events_secret
 
 
 @router.post("", response_model=ChannelCreatedOut, status_code=status.HTTP_201_CREATED)
@@ -105,14 +122,9 @@ async def create_channel(
     _check_endpoint(payload.type, payload.config)
     await _require_agent(db, tenant, payload.agent_id)
     data = payload.model_dump()
-    secret = data.pop("secret")
-    events_secret: str | None = None
-    if payload.type == ChannelType.EXTERNAL:
-        # Generated, never chosen by the caller; shown once, below.
-        events_secret = secrets.token_urlsafe(32)
-        secret = events_secret
-    if secret is not None:
-        data["secret_encrypted"] = secrets_crypto.encrypt(secret)
+    secret_encrypted, events_secret = channel_secret(payload.type, data.pop("secret"))
+    if secret_encrypted is not None:
+        data["secret_encrypted"] = secret_encrypted
     channel = await _repo(db).create(tenant.id, **data)
     await db.commit()
     await db.refresh(channel)

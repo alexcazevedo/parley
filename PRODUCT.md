@@ -5,102 +5,109 @@ parallel_default: sequential   # sequential | parallel
 owner: human                   # human | agent (set by comb:auto)
 ---
 
-# Project-owned channel (plug and play, milestone 1 of 5)
+# One-step setup (plug and play, milestone 2 of 5)
 
 ## What / why
 
-Parley can talk to customers only through channels it owns: its web chat
-(text, replies polled) and a WhatsApp number it connects to itself. A
-project that already has its own inbox, staff and customer channel cannot
-use it. The first adopter, vendezap (a store's shared WhatsApp inbox), owns
-its numbers, its Conversas screen and its attendants. A clinic's reception
-system or a law firm's intake tool is in the same position.
+Setting up a business in parley takes about ten ordered API calls: agent,
+tools, attaching tools, departments, channels. Each project repeats them by
+hand or in a script, nothing records what the setup should be, and changing
+it later means finding ids and patching one item at a time.
 
-This milestone adds a channel the project owns: the project forwards what
-its customers and staff say, and parley pushes back what the agent does.
+This milestone lets a project describe its business in one file (the
+manifest) and apply it with one call, as often as it wants. The file can
+live in the project's repository and is the record of the setup.
 
 ## Primary user story
 
-As a developer (or an AI agent) integrating a business that already has an
-inbox, I follow one guide, forward my messages to parley, expose one URL,
-and my customers are answered by the agent inside my own inbox, with my
-staff able to take over at any moment.
+As a developer (or an AI agent) integrating a business, I write one file
+with the agent's persona, the departments, the tools and the channels, apply
+it with my tenant key, and the agent works. To change anything I edit the
+file and apply it again.
 
 ## In scope
 
-**Ownership.** The project's inbox is the source of truth and its staff
-are the only operators. Parley keeps a copy so the agent has context.
-Parley's waiting lines and operator page are not used by such a project.
-One tenant per installation of the project.
+**The manifest.** One document, accepted as JSON or YAML, with a version
+number. It holds: agents (every field the agents API accepts, including the
+persona), departments (name and the description the agent routes by), tools
+(every field the tools API accepts), which tools each agent uses, and
+channels of every type (web chat, WhatsApp through Evolution, external),
+each bound to an agent. Agents and channels carry a key chosen by the
+author, because their names are not unique; departments and tools are
+identified by name.
 
-**Messages in.** The project forwards every customer message and every
-message its staff sends. Customer messages may be text, image, voice note
-or PDF. Images and voice notes behave as on parley's WhatsApp channel
-today. PDFs are new: their text is given to the agent; a PDF without
-readable text, or over the size limit, gets the agent's standard
-"unsupported" answer. Agent replies are text.
+**Apply.** One call with the tenant key. The whole file is validated first,
+with every problem reported at once; then all changes are made together or
+none are. Applying the same file twice changes nothing. The answer lists
+what was created, updated, deleted and left alone. A secret that parley
+generates (an external channel's signing secret) is returned once, on the
+apply that creates the channel.
 
-**Agent on and off.** The agent answers until it hands off by itself or a
-staff message arrives; either pauses it for that conversation. The project
-calls "hand back to agent" to resume. No automatic resume.
+**Dry run.** The same call in a mode that changes nothing and returns the
+same list.
 
-**Departments.** Defined in parley. When the agent picks one, the project
-is told its id and name and shows it its own way (vendezap: an etiqueta of
-the same name). When staff changes it in the project, the project tells
-parley, and the agent stops deciding for that conversation.
+**Removed items.** Parley remembers which items the manifest manages. An
+item removed from the file is deleted on the next apply; the dry run shows
+it first. Items created by hand through the API are never touched. An
+agent or channel that has any conversation, open or closed, is refused
+(deleting it would erase that history), as is a department used by an open
+conversation; the message says why and nothing is changed.
 
-**Events out.** Parley pushes agent replies, handoffs (with the brief),
-department changes and agent on/off changes to a URL of the project.
-Pushes are signed with a secret parley generates and shows once, and are
-retried for a limited time. Every event is also kept in an ordered feed
-the project reads from its last position, so a long outage loses nothing.
-Events carry an id; a repeat must be harmless.
+**Secrets.** The file never holds a credential. It names secrets; their
+values are set separately through a write-only endpoint, stored encrypted,
+replaceable, never readable. Apply fails with the list of missing names.
 
-**Proof and docs.** A small example project in this repo (its own tiny
-inbox) used by the tests and by a fresh-agent run. A guide,
-`docs/guides/project-channel.md`, linked from `llms.txt`, passing the
-drift and replay tests. A brief, `docs/integrations/vendezap.md`, ready to
-paste into `/comb:grill` in the vendezap repo: what vendezap must send,
-receive and show, mapped to its own code.
+**Existing tenants.** Export writes the manifest of a tenant as it is now
+(secrets as names to be set, never values). Applying a file adopts an
+existing item with the same name or key instead of duplicating it; from
+then on the manifest manages it.
+
+**Tenant.** Created first by the server owner with the admin key, as
+today. The manifest applies to that tenant only.
+
+**Docs.** A guide, `docs/guides/manifest.md`, linked from `llms.txt`,
+passing the drift and replay tests, with one complete example manifest for
+a store, and shorter ones for a clinic and a law firm. The quickstart
+points to it as the fast path.
 
 ## Out of scope
 
 Later milestones; this one must leave room for each:
-- **One-step setup** (one file, applied idempotently): the channel and its
-  push URL must be creatable by plain data, no manual step.
-- **Knowledge base**: nothing here; replies stay text.
-- **Business functions as tools**: the existing HTTP tools are unchanged.
-- **Admin UI**: every action here is a tenant-scoped endpoint.
+- **Knowledge base**: the manifest's version number and layout must allow a
+  knowledge section to be added without breaking older files.
+- **Business functions as tools** (importing an OpenAPI spec, confirmation
+  before risky actions): tools in the manifest are today's HTTP tools.
+- **Admin UI**: export and apply are the one document a UI will read and
+  write; nothing here is possible only through the file.
 
-Never: changes in the vendezap repo (its own run), billing, marketplace,
-hosted SaaS, per-language SDKs, media in agent replies, reading scanned
-PDFs, automatic resume of the agent.
+Never: creating tenants from the manifest, a command-line tool, conversations
+or contacts or memories in the manifest, history of past manifests or
+rollback, applying to several tenants at once, billing, hosted SaaS.
 
 ## Constraints
 
-- Existing endpoints and channels keep working unchanged.
+- Existing endpoints keep working; hand-made setups are unaffected until a
+  manifest adopts them.
 - Everything is tenant-scoped.
-- Nothing is specific to retail: the guide shows the same flow for a
-  clinic in one paragraph.
+- The manifest goes through the same validation as the existing endpoints
+  (bounds, tool name rules, address checks): nothing is possible through
+  the file that the API refuses.
 
 ## Success demo
 
-Done when a fresh agent, given only `llms.txt`, connects the example
-project to an empty parley stack running the stub model, and: a customer
-message is answered inside the example inbox by push; a staff message
-pauses the agent; "hand back" resumes it; the department chosen by the
-agent appears in the example inbox; and after the example project is
-stopped and restarted, the replies it missed arrive from the feed, each
-once.
+Done when a fresh agent, given only `llms.txt` and one paragraph describing
+a made-up clinic, writes a manifest, sets its one secret, runs the dry run,
+applies it to an empty tenant on a stack running the stub model, and a
+customer message is answered; then removes a department and changes the
+persona in the file, applies again, and the dry run of a third apply
+reports nothing to do; with no other setup call.
 
 ## Grill log
 
 | # | Question | Answer |
 |---|---|---|
 | 1 | Mode | mvp |
-| 2 | Source of truth for conversations and operators | The project |
-| 3 | Who turns the agent off and on | A staff message pauses; explicit hand back resumes |
-| 4 | Departments | Parley decides, project maps; staff changes are sent back |
-| 5 | Project down | Retries, then an ordered catch-up feed |
-| 6 | Where the milestone stops | Parley plus an example project, and a vendezap brief |
-| 7 | Media | Text, image, voice note and PDF in; text out |
+| 2 | Items removed from the file | Delete only what the manifest created; refuse if in use |
+| 3 | Secrets | Named in the file, values set separately, write-only |
+| 4 | Tenants already set up by hand | Export, and adopt by name or key |
+| 5 | Creating the tenant | Server owner first; the manifest applies with the tenant key |

@@ -37,7 +37,7 @@ Services start in this order:
 1. `postgres` and `redis` start and become healthy.
 2. `migrate` runs `alembic upgrade head` once and exits with code 0.
 3. `api` and `worker` start only after `migrate` succeeded. If `migrate` fails neither starts.
-4. `mock-tools` is a small demo business endpoint on the compose network. `api` waits for it.
+4. `mock-tools` is a small demo business endpoint on the compose network. `api` waits for it. Tools may call it only when `.env` has `TOOL_ALLOWED_HOSTS=mock-tools`; the default, empty, allows public hosts and refuses private ones, `mock-tools` included ([setup](setup.md) step 2).
 
 Check: `docker compose ps -a` shows `postgres`, `redis`, `api`, `worker` and `mock-tools` as running or healthy, and `migrate` as `Exited (0)`. If `api` or `worker` exited, run `docker compose logs api worker`. A message naming `ADMIN_API_KEY` or `SECRETS_KEY` means that variable is unset or still a placeholder.
 
@@ -118,4 +118,4 @@ Check: `docker compose ps -a` lists nothing.
 
 ## Next
 
-Create a tenant, an agent, a tool and a channel in [setup](setup.md).
+Create a tenant in [setup](setup.md) step 1. The fast path for the rest is the [manifest](manifest.md): one file with the agent, departments, tools and channels, applied with one call. [Setup](setup.md) has the same items one call at a time.

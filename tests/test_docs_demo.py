@@ -40,7 +40,7 @@ _FENCE = re.compile(r"^```[^\n]*\n(.*?)^```", re.S | re.M)
 _INLINE_CURL = re.compile(r"`(curl [^`]+)`")
 _ASSIGN = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 _VAR = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)\}?")
-_FLAGS_WITH_ARG = {"-X", "-H", "-d", "-F", "-o", "-w", "--data", "--data-raw"}
+_FLAGS_WITH_ARG = {"-X", "-H", "-d", "-F", "-o", "-w", "--data", "--data-raw", "--data-binary"}
 
 # `file=@name` in a guide's curl is replaced with the bytes below.
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
@@ -57,6 +57,8 @@ class Curl:
     body: str | None = None
     forms: list[str] = field(default_factory=list)
     raw_method: str | None = None
+    # `--data-binary @name`: the file name, sent as it is (a YAML manifest).
+    data_file: str | None = None
 
     @property
     def path(self) -> str:
@@ -95,6 +97,9 @@ def _commands(tokens: list[str], guide: str) -> tuple[list[Curl], dict[str, str]
                         curl.headers[name] = value
                     elif token in ("-d", "--data", "--data-raw"):
                         curl.body = arg
+                    elif token == "--data-binary":
+                        assert arg.startswith("@"), f"{guide}.md: --data-binary needs @file"
+                        curl.data_file = arg[1:]
                     elif token == "-F":
                         curl.forms.append(arg)
                 continue
@@ -102,7 +107,8 @@ def _commands(tokens: list[str], guide: str) -> tuple[list[Curl], dict[str, str]
                 break
             curl.url = token
             i += 1
-        curl.method = curl.raw_method or ("POST" if curl.body or curl.forms else "GET")
+        has_body = curl.body or curl.forms or curl.data_file
+        curl.method = curl.raw_method or ("POST" if has_body else "GET")
         curls.append(curl)
     return curls, assigns
 
@@ -128,6 +134,20 @@ def extract(guide: str) -> tuple[list[Curl], dict[str, str]]:
     return curls, assigns
 
 
+_YAML_BLOCK = re.compile(r"^```yaml\n# file: (\S+)\n(.*?)^```", re.S | re.M)
+
+
+def guide_file(guide: str, name: str) -> str:
+    """A file a curl sends with `--data-binary @name`: the guide's own yaml block
+    that starts with `# file: name`, else an example manifest of the repository."""
+    blocks = dict(_YAML_BLOCK.findall(_read(guide)))
+    if name in blocks:
+        return blocks[name]
+    example = ROOT / "examples" / "manifests" / name
+    assert example.is_file(), f"{guide}.md sends @{name}, which it does not show"
+    return example.read_text()
+
+
 def find(guide: str, method: str, path: str, contains: str = "") -> Curl:
     """The guide's curl for `METHOD path`; `contains` tells two apart."""
     curls, _ = extract(guide)
@@ -136,7 +156,7 @@ def find(guide: str, method: str, path: str, contains: str = "") -> Curl:
         for c in curls
         if c.method == method
         and c.path == path
-        and contains in (c.body or "") + " ".join(c.forms) + c.url
+        and contains in (c.body or "") + " ".join(c.forms) + c.url + (c.data_file or "")
     ]
     assert hits, f"{guide}.md has no curl for {method} {path} {contains!r}"
     return hits[0]
@@ -173,6 +193,8 @@ class Agent:
         if curl.body is not None:
             kwargs["content"] = self.fill(curl.body, placeholders).encode()
             json.loads(kwargs["content"])  # the guide's body is valid JSON once filled
+        if curl.data_file is not None:
+            kwargs["content"] = guide_file(curl.guide, curl.data_file).encode()
         if curl.forms:
             data, files = {}, {}
             for form in curl.forms:
@@ -656,3 +678,187 @@ async def test_every_guide_is_served_as_it_is_on_disk(client):
         assert response.text == path.read_text(), path.name
     served = await client.get("/llms.txt")
     assert served.text == (ROOT / "llms.txt").read_text()
+
+
+MANIFEST = "manifest"
+
+
+async def test_the_manifest_guide(client):
+    """An integrator follows manifest.md: secrets, dry run, apply, change the file,
+    a refused removal, export, the examples. Every curl of the guide is replayed in
+    the order the guide gives it (the inline checks last, as `extract` returns them)."""
+    import os
+
+    from app.manifest import yaml_io
+    from app.manifest.apply import parse_manifest
+
+    me = Agent(client)
+    v = me.vars
+    v["ADMIN_API_KEY"] = os.environ["ADMIN_API_KEY"]
+    r = await me.run("setup", "POST", "/tenants", 201)
+    v["TENANT_ID"], v["TENANT_KEY"] = r.json()["id"], r.json()["api_key"]
+    text = _read(MANIFEST)
+
+    # Both files of the guide are valid manifests.
+    for name in ("manifest.yaml", "manifest-v2.yaml"):
+        parse_manifest(yaml_io.load(guide_file(MANIFEST, name)))
+
+    curls, _ = extract(MANIFEST)
+    queue = iter(curls)
+    replayed: list[Curl] = []
+
+    async def step(method: str, path: str, status: int):
+        curl = next(queue)
+        assert (curl.method, curl.path) == (method, path), f"{curl.method} {curl.path}"
+        replayed.append(curl)
+        response = await me.send(curl)
+        assert response.status_code == status, f"{method} {path}: {response.text}"
+        return response
+
+    def changes(response) -> list[tuple[str, str, str, list[str]]]:
+        return [(c["kind"], c["key"], c["action"], c["fields"]) for c in response.json()["changes"]]
+
+    # 3. Secrets: set, list without a value, set and delete another.
+    await step("PUT", "/secrets/orders_token", 204)
+    r = await step("GET", "/secrets", 200)
+    assert [x["name"] for x in r.json()] == ["orders_token"]
+    assert set(r.json()[0]) == {"name", "created_at", "updated_at"}
+    assert "token-from-the-orders-system" not in r.text
+    await step("PUT", "/secrets/scratch", 204)
+    await step("DELETE", "/secrets/scratch", 204)
+    gone = await client.delete("/secrets/scratch", headers={"X-API-Key": v["TENANT_KEY"]})
+    assert gone.status_code == 404 and gone.json()["error"]["message"] == "secret not found"
+    assert "`DELETE /secrets/{name}` is 204, 404 `secret not found`, or 409" in text
+    assert "secret is used by tool 'get_order'" in text
+
+    # 4. Dry run on an empty tenant: five creates, in the guide's order, nothing written.
+    r = await step("POST", "/manifest/apply", 200)
+    assert r.json()["dry_run"] is True and r.json()["generated"] == {}
+    created = [
+        ("department", "billing", "create", []),
+        ("department", "shipping", "create", []),
+        ("tool", "get_order", "create", []),
+        ("agent", "support", "create", []),
+        ("channel", "inbox", "create", []),
+    ]
+    assert changes(r) == created
+    assert set(r.json()["changes"][0]) == {"kind", "key", "action", "fields", "id"}
+    assert [c["id"] for c in r.json()["changes"]] == [None] * 5
+    r = await me.get("/agents")
+    assert r.json() == []
+
+    # 5. Apply: the signing secret is returned once; the same file again changes nothing.
+    r = await step("POST", "/manifest/apply", 200)
+    assert r.json()["dry_run"] is False and changes(r) == created
+    v["EVENTS_SECRET"] = r.json()["generated"]["channels"]["inbox"]["events_secret"]
+    assert v["EVENTS_SECRET"] and set(r.json()["generated"]) == {"channels"}
+    assert all(c["id"] for c in r.json()["changes"])
+    v["PROJECT_CHANNEL_ID"] = next(c["id"] for c in r.json()["changes"] if c["kind"] == "channel")
+    r = await step("POST", "/manifest/apply", 200)
+    assert {c[2] for c in changes(r)} == {"unchanged"} and r.json()["generated"] == {}
+
+    # 6. The edited file: the dry run and the apply say the same.
+    expected = [
+        ("department", "shipping", "unchanged", []),
+        ("department", "returns", "create", []),
+        ("tool", "get_order", "unchanged", []),
+        ("agent", "support", "update", ["instructions", "temperature"]),
+        ("channel", "inbox", "unchanged", []),
+        ("department", "billing", "delete", []),
+    ]
+    dry = await step("POST", "/manifest/apply", 200)
+    assert changes(dry) == expected
+    r = await step("POST", "/manifest/apply", 200)
+    assert changes(r) == expected and r.json()["generated"] == {}
+    for change in [c for c in expected if c[2] != "unchanged"]:
+        assert json.dumps(
+            {"kind": change[0], "key": change[1], "action": change[2], "fields": change[3]}
+        ) in text
+
+    # 6. A conversation makes the channel and its agent undeletable; nothing is written.
+    r = await me.get("/channels")
+    assert [c["id"] for c in r.json()] == [v["PROJECT_CHANNEL_ID"]]
+    await step("POST", "/channels/external/messages", 201)
+    r = await step("POST", "/manifest/apply", 422)
+    assert r.json()["error"]["details"] == [
+        {
+            "field": "channels",
+            "message": "channel 'inbox' has 1 conversation; deleting it would erase it",
+        },
+        {
+            "field": "agents",
+            "message": "agent 'support' has 1 conversation; deleting it would erase it",
+        },
+    ]
+    for detail in r.json()["error"]["details"]:
+        assert detail["message"] in text
+
+    # 7. Export of the tenant the file made: the managed keys; the secret has a generated name.
+    r = await step("GET", "/manifest", 200)
+    assert r.text.startswith("# secrets_needed: none\nversion: 1\n")
+    assert r.headers["content-type"].startswith("application/yaml")
+    exported = yaml_io.load(r.text)
+    assert [a["key"] for a in exported["agents"]] == ["support"]
+    assert [c["key"] for c in exported["channels"]] == ["inbox"]
+    assert sorted(d["name"] for d in exported["departments"]) == ["returns", "shipping"]
+    parse_manifest(exported)
+    r = await step("GET", "/manifest", 200)
+    assert (r.json()["secrets_needed"], r.json()["warnings"]) == ([], [])
+    assert "`# secrets_needed: a, b` (or `none`)" in text
+    assert exported["tools"][0]["auth_config"]["token"] == {"secret": "orders_token"}
+
+    # 8. The malformed body: the guide's 422 lists, in its order.
+    r = await step("POST", "/manifest/apply", 422)
+    assert r.json()["error"]["code"] == "validation_error"
+    assert [(d["field"], d["message"]) for d in r.json()["error"]["details"]] == [
+        ("agents[0].instructions", "Field required"),
+        ("agents[0].model", "Field required"),
+        ("agents[0].key", "String should match pattern '^[a-z0-9_-]{1,64}$'"),
+        ("agents[0].colour", "Extra inputs are not permitted"),
+        ("departments[0].name", "Field required"),
+    ]
+    for d in r.json()["error"]["details"]:
+        assert f'{{"field": "{d["field"]}", "message": "{d["message"]}"}}' in text
+
+    # 10. An example is served as it is, and an empty tenant would take it.
+    r = await step("GET", "/examples/manifests/store.yaml", 200)
+    assert r.text == (ROOT / "examples" / "manifests" / "store.yaml").read_text()
+    await step("PUT", "/secrets/store_orders_token", 204)
+
+    # The inline checks, last.
+    r = await step("GET", "/manifest/schema", 200)
+    assert set(r.json()["properties"]) == {"version", "agents", "departments", "tools", "channels"}
+    r = await step("GET", "/agents", 200)
+    assert [a["name"] for a in r.json()] == ["Acme support"]
+    r = await step("GET", "/channels", 200)
+    assert [c["name"] for c in r.json()] == ["Project inbox"]
+    r = await step("GET", "/categories", 200)
+    assert sorted(c["name"] for c in r.json()) == ["returns", "shipping"]
+    assert next(queue, None) is None, "a curl of manifest.md was not replayed"
+    assert len(replayed) == len(curls)
+    print(f"manifest.md curls replayed: {len(replayed)}")
+
+
+def test_the_manifest_guide_names_every_problem_the_code_can_give():
+    import app.manifest.apply as apply_module
+    from app.manifest import schema
+
+    text = _read(MANIFEST)
+    constants = {
+        name: value
+        for name, value in vars(apply_module).items()
+        if name.isupper() and isinstance(value, str) and name != "DELETE_ORDER"
+    }
+    constants["NOT_A_REFERENCE"] = schema.NOT_A_REFERENCE
+    assert len(constants) >= 9
+    missing = [name for name, value in constants.items() if value not in text]
+    assert not missing, missing
+    for template in (
+        apply_module.too_many_named("agents", 2, "Sales"),
+        apply_module.adopted_twice("agent", "Sales"),
+        apply_module._conversations_message("channel", "inbox", 1),
+        apply_module._contacts_message("inbox", 1),
+    ):
+        assert template in text, template
+    assert "secret 'orders_token' is not set" in text
+    assert "is the agent of channel 'Project inbox'; delete the channel or bind it" in text

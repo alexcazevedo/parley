@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, StringConstraints
@@ -42,6 +42,11 @@ def _repo(db: AsyncSession) -> CategoriesRepository:
     return CategoriesRepository(db)
 
 
+def category_values(payload: CategoryCreate) -> dict[str, Any]:
+    """The column values of a new category (shared with `app/manifest/apply.py`)."""
+    return payload.model_dump()
+
+
 def _not_found() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="category not found")
 
@@ -59,7 +64,7 @@ async def create_category(
     db: AsyncSession = Depends(get_db),
 ) -> CategoryOut:
     try:
-        category = await _repo(db).create(tenant.id, **payload.model_dump())
+        category = await _repo(db).create(tenant.id, **category_values(payload))
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()

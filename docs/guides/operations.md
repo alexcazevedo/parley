@@ -29,6 +29,8 @@ Check: `docker compose ps api` lists the replicas, and `GET /ready` answers 200 
 
 ## After upgrading
 
+`docker-compose.yml` no longer sets `TOOL_ALLOWED_HOSTS` to `mock-tools` for `api` and `worker`; both take the value from `.env`. With it empty (the `.env.example` default) public tool hosts pass and private, loopback and link-local ones are refused. If you used the bundled `mock-tools` service, add `TOOL_ALLOWED_HOSTS=mock-tools` to `.env` and run `docker compose up -d`; the list is then exclusive.
+
 Older versions allowed a channel or a conversation to point at another tenant's agent, and an Evolution channel with a private `base_url`. Such a conversation now gets no turn and no summary. A channel with a private `base_url` stops sending until its host is listed in `CHANNEL_ALLOWED_HOSTS` for both `api` and `worker`.
 
 List the affected rows once after upgrading:

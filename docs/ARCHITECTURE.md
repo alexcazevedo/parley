@@ -675,6 +675,28 @@ the receiver dedupes on the event id. Staff messages and hand back go through
 `HandoffService` like an operator's, which is where `conversation.handoff` and
 `conversation.agent` are recorded.
 
+## Manifest
+
+`POST /manifest/apply` (`app/api/manifest.py`) reads a JSON or YAML body (1 MiB cap,
+`app/manifest/yaml_io.py`: a safe loader that refuses anchors and aliases) and hands it to
+`app/manifest/apply.py`. The schema (`app/manifest/schema.py`) reuses the create models of
+the agents, categories, tools and channels routes with `extra="forbid"`, so the file takes
+what the endpoints take. Credentials are `{"secret": name}` references to `tenant_secrets`
+(encrypted, write-only, `app/api/secrets.py`).
+
+`apply_manifest` takes a per-tenant advisory lock, reads the tenant's rows, plans one
+`PlannedChange` per item (`create`, `update`, `adopt`, `unchanged`, `delete`) and collects
+every problem before it writes. Structural problems come first, from Pydantic; the plan
+checks are returned only for a well-formed file. Execution goes through the route's
+repositories, so the rules are the routes' own. Deletes run last, in `DELETE_ORDER`, after
+a `FOR UPDATE` lock and the in-use counts. The route commits, or rolls back on any error
+and after a dry run.
+
+`manifest_items` (`tenant_id`, `kind`, `key`, `item_id`) records what the manifest
+manages; no foreign key on `item_id`, so a row can outlive its item and is repointed or
+dropped by the next apply. `app/manifest/export.py` writes a tenant back as a manifest.
+Examples are in `examples/manifests/`, served by `app/api/llms.py`.
+
 ## Paging, the poll and the indexes
 
 How callers page is in `docs/guides/api-conventions.md`.

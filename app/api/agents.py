@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import AfterValidator, BaseModel, Field
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant, get_db
 from app.api.pagination import DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, set_next_cursor
+from app.models.agent import DEFAULT_HANDOFF_MESSAGE
 from app.models.tenant import Tenant
 from app.repositories.agents import AgentsRepository
 from app.repositories.base import parse_after
@@ -115,16 +116,24 @@ def _repo(db: AsyncSession) -> AgentsRepository:
     return AgentsRepository(db)
 
 
+def agent_values(payload: AgentCreate) -> dict[str, Any]:
+    """The column values of a new agent (shared with `app/manifest/apply.py`).
+
+    A missing `handoff_message` is the column default, written explicitly.
+    """
+    values = payload.model_dump()
+    if values["handoff_message"] is None:
+        values["handoff_message"] = DEFAULT_HANDOFF_MESSAGE
+    return values
+
+
 @router.post("", response_model=AgentOut, status_code=status.HTTP_201_CREATED)
 async def create_agent(
     payload: AgentCreate,
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> AgentOut:
-    values = payload.model_dump()
-    if values["handoff_message"] is None:
-        del values["handoff_message"]  # let the column default apply
-    agent = await _repo(db).create(tenant.id, **values)
+    agent = await _repo(db).create(tenant.id, **agent_values(payload))
     await db.commit()
     await db.refresh(agent)
     return AgentOut.model_validate(agent)

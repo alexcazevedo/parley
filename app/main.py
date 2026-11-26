@@ -18,8 +18,10 @@ from app.api import (
     health,
     lines,
     llms,
+    manifest,
     media,
     operator,
+    secrets,
     tenants,
     tools,
     webchat,
@@ -61,6 +63,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(channels.router)
     app.include_router(tools.router)
     app.include_router(categories.router)
+    app.include_router(secrets.router)
+    app.include_router(manifest.router)
     app.include_router(contacts.router)
     app.include_router(conversations.router)
     app.include_router(lines.router)

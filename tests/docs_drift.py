@@ -30,6 +30,7 @@ HIDDEN_ROUTES: set[tuple[str, str]] = {
     ("GET", "/operator"),
     ("GET", "/docs/guides/{}.md"),
     ("GET", "/docs/ARCHITECTURE.md"),
+    ("GET", "/examples/manifests/{}.yaml"),
     ("GET", "/openapi.json"),
     ("GET", "/docs"),
 }

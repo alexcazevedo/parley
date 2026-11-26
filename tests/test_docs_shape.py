@@ -10,6 +10,7 @@ GUIDES = [
     "quickstart",
     "configuration",
     "setup",
+    "manifest",
     "messaging",
     "operators",
     "project-channel",
@@ -45,7 +46,7 @@ def test_readme_links_llms_txt_and_guides():
 
 def test_architecture_is_short_and_has_no_history_references():
     text = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
-    assert len(text.splitlines()) <= 900
+    assert len(text.splitlines()) <= 930
     for pattern in (r"ticket \d", r"PRODUCT\.md", r"PRD"):
         assert not re.search(pattern, text), f"ARCHITECTURE.md matches {pattern}"
 

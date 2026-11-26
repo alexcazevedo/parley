@@ -98,22 +98,44 @@ def _repo(db: AsyncSession) -> ToolsRepository:
     return ToolsRepository(db)
 
 
-def _validate_endpoint(endpoint: str) -> None:
-    """Static SSRF check (no DNS) before anything is written; the full check,
-    with DNS, still runs on every call."""
+def endpoint_problem(endpoint: str) -> str | None:
+    """Static SSRF check (no DNS): the refusal message, or None when allowed.
+    Shared with `app/manifest/apply.py`."""
     try:
         validate_tool_endpoint(endpoint)
     except SSRFError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"invalid endpoint: {exc}",
-        ) from exc
+        return f"invalid endpoint: {exc}"
+    return None
+
+
+def _validate_endpoint(endpoint: str) -> None:
+    """Static SSRF check (no DNS) before anything is written; the full check,
+    with DNS, still runs on every call."""
+    problem = endpoint_problem(endpoint)
+    if problem is not None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=problem)
 
 
 def _encode_auth_config(auth_config: dict[str, Any] | None) -> str | None:
     if auth_config is None:
         return None
     return secrets_crypto.encrypt(json.dumps(auth_config))
+
+
+def decode_auth_config(encrypted: str | None) -> dict[str, Any] | None:
+    """The stored `auth_config`, decrypted; for comparison only, never returned."""
+    if encrypted is None:
+        return None
+    value: dict[str, Any] = json.loads(secrets_crypto.decrypt(encrypted))
+    return value
+
+
+def tool_values(payload: ToolCreate) -> dict[str, Any]:
+    """The column values of a new tool, `auth_config` encrypted (shared with
+    `app/manifest/apply.py`). The endpoint is not checked here."""
+    data = payload.model_dump()
+    data["auth_config_encrypted"] = _encode_auth_config(data.pop("auth_config"))
+    return data
 
 
 @router.post("", response_model=ToolOut, status_code=status.HTTP_201_CREATED)
@@ -123,9 +145,7 @@ async def create_tool(
     db: AsyncSession = Depends(get_db),
 ) -> ToolOut:
     _validate_endpoint(payload.endpoint)
-    data = payload.model_dump()
-    auth_config = data.pop("auth_config")
-    data["auth_config_encrypted"] = _encode_auth_config(auth_config)
+    data = tool_values(payload)
     try:
         tool = await _repo(db).create(tenant.id, **data)
         await db.commit()

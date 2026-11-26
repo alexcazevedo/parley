@@ -46,10 +46,10 @@ services:
       # name, not by the host-mapped ports used in .env for local `uv run`.
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-harness}:${POSTGRES_PASSWORD:-harness}@postgres:5432/${POSTGRES_DB:-harness}
       REDIS_URL: redis://redis:6379/0
-      # Allow tools to reach the demo's mocked business endpoint past the
-      # SSRF guard (see app/tools/ssrf.py) — scripts/demo.py registers
-      # `get_order` at http://mock-tools:9000/orders.
-      TOOL_ALLOWED_HOSTS: mock-tools
+      # Tool host allowlist, from `.env` (see app/tools/ssrf.py). Empty: public
+      # hosts only. To try the bundled mock (scripts/demo.py registers
+      # `get_order` at http://mock-tools:9000/orders) set it to `mock-tools`.
+      TOOL_ALLOWED_HOSTS: ${TOOL_ALLOWED_HOSTS:-}
       # Media ingest (ticket 26): both api (upload/serve) and worker (future
       # STT/vision) need the same files, hence the shared named volume below.
       MEDIA_ROOT: /srv/media
@@ -76,7 +76,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-harness}:${POSTGRES_PASSWORD:-harness}@postgres:5432/${POSTGRES_DB:-harness}
       REDIS_URL: redis://redis:6379/0
-      TOOL_ALLOWED_HOSTS: mock-tools
+      TOOL_ALLOWED_HOSTS: ${TOOL_ALLOWED_HOSTS:-}
       MEDIA_ROOT: /srv/media
     volumes:
       - media_data:/srv/media

@@ -1,6 +1,6 @@
 # Setup
 
-Create a tenant, then an agent, a tool and a channel. Start from a healthy stack ([quickstart](quickstart.md)). Errors, paging and headers are in [api-conventions](api-conventions.md).
+Create a tenant, then an agent, a tool and a channel. Start from a healthy stack ([quickstart](quickstart.md)). To set up agents, departments, tools and channels from one file instead, create the tenant here (step 1) and continue in the [manifest](manifest.md) guide; the calls below make the same items one at a time. Errors, paging and headers are in [api-conventions](api-conventions.md).
 
 Variables used below: set `BASE_URL` and `ADMIN_API_KEY` yourself; the rest are captured from responses with `jq`, as `NAME=$(curl ... | jq -r .field)`. Commands need `curl` and `jq`. Run them in one shell session, so the variables stay set. Use the port from `API_PORT` in `BASE_URL` if you changed it ([quickstart](quickstart.md) step 3).
 
@@ -53,7 +53,7 @@ The endpoint must pass the address guard (422 `invalid endpoint: ...` otherwise)
 
 - Default: `localhost`, names ending `.local`, `.localhost` or `.internal`, and private, loopback and link-local addresses are refused. Public hosts pass.
 - The check at create is by name, without DNS. It also refuses an IP literal in any IPv4 notation (`127.1`, `0x7f000001`) and any IPv6 address that is not globally routable (`http://100.64.0.1/x` is refused). Other host names pass at create; the name is resolved when the tool is called, and a host that resolves to a private address is refused then.
-- With `TOOL_ALLOWED_HOSTS` set: only those host names pass and every other host is refused. In `docker-compose.yml` the `api` and `worker` services set `TOOL_ALLOWED_HOSTS` to `mock-tools`, which overrides `.env`. To call your own endpoint, change that line in both services to your host name.
+- With `TOOL_ALLOWED_HOSTS` set: only those host names pass and every other host is refused, so the list is exclusive. Set it in `.env` (a comma-separated list); `docker-compose.yml` passes it to `api` and `worker`, and the shipped `.env.example` leaves it empty. Restart with `docker compose up -d` after a change. The bundled `mock-tools` service is a private host, so it is refused until `.env` has `TOOL_ALLOWED_HOSTS=mock-tools`; with that line, public tool hosts are refused too, so list them as well (`TOOL_ALLOWED_HOSTS=mock-tools,api.example.com`).
 - `TOOL_SSRF_DISABLED=true` turns the guard off. Local development only.
 
 ```
@@ -66,7 +66,7 @@ TOOL_ID=$(curl -s -X POST $BASE_URL/tools \
 
 Expected: 201 with `id`, `name`, `description`, `input_schema`, `endpoint`, `method`, `timeout_seconds`, `created_at`. `$TOOL_ID` is the `id`; use it to edit or delete the tool.
 
-`http://mock-tools:9000/orders` works only inside the compose network: the `mock-tools` service has no host port, so `curl` from your host cannot reach it. (`docker compose ps` shows `8000/tcp` for it; that is the image's default and not the port the mock listens on, which is 9000.) Only `api` and `worker` call it. The stub model never calls tools other than `handoff_to_human` ([quickstart](quickstart.md)), so the tool path needs a real model key.
+`http://mock-tools:9000/orders` is created in any case (a host name passes at create), but it is called only with `TOOL_ALLOWED_HOSTS=mock-tools` in `.env` (see above); without it the call is refused because the name resolves to a private address. It works only inside the compose network: the `mock-tools` service has no host port, so `curl` from your host cannot reach it. (`docker compose ps` shows `8000/tcp` for it; that is the image's default and not the port the mock listens on, which is 9000.) Only `api` and `worker` call it. The stub model never calls tools other than `handoff_to_human` ([quickstart](quickstart.md)), so the tool path needs a real model key.
 
 Check: `curl -s $BASE_URL/tools -H "X-API-Key: $TENANT_KEY"` lists it, and the response has no `auth_config`.
 

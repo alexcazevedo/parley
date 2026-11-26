@@ -24,6 +24,7 @@ COPY --chown=app:app migrations /srv/migrations
 COPY --chown=app:app alembic.ini /srv/alembic.ini
 COPY --chown=app:app llms.txt /srv/llms.txt
 COPY --chown=app:app docs /srv/docs
+COPY --chown=app:app examples/manifests /srv/examples/manifests
 
 EXPOSE 8000
 

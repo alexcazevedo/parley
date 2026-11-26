@@ -1,0 +1,99 @@
+# Clínica Vida: a medical clinic. A reception agent that books appointments
+# through the clinic's scheduling system, one department per specialty plus
+# reception, and a web chat channel for the clinic's site.
+#
+# Before applying, set the secret the tool refers to:
+#   PUT /secrets/clinic_agenda_key   {"value": "<the scheduling system's API key>"}
+version: 1
+
+agents:
+  - key: recepcao
+    name: Recepção Clínica Vida
+    model: gpt-4o-mini
+    temperature: 0.2
+    max_tool_iterations: 4
+    context_message_limit: 30
+    instructions: |
+      Você é a recepcionista virtual da Clínica Vida. Fale em português do
+      Brasil, com cuidado e clareza, sem termos técnicos.
+
+      Seu trabalho é ajudar o paciente a marcar uma consulta. Descubra a
+      especialidade, o nome do paciente e um dia de preferência. Use a
+      ferramenta schedule_appointment só depois de confirmar esses três
+      dados com o paciente, e repita o horário marcado no final.
+
+      A clínica atende de segunda a sexta, das "08:00" às "18:00". Dúvidas
+      sobre sintomas, exames ou remédios devem ir para a equipe de saúde:
+      diga que vai passar a conversa para a recepção.
+    tool_names:
+      - schedule_appointment
+    boundary_scope: >-
+      Agendamento, remarcação e cancelamento de consultas, horários e
+      endereço da Clínica Vida.
+    boundary_never:
+      - Dar diagnóstico ou dizer o que uma pessoa tem.
+      - Indicar, trocar ou comentar remédios e doses.
+      - Interpretar resultado de exame.
+    boundary_refusal_message: >-
+      Não posso orientar sobre saúde por aqui. Vou passar você para a
+      recepção, que encaminha para a equipe de saúde.
+    handoff_message: Vou passar você para a recepção, um momento.
+    unsupported_media_message: >-
+      Não consegui abrir esse arquivo. Pode escrever sua dúvida em texto?
+
+departments:
+  - name: Recepção
+    description: >-
+      Marcar, remarcar ou cancelar consulta, convênio, documentos, horário
+      de funcionamento e endereço.
+  - name: Cardiologia
+    description: >-
+      Consultas e retornos de cardiologia: coração, pressão alta, exames
+      cardíacos.
+  - name: Dermatologia
+    description: >-
+      Consultas e retornos de dermatologia: pele, cabelo, unhas e manchas.
+  - name: Pediatria
+    description: >-
+      Consultas e retornos de crianças e adolescentes, vacinas e
+      acompanhamento de crescimento.
+
+tools:
+  - name: schedule_appointment
+    description: >-
+      Marca uma consulta na agenda da clínica e devolve o dia e o horário
+      confirmados.
+    method: POST
+    endpoint: https://scheduling.example.com/api/appointments
+    input_schema:
+      type: object
+      properties:
+        patient_name:
+          type: string
+        specialty:
+          type: string
+          enum:
+            - cardiologia
+            - dermatologia
+            - pediatria
+        preferred_date:
+          type: string
+          description: Dia de preferência, no formato AAAA-MM-DD.
+      required:
+        - patient_name
+        - specialty
+        - preferred_date
+    auth_config:
+      type: header
+      header_name: X-Api-Key
+      token:
+        secret: clinic_agenda_key
+    timeout_seconds: 15
+
+channels:
+  - key: site
+    type: webchat
+    name: Chat do site
+    agent: recepcao
+    config:
+      humanize: true
