@@ -63,9 +63,13 @@ Decided from the code, with the reason:
 - **Push route.** Verify, store the event, answer 2xx; send to Evolution from the background task, not inside the request.
 - **Departments.** A department name longer than 40 characters (`Tag.name`) is cut to 40. The mapping is by etiqueta id, so renaming an etiqueta keeps it mapped. Deleting a mapped etiqueta sends a null category for its conversas and removes the mapping. A department that parley removed leaves its etiqueta in place, unmapped.
 
+## Business tools: a follow-up brief
+
+Parley's agent can call tools that vendezap serves as an MCP server; how to build one is in parley's guide `docs/guides/business-tools.md` ([the guide](../guides/business-tools.md)). Vendezap serves one with `search_product` and `add_to_quote` first. It is keyed by the conversa id vendezap already sends as `user_id`: parley passes it to every call as `parley/user_id`, so a search and a quote are for that conversa. Write the guide's checklist into the follow-up: `readOnlyHint` on the search, the call id remembered for the add, a refusal as an error result in pt-BR ("sem estoque"). Pedido and kit tools can follow the same way. This is a separate brief for the vendezap repository, run after the integration above; it changes nothing in that one.
+
 ## Out of scope
 
-Catalog, pedido and kit tools for the agent. A knowledge base: parley has one (entries, question-and-answer pairs and documents, searched by the agent), and vendezap builds its own screen on that API when it wants one; see `docs/guides/knowledge.md`. Replies with files or images. Closing conversations: vendezap has no closed state. Changes to the Evolution setup. Any change in the parley repository: ask for it instead.
+A knowledge base: parley has one (entries, question-and-answer pairs and documents, searched by the agent), and vendezap builds its own screen on that API when it wants one; see `docs/guides/knowledge.md`. Replies with files or images. Closing conversations: vendezap has no closed state. Changes to the Evolution setup. Any change in the parley repository: ask for it instead.
 
 ## Success demo
 

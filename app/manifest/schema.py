@@ -14,6 +14,7 @@ from pydantic_core import PydanticCustomError
 from app.api.agents import AgentCreate
 from app.api.categories import CategoryCreate
 from app.api.knowledge import EntryCreate, QACreate
+from app.api.mcp_servers import McpServerCreate
 from app.api.secrets import SECRET_NAME_PATTERN
 from app.api.tools import ToolCreate
 from app.models.channel import ChannelType
@@ -25,6 +26,7 @@ MAX_AGENTS = 50
 MAX_DEPARTMENTS = 200
 MAX_TOOLS = 200
 MAX_CHANNELS = 50
+MAX_MCP_SERVERS = 20
 MAX_KNOWLEDGE_ENTRIES = 500
 MAX_KNOWLEDGE_QA = 500
 
@@ -72,6 +74,25 @@ class ManifestTool(ToolCreate):
     def _token_is_a_reference(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         # The error never carries the input: a refused value may be a real token.
         if value is not None and "token" in value and not is_secret_ref(value["token"]):
+            raise PydanticCustomError("secret_reference", NOT_A_REFERENCE)
+        return value
+
+
+class ManifestMcpServer(McpServerCreate):
+    """An MCP server; identified by `name`. The token is a secret reference."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Replaces the parent's check (a plain token string), same method name.
+    @field_validator("auth_config")
+    @classmethod
+    def _auth(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return value
+        if str(value.get("type") or "").lower() not in ("bearer", "header"):
+            raise ValueError("auth_config.type must be 'bearer' or 'header'")
+        # The error never carries the input: a refused value may be a real token.
+        if not is_secret_ref(value.get("token")):
             raise PydanticCustomError("secret_reference", NOT_A_REFERENCE)
         return value
 
@@ -129,5 +150,7 @@ class Manifest(BaseModel):
     )
     tools: list[ManifestTool] = Field(default_factory=list, max_length=MAX_TOOLS)
     channels: list[ManifestChannel] = Field(default_factory=list, max_length=MAX_CHANNELS)
+    # None: the file says nothing about MCP servers, so none is touched.
+    mcp_servers: list[ManifestMcpServer] | None = Field(default=None, max_length=MAX_MCP_SERVERS)
     # None: the file says nothing about knowledge, so none is touched.
     knowledge: ManifestKnowledge | None = None

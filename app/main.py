@@ -20,6 +20,7 @@ from app.api import (
     lines,
     llms,
     manifest,
+    mcp_servers,
     media,
     operator,
     secrets,
@@ -63,6 +64,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agents.router)
     app.include_router(channels.router)
     app.include_router(tools.router)
+    app.include_router(mcp_servers.router)
     app.include_router(categories.router)
     app.include_router(knowledge.router)
     app.include_router(secrets.router)

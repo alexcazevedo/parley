@@ -16,6 +16,7 @@ longer apply; check the code before relying on it.
 - SSRF DNS-rebinding TOCTOU (tools and channels) (Older known MVP limitations (README)).
 - Default database credentials remain (From the ops run).
 - Real auth: static API keys only (Product-surface gaps left out of scope by recent runs).
+- Calls to an MCP server and to HTTP tools are not signed (From the business tools run).
 - A person under an `@lid` and a phone number is two contacts (From the conversation-correctness run).
 
 **Boundaries**
@@ -87,6 +88,7 @@ longer apply; check the code before relying on it.
 - A conversation that is not handed off has no wait time (From the categories run).
 
 **API surface**
+- Pick single tools of an MCP server per agent (From the business tools run).
 - `GET /lines` and the memories list are not paged (From the API surface run).
 - No total counts (From the API surface run).
 - Lists return at most 100 rows by default (From the API surface run).
@@ -434,3 +436,18 @@ PRD epics E1 to E7 are now done. What is left over:
   run/tool/sentiment supervision view.
 - Production hardening: real auth (static API keys today), metrics/
   tracing, deploy (see `deploying-plugu-projects` skill for Dokploy).
+
+## From the business tools run
+
+- **No signature on tool calls.** A call to an MCP server carries the customer
+  context in `_meta` (and an HTTP tool in `X-Parley-*` headers), protected only
+  by the token, TLS and the address rules; whoever holds the token can claim any
+  `parley/user_id`. Fix: a timestamp and an HMAC with a secret shown once, in the
+  style of the signed event pushes (`app/events/signing.py`), with a check
+  sample in `docs/guides/business-tools.md`.
+- **Single tools per agent.** An agent lists whole servers (`mcp_servers`);
+  `allowed_tools` on the server narrows what is imported for every agent that
+  lists it. Picking tools per agent needs a field of its own.
+- **Renaming a server detaches it.** An agent lists server names, so `PATCH
+  /mcp-servers/{server_id}` with a new `name` leaves the agents that list the old
+  one with no tools of that server, with no warning.

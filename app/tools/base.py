@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm.base import ToolSpec
 from app.models.agent import Agent
+from app.tools.context import CallContext
 
 UNKNOWN_TOOL_ERROR = "unknown tool"
 
@@ -36,6 +37,12 @@ class ToolContext:
     # earlier attempt of the same batch is not made again (app/tools/ledger.py
     # `find_prior`); empty means no reuse at all.
     message_ids: tuple[uuid.UUID, ...] = ()
+    # Who the calls are for (app/tools/context.py), loaded once per turn. Stored
+    # on every `ToolExecution` row and sent to HTTP tools as headers.
+    call: CallContext | None = None
+    # Set by the registry when it repeats a call whose earlier attempt has an
+    # unknown outcome: the repeat keeps that attempt's call id.
+    repeat_call_id: uuid.UUID | None = None
 
 
 @dataclass(slots=True)

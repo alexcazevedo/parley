@@ -3,6 +3,7 @@ to the calling tenant, and serve its JSON Schema. Logic: `app/manifest/`.
 """
 
 import json
+from contextlib import nullcontext
 from typing import Any, Literal
 
 import structlog
@@ -17,7 +18,10 @@ from app.manifest import yaml_io
 from app.manifest.apply import ManifestError, apply_manifest, parse_manifest
 from app.manifest.export import export_manifest
 from app.manifest.schema import Manifest
+from app.mcp.sync import sync_server
 from app.models.tenant import Tenant
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/manifest", tags=["manifest"])
 
@@ -190,4 +194,12 @@ async def apply(
         await db.rollback()
     else:
         await db.commit()
+        for server_id in result.sync_server_ids:
+            # After the commit, so no network call runs inside the apply
+            # transaction. A failed sync is the server's `error` status.
+            try:
+                await sync_server(lambda: nullcontext(db), tenant.id, server_id)
+            except Exception:
+                logger.exception("manifest.mcp_sync_error", server_id=str(server_id))
+                await db.rollback()
     return result.as_dict()

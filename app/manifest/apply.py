@@ -52,9 +52,10 @@ from app.api.agents import agent_values
 from app.api.categories import category_values
 from app.api.channels import channel_secret
 from app.api.channels import endpoint_problem as channel_endpoint_problem
+from app.api.mcp_servers import _encode_auth_config as encode_mcp_auth
 from app.api.tools import decode_auth_config, endpoint_problem, tool_values
 from app.config import get_settings
-from app.manifest.schema import Manifest, ManifestChannel, ManifestTool
+from app.manifest.schema import Manifest, ManifestChannel, ManifestMcpServer, ManifestTool
 from app.models.agent import Agent
 from app.models.category import Category
 from app.models.channel import Channel, ChannelType
@@ -62,6 +63,7 @@ from app.models.contact import Contact
 from app.models.conversation import Conversation, ConversationState
 from app.models.knowledge_item import KnowledgeItem, KnowledgeItemKind, KnowledgeItemStatus
 from app.models.manifest_item import ManifestItem
+from app.models.mcp_server import McpServer, McpServerStatus
 from app.models.tenant import Tenant
 from app.models.tool import Tool
 from app.repositories.agents import AgentsRepository
@@ -69,6 +71,7 @@ from app.repositories.base import BaseRepository
 from app.repositories.categories import CategoriesRepository
 from app.repositories.channels import ChannelsRepository
 from app.repositories.knowledge import KnowledgeItemsRepository
+from app.repositories.mcp import McpServersRepository
 from app.repositories.secrets import SecretsRepository
 from app.repositories.tools import ToolsRepository
 from app.security import secrets as secrets_crypto
@@ -81,6 +84,7 @@ MANAGED_ELSEWHERE = "already managed by the manifest under another name"
 DUPLICATE_KEY = "duplicate key in the file"
 DUPLICATE_NAME = "duplicate name in the file"
 UNKNOWN_TOOL = "unknown tool: not in the file, not a tool of the tenant and not a built-in"
+UNKNOWN_MCP_SERVER = "unknown MCP server: not in the file and not a server of the tenant"
 UNKNOWN_AGENT = "unknown agent: not an agent key in this file"
 TYPE_CANNOT_CHANGE = "type cannot change; use a new key"
 SECRET_NOT_ALLOWED = "a secret is only allowed on a whatsapp_evolution channel"
@@ -147,6 +151,8 @@ class ApplyResult:
     dry_run: bool
     changes: list[PlannedChange]
     generated: dict[str, Any] = field(default_factory=dict)
+    # MCP servers created or changed: the route syncs them after it commits.
+    sync_server_ids: list[uuid.UUID] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -167,6 +173,8 @@ class TenantState:
     tools: dict[uuid.UUID, Tool]
     tools_by_name: dict[str, Tool]
     channels: dict[uuid.UUID, Channel]
+    mcp_servers: dict[uuid.UUID, McpServer] = field(default_factory=dict)
+    mcp_servers_by_name: dict[str, McpServer] = field(default_factory=dict)
     # Every knowledge item of the tenant; entries and pairs are also by kind.
     knowledge_items: list[KnowledgeItem] = field(default_factory=list)
     entries: dict[uuid.UUID, KnowledgeItem] = field(default_factory=dict)
@@ -182,6 +190,7 @@ class TenantState:
             "department": self.departments,
             "tool": self.tools,
             "channel": self.channels,
+            "mcp_server": self.mcp_servers,
             "knowledge_entry": self.entries,
             "knowledge_qa": self.qa,
         }
@@ -264,6 +273,16 @@ async def load_state(session: AsyncSession, tenant_id: uuid.UUID) -> TenantState
     departments = await CategoriesRepository(session).list(tenant_id)
     tools = await ToolsRepository(session).list(tenant_id)
     channels = await ChannelsRepository(session).list(tenant_id)  # no cap: every channel
+    servers = list(
+        (
+            await session.scalars(
+                select(McpServer)
+                .where(McpServer.tenant_id == tenant_id)
+                .order_by(McpServer.created_at, McpServer.id)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+    )
     items = list(
         (
             await session.scalars(
@@ -285,6 +304,8 @@ async def load_state(session: AsyncSession, tenant_id: uuid.UUID) -> TenantState
         tools={t.id: t for t in tools},
         tools_by_name={t.name: t for t in tools},
         channels={c.id: c for c in channels},
+        mcp_servers={m.id: m for m in servers},
+        mcp_servers_by_name={m.name: m for m in servers},
     )
 
 
@@ -513,6 +534,11 @@ def secret_references(manifest: Manifest) -> list[tuple[str, str]]:
     for i, tool in enumerate(manifest.tools):
         if tool.auth_config and "token" in tool.auth_config:
             refs.append((f"tools[{i}].auth_config.token", tool.auth_config["token"]["secret"]))
+    for i, server in enumerate(manifest.mcp_servers or []):
+        if server.auth_config and "token" in server.auth_config:
+            refs.append(
+                (f"mcp_servers[{i}].auth_config.token", server.auth_config["token"]["secret"])
+            )
     for i, channel in enumerate(manifest.channels):
         if channel.secret is not None:
             refs.append((f"channels[{i}].secret", channel.secret.secret))
@@ -588,6 +614,97 @@ def _plan_tools(
     return changes
 
 
+def mcp_desired(item: ManifestMcpServer) -> dict[str, Any]:
+    """The server as the file states it, `auth_config` in clear (compare only)."""
+    values: dict[str, Any] = item.model_dump()
+    return values
+
+
+def mcp_current(server: McpServer) -> dict[str, Any]:
+    try:
+        auth_config: Any = decode_auth_config(server.auth_config_encrypted)
+    except Exception:  # undecryptable (key rotated): rewrite it
+        auth_config = _UNREADABLE
+    return {
+        "name": server.name,
+        "url": server.url,
+        "auth_config": auth_config,
+        "allowed_tools": server.allowed_tools,
+        "timeout_seconds": server.timeout_seconds,
+    }
+
+
+def _resolved_mcp(item: ManifestMcpServer, secrets: dict[str, str]) -> ManifestMcpServer | None:
+    auth = item.auth_config
+    if not auth or "token" not in auth:
+        return item
+    value = secrets.get(auth["token"]["secret"])
+    if value is None:
+        return None
+    return item.model_copy(update={"auth_config": {**auth, "token": value}})
+
+
+def _mcp_writes(item: ManifestMcpServer, fields: list[str]) -> dict[str, Any]:
+    desired = mcp_desired(item)
+    values = {name: desired[name] for name in fields if name != "auth_config"}
+    if "auth_config" in fields:
+        values["auth_config_encrypted"] = encode_mcp_auth(desired["auth_config"])
+    return values
+
+
+def _plan_mcp_servers(
+    manifest: Manifest, state: TenantState, problems: Problems
+) -> list[PlannedChange]:
+    """MCP servers; a file without the section changes no server."""
+    if manifest.mcp_servers is None:
+        return []
+    _check_unique(
+        [m.name for m in manifest.mcp_servers], "mcp_servers", "name", DUPLICATE_NAME, problems
+    )
+    changes: list[PlannedChange] = []
+    for i, item in enumerate(manifest.mcp_servers):
+        path = f"mcp_servers[{i}]"
+        problem = endpoint_problem(item.url)
+        if problem is not None:
+            problems.add(f"{path}.url", problem.replace("invalid endpoint", "invalid url", 1))
+        resolved = _resolved_mcp(item, state.secrets)
+        if resolved is None:  # a missing secret is already a problem
+            continue
+        item = resolved
+        record = state.records.get(("mcp_server", item.name))
+        row = state.mcp_servers.get(record.item_id) if record else None
+        by_name = state.mcp_servers_by_name.get(item.name)
+        if row is None:
+            if by_name is not None:
+                if by_name.id in state.managed_ids("mcp_server"):
+                    problems.add(f"{path}.name", MANAGED_ELSEWHERE)
+                    continue
+                fields = changed_fields(mcp_current(by_name), mcp_desired(item))
+                writes = _mcp_writes(item, fields)
+                changes.append(
+                    _adopt("mcp_server", item.name, by_name.id, fields, writes, record, state)
+                )
+                continue
+            values = mcp_desired(item)
+            values["auth_config_encrypted"] = encode_mcp_auth(values.pop("auth_config"))
+            values["status"] = McpServerStatus.PENDING
+            values["skipped"] = []
+            changes.append(
+                PlannedChange("mcp_server", item.name, "create", record=record, values=values)
+            )
+            continue
+        fields = changed_fields(mcp_current(row), mcp_desired(item))
+        if "name" in fields and by_name is not None and by_name.id != row.id:
+            problems.add(f"{path}.name", NOT_MANAGED)
+            continue
+        changes.append(
+            _update_or_unchanged(
+                "mcp_server", item.name, row.id, fields, _mcp_writes(item, fields)
+            )
+        )
+    return changes
+
+
 def _plan_agents(
     manifest: Manifest, state: TenantState, problems: Problems
 ) -> list[PlannedChange]:
@@ -595,6 +712,18 @@ def _plan_agents(
     known_tools = (
         {t.name for t in manifest.tools} | set(state.tools_by_name) | set(_BUILTIN_NAMES)
     )
+    in_file = {m.name for m in manifest.mcp_servers or []}
+    # A managed server the file (with the section) no longer names is deleted.
+    removed = (
+        {
+            key
+            for (kind, key) in state.records
+            if kind == "mcp_server" and key not in in_file
+        }
+        if manifest.mcp_servers is not None
+        else set()
+    )
+    known_servers = in_file | (set(state.mcp_servers_by_name) - removed)
     unmanaged: dict[str, list[Agent]] = {}
     for agent in unmanaged_items(state, "agent"):
         unmanaged.setdefault(agent.name, []).append(agent)
@@ -605,6 +734,9 @@ def _plan_agents(
         for j, name in enumerate(item.tool_names):
             if name not in known_tools:
                 problems.add(f"{path}.tool_names[{j}]", UNKNOWN_TOOL)
+        for j, name in enumerate(item.mcp_servers):
+            if name not in known_servers:
+                problems.add(f"{path}.mcp_servers[{j}]", UNKNOWN_MCP_SERVER)
         record = state.records.get(("agent", item.key))
         row = state.agents.get(record.item_id) if record else None
         desired = agent_desired(item)
@@ -774,6 +906,7 @@ def plan_changes(
         *_plan_departments(manifest, state, problems),
         *_plan_knowledge(manifest, state, problems),
         *_plan_tools(manifest, state, problems),
+        *_plan_mcp_servers(manifest, state, problems),
         *_plan_agents(manifest, state, problems),
         *_plan_channels(manifest, state, problems),
         *_plan_removals(manifest, state),
@@ -789,6 +922,7 @@ DELETE_ORDER = (
     "channel",
     "agent",
     "tool",
+    "mcp_server",
     "department",
     "knowledge_entry",
     "knowledge_qa",
@@ -797,6 +931,7 @@ _PLURALS = {
     "channel": "channels",
     "agent": "agents",
     "tool": "tools",
+    "mcp_server": "mcp_servers",
     "department": "departments",
     "knowledge_entry": "knowledge.entries",
     "knowledge_qa": "knowledge.qa",
@@ -805,6 +940,7 @@ _MODELS: dict[str, Any] = {
     "channel": Channel,
     "agent": Agent,
     "tool": Tool,
+    "mcp_server": McpServer,
     "department": Category,
     "knowledge_entry": KnowledgeItem,
     "knowledge_qa": KnowledgeItem,
@@ -817,6 +953,7 @@ def _file_keys(manifest: Manifest) -> set[tuple[str, str]]:
         *(("department", d.name) for d in manifest.departments),
         *(("tool", t.name) for t in manifest.tools),
         *(("channel", c.key) for c in manifest.channels),
+        *(("mcp_server", m.name) for m in manifest.mcp_servers or []),
         *(
             key
             for section in [manifest.knowledge]
@@ -839,6 +976,8 @@ def _plan_removals(manifest: Manifest, state: TenantState) -> list[PlannedChange
             continue
         if kind.startswith("knowledge_") and manifest.knowledge is None:
             continue  # a file without the section leaves knowledge alone
+        if kind == "mcp_server" and manifest.mcp_servers is None:
+            continue  # a file without the section leaves MCP servers alone
         row = state.rows(kind).get(record.item_id)
         if row is None:  # deleted by hand: `stale_records` drops the record
             continue
@@ -1021,6 +1160,7 @@ _REPOSITORIES: dict[str, type[BaseRepository[Any]]] = {
     "agent": AgentsRepository,
     "department": CategoriesRepository,
     "tool": ToolsRepository,
+    "mcp_server": McpServersRepository,
 }
 
 
@@ -1115,6 +1255,7 @@ _EXECUTORS: dict[str, Executor] = {
     "agent": execute_with_repository,
     "department": execute_with_repository,
     "tool": execute_with_repository,
+    "mcp_server": execute_with_repository,
     "knowledge_entry": execute_knowledge,
     "knowledge_qa": execute_knowledge,
 }
@@ -1124,11 +1265,16 @@ def _attach_secret_names(manifest: Manifest, changes: list[PlannedChange]) -> No
     """Set each tool and channel change's `secret_names` from the file."""
     tools = {t.name: t for t in manifest.tools}
     channels = {c.key: c for c in manifest.channels}
+    servers = {m.name: m for m in manifest.mcp_servers or []}
     for change in changes:
         if change.action == "delete":
             continue
         if change.kind == "tool":
             auth = tools[change.key].auth_config
+            if auth and "token" in auth:
+                change.secret_names = {"token": auth["token"]["secret"]}
+        elif change.kind == "mcp_server":
+            auth = servers[change.key].auth_config
             if auth and "token" in auth:
                 change.secret_names = {"token": auth["token"]["secret"]}
         elif change.kind == "channel":
@@ -1144,7 +1290,7 @@ async def _remember_secret_names(
     update, adopt, and when only the name changed)."""
     records = await load_records(session, tenant_id)
     for change in changes:
-        if change.kind not in ("tool", "channel") or change.action == "delete":
+        if change.kind not in ("tool", "channel", "mcp_server") or change.action == "delete":
             continue
         record = records.get((change.kind, change.key))
         if record is not None and record.secret_names != change.secret_names:
@@ -1176,6 +1322,9 @@ async def apply_manifest(
         for change in changes:
             if change.action not in ("unchanged", "delete"):
                 await _EXECUTORS[change.kind](session, tenant.id, change, result.generated)
+                if change.kind == "mcp_server" and (change.action == "create" or change.values):
+                    assert change.item_id is not None
+                    result.sync_server_ids.append(change.item_id)
         for change in changes:  # already in DELETE_ORDER, after every other write
             if change.action == "delete":
                 await delete_item(session, tenant.id, change)

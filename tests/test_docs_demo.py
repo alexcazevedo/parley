@@ -15,6 +15,7 @@ import json
 import re
 import shlex
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from app.tools.builtin import BuiltinExecutor
 from app.tools.registry import ToolRegistry
 from app.workers.main import run_once
 from app.workers.scheduler import tick
+from tests.mcp_fakes import SHOP_URL, mcp_connect  # noqa: F401 - fixture
 from tests.test_categorize_turn import DEBOUNCE_SECONDS, _session_factory
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -845,6 +847,7 @@ async def test_the_manifest_guide(client):
         "departments",
         "tools",
         "channels",
+        "mcp_servers",
         "knowledge",
     }
     r = await step("GET", "/agents", 200)
@@ -1078,3 +1081,216 @@ def test_the_manifest_guide_names_every_problem_the_code_can_give():
         assert template in text, template
     assert "secret 'orders_token' is not set" in text
     assert "is the agent of channel 'Project inbox'; delete the channel or bind it" in text
+
+
+BUSINESS_TOOLS = "business-tools"
+_JSON_BLOCK = re.compile(r"^```json\n(.*?)^```", re.S | re.M)
+_PYTHON_BLOCK = re.compile(r"^```python\n(.*?)^```", re.S | re.M)
+
+
+async def test_the_business_tools_guide(client, fake_redis, db_session, mcp_connect):  # noqa: F811
+    """An app developer follows business-tools.md against the example's MCP server, wired in
+    process: register, sync, try a search and a write, attach to an agent, a customer turn
+    and the ledger row. Every curl of the guide is replayed in the guide's order (the inline
+    checks last); only the model is scripted. The names the guide promises are checked
+    against the code."""
+    import os
+
+    from sqlalchemy import text as sql
+
+    import app.mcp.client as mcp_client
+    from app.llm.base import ToolCall
+    from app.main import app as api
+    from app.tools.context import HEADER_NAMES, CallContext
+    from examples.project_inbox import tools
+    from scripts import mock_llm_server
+
+    tools.bind({}, lambda: None)
+    mcp_connect[SHOP_URL] = tools.server
+
+    me = Agent(client)
+    v = me.vars
+    v["ADMIN_API_KEY"] = os.environ["ADMIN_API_KEY"]
+    r = await me.run("setup", "POST", "/tenants", 201)
+    v["TENANT_ID"], v["TENANT_KEY"] = r.json()["id"], r.json()["api_key"]
+    r = await me.run("setup", "POST", "/agents", 201)
+    v["AGENT_ID"] = r.json()["id"]
+    r = await me.run("setup", "POST", "/channels", 201, contains="webchat")
+    v["CHANNEL_ID"] = r.json()["id"]
+    text = _read(BUSINESS_TOOLS)
+    headers = {"X-API-Key": v["TENANT_KEY"]}
+    blocks = [json.loads(b) for b in _JSON_BLOCK.findall(text)]
+
+    curls, _ = extract(BUSINESS_TOOLS)
+    queue = iter(curls)
+    replayed: list[Curl] = []
+
+    async def step(method: str, path: str, status: int):
+        curl = next(queue)
+        assert (curl.method, curl.path) == (method, path), f"{curl.method} {curl.path}"
+        replayed.append(curl)
+        response = await me.send(curl)
+        assert response.status_code == status, f"{method} {path}: {response.text}"
+        return response
+
+    # 4. Register: the response is the one the guide shows.
+    r = await step("POST", "/mcp-servers", 201)
+    v["SERVER_ID"] = r.json()["id"]
+    server = r.json()
+    shown = next(b for b in blocks if "exposed_name" in json.dumps(b))
+    assert set(server) == set(shown)
+    for key in ("name", "url", "allowed_tools", "timeout_seconds", "status", "error", "skipped"):
+        assert server[key] == shown[key], key
+    assert "auth_config" not in server and "<your-token>" not in json.dumps(server)
+    add, search = server["tools"]
+    assert add == shown["tools"][0] and add["read_only"] is False
+    assert (search["exposed_name"], search["read_only"]) == ("shop__search_product", True)
+    assert [shown["tools"][1][k] for k in ("exposed_name", "read_only")] == [
+        "shop__search_product", True,
+    ]
+    for refusal in ("MCP server name already exists", "invalid url: "):
+        assert refusal in text
+    again = await client.post(
+        "/mcp-servers", json={"name": "shop", "url": SHOP_URL}, headers=headers
+    )
+    assert (again.status_code, again.json()["error"]["message"]) == (
+        409, "MCP server name already exists",
+    )
+    private = await client.post(
+        "/mcp-servers", json={"name": "lan", "url": "http://localhost/mcp"}, headers=headers
+    )
+    assert private.status_code == 422 and private.json()["error"]["message"].startswith(
+        "invalid url: "
+    )
+    # 5. Sync.
+    r = await step("POST", "/mcp-servers/$SERVER_ID/sync", 200)
+    assert r.json()["status"] == "ok" and r.json()["tools"] == server["tools"]
+    # 6. Try a search and a write.
+    r = await step("POST", "/mcp-servers/$SERVER_ID/call", 200)
+    answer = next(b for b in blocks if b.get("ok") is True and "cartolina" in b["result"])
+    assert r.json() == answer
+    products = json.loads(r.json()["result"])
+    assert [p["id"] for p in products] == ["cartolina-branca-150g", "cartolina-branca-180g"]
+    write = await step("POST", "/mcp-servers/$SERVER_ID/call", 200)
+    added = "Adicionado ao orçamento: 1 x Cartolina branca 150g."
+    assert write.json() == {"ok": True, "result": added, "error": None} and added in text
+    await me.send(replayed[-1])  # each try is a new call: the quote has two
+    assert tools._state["quotes"]["ana"][0]["quantity"] == 2
+    for body, error in (
+        ({"tool": "add_to_quote", "arguments": {"product_id": "nao-existe"}},
+         "Error executing tool add_to_quote: Produto nao-existe não encontrado."),
+        ({"tool": "add_to_quote", "arguments": {}},
+         "invalid arguments: 'product_id' is a required property"),
+    ):
+        refused = await client.post(
+            f"/mcp-servers/{v['SERVER_ID']}/call", json=body | {"user_id": "ana"}, headers=headers
+        )
+        assert refused.json() == {"ok": False, "result": None, "error": error}
+        assert f'"error": "{error}"' in text
+    unknown = await client.post(
+        f"/mcp-servers/{v['SERVER_ID']}/call",
+        json={"tool": "nope", "user_id": "ana"},
+        headers=headers,
+    )
+    assert (unknown.status_code, unknown.json()["error"]["message"]) == (404, "MCP tool not found")
+    assert "404 `MCP tool not found`" in text
+    # 7. Attach to the agent; a customer turn; the ledger row.
+    r = await step("PATCH", "/agents/$AGENT_ID", 200)
+    assert r.json()["mcp_servers"] == ["shop"]
+    sent = await client.post(
+        "/channels/webchat/messages",
+        json={"channel_id": v["CHANNEL_ID"], "user_id": "u-1", "message": "Quero a primeira."},
+        headers=headers,
+    )
+    assert sent.status_code == 201, sent.text
+    conversation_id = sent.json()["conversation_id"]
+    call = ToolCall(
+        id="call_1",
+        name="shop__add_to_quote",
+        arguments={"product_id": "cartolina-branca-150g", "quantity": 1},
+    )
+    provider = FakeLLMProvider([LLMResponse(tool_calls=[call]), LLMResponse(content="Anotado.")])
+    runtime = AgentRuntime(provider=provider, registry=ToolRegistry())
+    queue_ = RedisQueue(fake_redis)
+    while await fake_redis.llen(JOBS_KEY) > 0:
+        assert await run_once(queue_, timeout=1, debounce_seconds=DEBOUNCE_SECONDS) is not None
+    await tick(fake_redis, _session_factory(db_session), runtime, now=time.time() + 5)
+    offered = {spec.name for spec in provider.calls[0]["tools"]}
+    assert {"shop__search_product", "shop__add_to_quote"} <= offered
+    given = json.loads([m for m in provider.calls[1]["messages"] if m.role == "tool"][0].content)
+    assert given["ok"] is True and given["data"]["result"] == added
+    assert "reference data" in given["data"]["note"]
+    query = re.search(r"^(SELECT created_at.*?;)$", text, re.S | re.M).group(1)
+    rows = (
+        await db_session.execute(
+            sql(query.replace("<your tenant id>", v["TENANT_ID"]).rstrip(";"))
+        )
+    ).all()
+    assert len(rows) == 1 and (rows[0].tool_name, rows[0].status) == ("shop__add_to_quote", "ok")
+    assert rows[0].call_id is not None
+    assert rows[0].context == {
+        "conversation_id": conversation_id, "channel_id": v["CHANNEL_ID"], "user_id": "u-1",
+    }
+    assert tools._state["quotes"]["u-1"][0]["quantity"] == 1
+    # The inline check, last.
+    r = await step("GET", "/mcp-servers/$SERVER_ID", 200)
+    assert r.json()["id"] == v["SERVER_ID"] and r.json()["status"] == "ok"
+    assert next(queue, None) is None, "a curl of business-tools.md was not replayed"
+    assert len(replayed) == len(curls)
+
+    # 10. A server that cannot be reached: the reason is the one the guide lists.
+    mcp_connect["https://down.example.com/mcp"] = mcp_client.McpError(
+        "could not reach the server", sent=False
+    )
+    down = await client.post(
+        "/mcp-servers", json={"name": "down", "url": "https://down.example.com/mcp"},
+        headers=headers,
+    )
+    assert down.status_code == 201
+    assert (down.json()["status"], down.json()["error"]) == ("error", "could not reach the server")
+    for reason in (
+        mcp_client.OAUTH_REASON,
+        "the server refused the token (HTTP 401)",
+        "the server did not answer in time",
+        "could not reach the server",
+        "address refused: ",
+    ):
+        assert f"`{reason}" in text, reason
+    gone = await client.delete(f"/mcp-servers/{down.json()['id']}", headers=headers)
+    assert gone.status_code == 204
+    missing = await client.get(f"/mcp-servers/{down.json()['id']}", headers=headers)
+    assert (missing.status_code, missing.json()["error"]["message"]) == (
+        404, "MCP server not found",
+    )
+
+    # The names the guide promises exist in the code, and the guide names every one.
+    routes = {
+        (method.upper(), path)
+        for path, operations in api.openapi()["paths"].items()
+        if path.startswith("/mcp-servers")
+        for method in operations
+    }
+    assert len(routes) == 7
+    for method, path in routes:
+        assert f"`{method} {path}" in text, (method, path)
+    sample = CallContext(uuid.uuid4(), uuid.uuid4(), "u", "Ana")
+    for key in sample.as_meta(uuid.uuid4()):
+        assert f"`{key}`" in text, key
+    for header in HEADER_NAMES:
+        assert f"`{header}`" in text, header
+    for name in (
+        "mcp_servers", "MCP_SYNC_INTERVAL_SECONDS", "TOOL_ALLOWED_HOSTS",
+        "TOOL_MAX_RESPONSE_BYTES", "readOnlyHint", "ToolError", "/tool", "421", "OAuth",
+        mock_llm_server.TOOL_RESULT_PREFIX, "Stub: tool <name> is not offered.",
+        mock_llm_server.TOOL_INVALID, "business tools demo: ok",
+    ):
+        assert name in text, name
+    not_offered = mock_llm_server.TOOL_NOT_OFFERED.format(name="<name>")
+    assert not_offered == "Stub: tool <name> is not offered."
+    # The code sample is the example's own.
+    example = (ROOT / "examples" / "project_inbox" / "tools.py").read_text()
+    source = {line.strip() for line in example.splitlines()}
+    for line in _PYTHON_BLOCK.search(text).group(1).splitlines():
+        if line.strip() and not line.strip().startswith("# ..."):
+            assert line.strip() in source, line
+    print(f"business-tools.md curls replayed: {len(replayed)}")

@@ -20,6 +20,7 @@ For an agent changing parley's code. Product docs for integrators are in `docs/g
 - `app/handoff/`: `HandoffService` and the handoff brief.
 - `app/knowledge/`: the knowledge base: text splitting, ingest of items into passages, keyword and semantic search, embeddings, the re-index command.
 - `app/llm/`: provider protocol and the OpenAI-compatible provider (plus a scripted fake for tests).
+- `app/mcp/`: parley as an MCP client: `client.py` (the only module that imports the `mcp` SDK; `connect` is the one place a connection opens) and `sync.py` (discovery of a server's tools).
 - `app/media/`: storage, content sniffing, speech-to-text, media preparation.
 - `app/memory/`: long-term memory per contact.
 - `app/messages/`: `ingest()`, the one entry for inbound messages.
@@ -29,7 +30,7 @@ For an agent changing parley's code. Product docs for integrators are in `docs/g
 - `app/repositories/`: tenant-scoped data access.
 - `app/security/`: API keys, Fernet secrets, rate limits, size limits.
 - `app/static/`: the two demo pages, `chat.html` and `operator.html`.
-- `app/tools/`: tool registry, built-in and HTTP tools, SSRF guard, call ledger.
+- `app/tools/`: tool registry, built-in, HTTP and MCP tools, call context (`context.py`), SSRF guard, call ledger.
 - `app/workers/`: job loop, housekeeping, scheduler.
 - `app/config.py` (`Settings`), `app/db.py`, `app/http_client.py`, `app/http_retry.py`, `app/audit.py`.
 - `migrations/versions/`: numbered Alembic migrations. `scripts/`: demo scripts and the stub model server.
@@ -44,6 +45,6 @@ For an agent changing parley's code. Product docs for integrators are in `docs/g
 - API data reaches the demo pages' DOM only through `textContent` or `createTextNode`, never `innerHTML`.
 - Migrations are numbered (`migrations/versions/00NN_name.py`). Tests build the schema from the models (`Base.metadata.create_all`), so a model must declare every index its migration creates.
 - Log with structlog; only `app/observability/logging.py` imports stdlib `logging`.
-- Tests never use the network: an autouse guard in `tests/conftest.py` refuses any host but loopback. Script the model with `FakeLLMProvider`, mock tools with `respx`, and use the `fake_handoff_brief` fixture where a test hands off.
+- Tests never use the network: an autouse guard in `tests/conftest.py` refuses any host but loopback. Script the model with `FakeLLMProvider`, mock tools with `respx`, reach an MCP server only through the `mcp_connect` fixture of `tests/mcp_fakes.py`, and use the `fake_handoff_brief` fixture where a test hands off.
 - Docs follow `tests/docs_drift.py`: an endpoint is written in backticks as METHOD, a space and the path, an environment variable as its upper-case name in backticks, and both must exist in the code. Every `AgentCreate` field must appear in backticks in `docs/guides/`. A new shell variable in a guide goes in the non-settings set in that file.
 - `README.md` stays at 200 lines or fewer and this file at 120 (`tests/test_docs_shape.py`).

@@ -8,7 +8,7 @@ this document is about how the code works and why.
 
 ```
 app/
-  api/            REST routers: tenants, agents, channels, tools, categories,
+  api/            REST routers: tenants, agents, channels, tools, mcp_servers, categories,
                    contacts, conversations, lines, webchat, media, webhooks,
                    health, operator, llms, plus chat and dev (mounted only when
                    `DEMO_MODE=true`; they 404 otherwise). A router parses and
@@ -36,7 +36,10 @@ app/
                    format; fake.py is a scripted provider for tests and demos).
   tools/          base.py (ToolExecutor, ToolResult, ToolContext), registry.py,
                    builtin.py (remember, handoff_to_human, search_knowledge), http.py (the tenant's
-                   HTTP tools), ledger.py, ssrf.py, validation.py.
+                   HTTP tools), mcp.py (imported MCP tools), context.py (who a call
+                   is for), ledger.py, ssrf.py, validation.py.
+  mcp/            client.py (parley as an MCP client; the only importer of the
+                   `mcp` SDK), sync.py (discovery of a server's tools).
   media/          storage.py (local, tenant-scoped), sniff.py, stt.py, fetch.py
                    (worker download of WhatsApp media), prepare.py (audio -> text).
   handoff/        service.py (the only code that moves a conversation in or out
@@ -70,7 +73,7 @@ explicitly; the column is the shape row-level security would key off.
 
 ```
 tenants (admin-created; api_key_hash)
-  └─ agents (instructions, model, provider, tool_names[], memory_enabled,
+  └─ agents (instructions, model, provider, tool_names[], mcp_servers[], memory_enabled,
              knowledge_enabled, handoff_enabled, handoff_message, max_tool_iterations,
              context_message_limit, summary_threshold,
              sentiment_escalation_enabled, boundary_*, error_message,
@@ -90,11 +93,15 @@ tenants (admin-created; api_key_hash)
                  │              boundary_reason)
                  │    └─ tool_executions (tool_id?, tool_name, arguments,
                  │                        result, status, model_content,
-                 │                        terminal_text, latency_ms, error)
+                 │                        terminal_text, latency_ms, error,
+                 │                        call_id?, context?)
                  └─ handoffs (reason, requested_by, summary, resolved_at)
   └─ categories (name, description; unique per tenant)
   └─ tools (name, description, input_schema, endpoint, method,
             auth_config_encrypted, timeout_seconds; unique name per tenant)
+  └─ mcp_servers (name, url, auth_config_encrypted, allowed_tools?, status,
+                  error, skipped, synced_at; unique name per tenant)
+       └─ mcp_tools (name, description, input_schema, read_only)
   └─ memories (contact_id, type, content, importance, expires_at,
                last_accessed_at, meta) — facts about a contact, independent of
                any one conversation
@@ -120,21 +127,17 @@ produced. The two exceptions (a handoff message still owed, and categorizing a
 `INSERT ... ON CONFLICT DO NOTHING`, select again (up to 3 tries), so two
 simultaneous first messages share one contact and one conversation. The `0012`
 migration closed existing duplicates first (keeping the one in `HUMAN_HANDOFF`,
-else the most recently active); its downgrade only drops the index. It takes
-`LOCK TABLE conversations IN SHARE ROW EXCLUSIVE MODE`, which blocks writes to
-`conversations` while it runs.
+else the most recently active) under `SHARE ROW EXCLUSIVE` on `conversations`.
 
 **Message order.** A conversation is read in `Message.seq` order: a value from
-the database sequence `messages_seq`, taken at insert (migration `0013`, which
-numbers existing rows in one transaction under an `ACCESS EXCLUSIVE` lock on
-`messages`). History, the rolling summary, the sentiment and category history,
-the handoff brief, the scheduler's batch and `GET /conversations/{id}/messages`
-all order by it. `created_at` is for display: inbound rows get it from the
-database (`now()`), assistant, tool and operator rows from the app
-(`datetime.now(UTC)`), so two machines with different clocks stamp a reply
-earlier or later than the message it answers while `seq` stays in insertion
-order. The only comparison on `created_at` is the `after=` filter of the
-messages endpoint.
+the database sequence `messages_seq`, taken at insert (migration `0013`). History,
+the rolling summary, the sentiment and category history, the handoff brief, the
+scheduler's batch and `GET /conversations/{id}/messages` all order by it.
+`created_at` is for display: inbound rows get it from the database, assistant,
+tool and operator rows from the app, so machines with different clocks can stamp
+a reply earlier than the message it answers while `seq` stays in insertion order.
+The only comparison on `created_at` is the `after=` filter of the messages
+endpoint.
 
 **Summary cursor and the row lock.** `conversation.summary_last_seq` is the
 `seq` of the last message the rolling summary covered; the next summary takes
@@ -147,8 +150,8 @@ the summarizer takes the same lock before it reads the cursor and the pending
 rows. The summarizer ends its transaction (`end_transaction`, which releases the
 lock) before the model call and writes the new cursor afterwards. A turn's own
 rows are committed before its summary runs, and one conversation has one turn at
-a time. The operator message is sent first and the lock taken only to store it,
-so the lock is never held across a send and a failed send stores nothing.
+a time. The operator message is sent first and the lock taken only to store it:
+the lock is never held across a send, and a failed send stores nothing.
 
 **The operator brief.** When a conversation is handed to a human, one best-effort
 model call writes a short brief (who, what, why, tone; in the conversation's
@@ -367,8 +370,8 @@ reached the endpoint: an `httpx.TimeoutException` other than `ConnectTimeout`,
 an `httpx.HTTPError` other than `ConnectError`, or an unexpected exception. A
 blocked endpoint, `ConnectError`, `ConnectTimeout`, invalid arguments and any
 HTTP response are finished normally. Either way the current attempt's model gets
-the same failure text. A call to an unknown tool, or one not listed in the
-agent's `tool_names`, writes no row. `finish` stores a terminal result's
+the same failure text. A call to an unknown tool, or one the agent does not list, writes no row. `begin` also gives the row a
+`call_id` (a repeat keeps the earlier row's, `ToolContext.repeat_call_id`) and the `context` of the call. `finish` stores a terminal result's
 `final_text` in `terminal_text`, and `replay` restores it, so a reused handoff
 still ends the loop.
 
@@ -460,15 +463,35 @@ background job extracts it.
 
 ## Tool model
 
-Two sources merged by `ToolRegistry`, in priority order (the first executor whose
-`can_handle` matches owns the name; `NoopExecutor` is the last resort and fails
-with `unknown tool`):
+Three sources merged by `ToolRegistry`, in priority order (the first executor whose
+`can_handle` matches, and whose optional `owns(name, ctx)` agrees, owns the name;
+`NoopExecutor` is the last resort and fails with `unknown tool`):
 
 1. **Built-in** (`app/tools/builtin.py`): `remember`, `handoff_to_human` and
    `search_knowledge`, table-driven as `(ToolSpec, agent-flag)` pairs gated by the
    agent's `memory_enabled`, `handoff_enabled` and `knowledge_enabled`; the flag controls both what is
    advertised and what runs. They write through the ledger like any tool.
-2. **HTTP** (`app/tools/http.py`): the tenant's own `Tool` rows. `can_handle`
+2. **MCP** (`app/tools/mcp.py`): the imported tools (`McpTool`) of the servers
+   the agent lists in `mcp_servers`, offered as `<server>__<tool>` with the
+   tool's description and schema. `can_handle` accepts any name with `__`; `owns`
+   then checks the agent's servers, so a hand-made HTTP tool `a__b` still reaches
+   HTTP. Same shape as HTTP: `ledger.begin` first, arguments validated, no
+   transaction across the call, nothing raised into the runtime. `app/mcp/client.py`
+   opens a streamable-HTTP session per discovery and per call (`connect`, the one
+   place a connection opens, after `assert_safe_url` with DNS; redirects off; the
+   server's token as a header; `McpError(reason)` for any failure). A tool's
+   `isError` result is a failed result the model can read; an `McpError` leaves
+   the row `STARTED` (`mark_unknown`) unless its reason says the request cannot
+   have reached the tool (`McpError.sent` is false). `repeat_safe` is the tool's
+   `readOnlyHint`. The text is cut at `TOOL_MAX_RESPONSE_BYTES`, other content
+   becomes a placeholder, and a success is wrapped with a note that it is data.
+   `app/mcp/sync.py` keeps the copy current: at registration or change (the
+   API), on request, and in the worker's `mcp_sync_loop` every
+   `MCP_SYNC_INTERVAL_SECONDS` (`sync_due`, up to 20 servers a pass). It lists
+   tools outside any transaction, then under a row lock upserts them, deletes
+   those gone and sets `status`, `error`, `skipped`, `synced_at`; a failure keeps
+   the old tools and sets `error`.
+3. **HTTP** (`app/tools/http.py`): the tenant's own `Tool` rows. `can_handle`
    claims every name (it has no session to know what exists), so it is registered
    last. A tool is callable only if its name is in the agent's `tool_names`.
    Arguments are validated against the tool's JSON Schema
@@ -491,6 +514,12 @@ with `unknown tool`):
    `docs/guides/configuration.md`. The check resolves once and `httpx` resolves
    again on connect, so a rebinding DNS record can still slip through; redirects
    are off to close the easier attack.
+
+**Who a call is for.** `load_call_context` (`app/tools/context.py`) reads the
+conversation, its channel and the contact once per turn into `ToolContext.call`.
+The ledger stores it in `tool_executions.context`; HTTP tools get it as
+`X-Parley-*` headers (winning over an auth header of the same name) and MCP tools
+in `_meta` under `parley/...`, never in the arguments. Nothing signs it.
 
 `ToolResult.meta` is also the terminal-tool mechanism: any executor can set
 `{"terminal": True, "final_text": ...}` to end the loop; `handoff_to_human` is the
@@ -790,44 +819,11 @@ behavior of its own.
    (tenant-scoped, `X-API-Key`) client-side and use an object URL, since those tags
    cannot send headers.
 
-**Where media is downloaded, and when it fails.** In the Evolution webhook the
-order is: authenticate, parse, duplicate check (a repeated delivery answers
-`{"status": "ok"}` and stops), rate limit, store. The worker downloads the media,
-for every conversation state: `fetch_pending_media` (`app/media/fetch.py`) is the
-first thing `process_turn` does, before any early return, so an operator handling
-the chat sees the photo even when no AI reply goes out. It handles only
-`whatsapp_evolution` channels and only image/audio rows without a `media_key`. It
-asks the turn's lock check before each download (a lost lock stops: no download,
-`LockLost`); for each row it ends the transaction, calls
-`EvolutionAdapter.fetch_media` (`POST {base_url}/chat/getBase64FromMediaMessage/{instance}`),
-checks the bytes with `validate_media`, the same rules as `ingest`, and stores the
-file under the message's tenant. A download that fails, is refused by the endpoint
-guard or fails validation turns the row into `unsupported` with content
-`[mídia não recebida]` and logs `media.fetch_failed` with the message id only; the
-customer gets the unsupported-media reply and the download is not retried. The
-outcome is committed at the end of `fetch_pending_media`, so a rollback later in
-the turn neither downloads a row again nor undoes a failure. Inline base64 sent by
-Evolution is stripped, never used.
+**Where media is downloaded, and when it fails.** In the Evolution webhook the order is: authenticate, parse, duplicate check (a repeated delivery answers `{"status": "ok"}` and stops), rate limit, store. The worker downloads the media, for every conversation state: `fetch_pending_media` (`app/media/fetch.py`) is the first thing `process_turn` does, before any early return, so an operator handling the chat sees the photo even when no AI reply goes out. It handles only `whatsapp_evolution` channels and only image/audio rows without a `media_key`. It asks the turn's lock check before each download (a lost lock stops: no download, `LockLost`); for each row it ends the transaction, calls `EvolutionAdapter.fetch_media` (`POST {base_url}/chat/getBase64FromMediaMessage/{instance}`), checks the bytes with `validate_media`, the same rules as `ingest`, and stores the file under the message's tenant. A download that fails, is refused by the endpoint guard or fails validation turns the row into `unsupported` with content `[mídia não recebida]` and logs `media.fetch_failed` with the message id only; the customer gets the unsupported-media reply and the download is not retried. The outcome is committed at the end of `fetch_pending_media`, so a rollback later in the turn neither downloads a row again nor undoes a failure. Inline base64 sent by Evolution is stripped, never used.
 
-**Capped download.** `EvolutionAdapter.fetch_media` reads the response in chunks and
-stops at `media_max_bytes * 4 // 3 + 65_536` raw bytes (base64 overhead plus
-headroom), asks for `Accept-Encoding: identity` and refuses any other
-`Content-Encoding`, under an overall deadline; decoded media over `MEDIA_MAX_BYTES`
-is refused too. Each case raises `MediaTooLarge` and ends as the failure above, with
-no file written.
+**Capped download.** `EvolutionAdapter.fetch_media` reads the response in chunks and stops at `media_max_bytes * 4 // 3 + 65_536` raw bytes (base64 overhead plus headroom), asks for `Accept-Encoding: identity` and refuses any other `Content-Encoding`, under an overall deadline; decoded media over `MEDIA_MAX_BYTES` is refused too. Each case raises `MediaTooLarge` and ends as the failure above, with no file written.
 
-**Channel endpoint guard.** The Evolution `config.base_url` is tenant input, so it
-gets the same address rules as tool endpoints (`validate_channel_base_url`,
-`assert_safe_channel_url` in `app/tools/ssrf.py`). `app/api/channels.py` runs the
-static check, without DNS, on create and update (422 `invalid base_url: ...`).
-`EvolutionAdapter._connection` runs the full check, with DNS, before every outbound
-call (media download, send, read receipt, typing): a refusal logs
-`channel.endpoint_refused` and raises `SSRFError`, and `process_turn` runs the same
-check up front. An operator reply through a refused channel answers 502
-`channel endpoint refused`. The one override is `CHANNEL_ALLOWED_HOSTS`; the tool
-settings do not apply to channels, and the DNS-rebinding gap of tools applies here
-too. Media settings are in `docs/guides/configuration.md`. Outbound media,
-retention and cleanup, remote storage and a separate OCR step do not exist.
+**Channel endpoint guard.** The Evolution `config.base_url` is tenant input, so it gets the same address rules as tool endpoints (`validate_channel_base_url`, `assert_safe_channel_url` in `app/tools/ssrf.py`). `app/api/channels.py` runs the static check, without DNS, on create and update (422 `invalid base_url: ...`). `EvolutionAdapter._connection` runs the full check, with DNS, before every outbound call (media download, send, read receipt, typing): a refusal logs `channel.endpoint_refused` and raises `SSRFError`, and `process_turn` runs the same check up front. An operator reply through a refused channel answers 502 `channel endpoint refused`. The one override is `CHANNEL_ALLOWED_HOSTS`; the tool settings do not apply to channels, and the DNS-rebinding gap of tools applies here too. Media settings are in `docs/guides/configuration.md`. Outbound media, retention and cleanup, remote storage and a separate OCR step do not exist.
 
 ## Operator UI
 

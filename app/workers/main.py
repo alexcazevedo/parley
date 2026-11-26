@@ -18,7 +18,9 @@ both against the real Redis/Postgres connections until `SIGTERM` or `SIGINT`.
 events); an error is logged as `worker.event_push_error` and the loop goes on.
 `knowledge_ingest_loop` runs `app.knowledge.ingest.process_due` every
 `KNOWLEDGE_INGEST_INTERVAL_SECONDS` the same way (`worker.knowledge_ingest_error`)
-and is stopped like the push loop.
+and is stopped like the push loop. `mcp_sync_loop` runs `app.mcp.sync.sync_due`
+every `MCP_SYNC_POLL_SECONDS` (or `MCP_SYNC_INTERVAL_SECONDS` when shorter) the
+same way (`worker.mcp_sync_error`); a pass syncs only the servers due.
 
 Shutdown (PRODUCT.md E3.4): the signal sets `stop`. The job loop ends after
 its current `run_once` (at most `DEQUEUE_TIMEOUT_SECONDS`) or at once if it is
@@ -52,6 +54,7 @@ from app.db import async_session_maker
 from app.events.delivery import SessionFactory, deliver_due
 from app.http_client import close_shared_client, shared_client
 from app.knowledge.ingest import process_due
+from app.mcp.sync import sync_due
 from app.observability.logging import configure_logging
 from app.queue.base import Job, Queue
 from app.queue.redis_queue import WORKER_TTL_SECONDS, RedisQueue
@@ -70,6 +73,8 @@ JOB_LOOP_ERROR_PAUSE_SECONDS = 1.0
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 # How long a stopping worker waits for the push loop's current pass.
 EVENT_PUSH_SHUTDOWN_SECONDS = 10.0
+# How often the worker looks for MCP servers due for a sync.
+MCP_SYNC_POLL_SECONDS = 30.0
 
 
 async def run_once(
@@ -193,6 +198,26 @@ async def knowledge_ingest_loop(
             pass
 
 
+async def mcp_sync_loop(
+    session_factory: SessionFactory, stop: asyncio.Event, interval: float
+) -> None:
+    """Run `sync_due` every `interval` seconds until `stop` is set.
+
+    An error is logged as `worker.mcp_sync_error`; the next pass comes after
+    the same interval. The wait is cut short by `stop`.
+    """
+    while not stop.is_set():
+        try:
+            await sync_due(session_factory)
+        except Exception:
+            logger.exception("worker.mcp_sync_error")
+        try:
+            async with asyncio.timeout(interval):
+                await stop.wait()
+        except TimeoutError:
+            pass
+
+
 async def _stop_event_push(
     task: asyncio.Task, failed_event: str = "worker.event_push_failed"
 ) -> None:
@@ -291,6 +316,13 @@ async def main() -> None:
             async_session_maker, stop, settings.knowledge_ingest_interval_seconds
         )
     )
+    mcp_task = asyncio.create_task(
+        mcp_sync_loop(
+            async_session_maker,
+            stop,
+            min(settings.mcp_sync_interval_seconds, MCP_SYNC_POLL_SECONDS),
+        )
+    )
     try:
         await job_loop(queue, redis, stop, settings.debounce_seconds)
     finally:
@@ -302,6 +334,8 @@ async def main() -> None:
                 # Same bounded wait as the push loop: an item cut off is taken
                 # again after its claim lease.
                 _stop_event_push(ingest_task, "worker.knowledge_ingest_failed"),
+                # A sync cut off is only a discovery; the next pass repeats it.
+                _stop_event_push(mcp_task, "worker.mcp_sync_failed"),
             )
         finally:
             housekeeping_task.cancel()

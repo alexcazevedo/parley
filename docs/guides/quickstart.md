@@ -89,9 +89,10 @@ This adds a `mock-llm` service and points `api` and `worker` at it with `LLM_BAS
 - A customer message gets the reply `Stub reply to: <the message>`.
 - When the agent has the `handoff_to_human` tool and the message contains `human`, `person`, `pessoa` or `atendente`, the stub calls that tool and the conversation is handed off.
 - When the agent has `knowledge_enabled` on, the stub calls `search_knowledge` with the customer's message, and answers `Stub answer from knowledge: ` followed by the text of the first passage found, or `Stub: nothing found in the knowledge base.` when there is none ([knowledge](knowledge.md)). A message that asks for a human still goes to `handoff_to_human` first.
+- The message `/tool <name> <JSON arguments>` makes the stub call that tool when the agent is offered it, and the reply is `Stub tool result: ` followed by the result ([business-tools](business-tools.md) step 11). A tool the agent lacks gives `Stub: tool <name> is not offered.`.
 - The reply check, the sentiment score, categorization, the rolling summary and the handoff brief get fixed answers: the reply is allowed, the customer is calm, no category fits, and the summaries are one fixed sentence.
 
-The stub does not reason, call your tools (other than `handoff_to_human` and `search_knowledge`), read images, transcribe audio or stream. It ignores the agent's own `model` and prompt. Use it to check that the stack and your integration work, not to judge answers.
+The stub does not reason, call your tools (other than `handoff_to_human`, `search_knowledge` and the one a `/tool` message names), read images, transcribe audio or stream. It ignores the agent's own `model` and prompt. Use it to check that the stack and your integration work, not to judge answers.
 
 Check: `docker compose -f docker-compose.yml -f docker-compose.stub.yml ps mock-llm` shows it running.
 

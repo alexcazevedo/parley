@@ -120,6 +120,9 @@ class Settings(BaseSettings):
     embeddings_base_url: str = ""
     embeddings_api_key: str = ""
     embeddings_model: str = "text-embedding-3-small"
+    # MCP servers (see app/mcp/sync.py): the worker discovers a server's tools
+    # again once its last discovery is this old.
+    mcp_sync_interval_seconds: float = Field(default=300.0, gt=0)
 
 
 class InsecureSettingsError(RuntimeError):

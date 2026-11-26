@@ -9,6 +9,8 @@ from app.models.handoff import Handoff, HandoffRequestedBy
 from app.models.knowledge_item import KnowledgeItem, KnowledgeItemKind, KnowledgeItemStatus
 from app.models.knowledge_passage import KnowledgePassage
 from app.models.manifest_item import ManifestItem
+from app.models.mcp_server import McpServer, McpServerStatus
+from app.models.mcp_tool import McpTool
 from app.models.memory import Memory, MemoryType
 from app.models.message import Message, MessageDirection, MessageRole
 from app.models.tenant import Tenant
@@ -37,6 +39,9 @@ __all__ = [
     "KnowledgeItemStatus",
     "KnowledgePassage",
     "ManifestItem",
+    "McpServer",
+    "McpServerStatus",
+    "McpTool",
     "Memory",
     "MemoryType",
     "Message",

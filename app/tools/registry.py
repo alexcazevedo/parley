@@ -1,8 +1,9 @@
 """Merges tool executors into the single view the agent runtime consumes.
 
 Ordering is the routing rule: the first executor whose `can_handle` returns
-True owns the name, and `NoopExecutor` is always the terminal fallback. Adding
-a source is one line at construction time:
+True (and whose optional `owns(name, ctx)` agrees) owns the name, and
+`NoopExecutor` is always the terminal fallback. Adding a source is one line
+at construction time:
 
     ToolRegistry([BuiltinToolExecutor(), HttpToolExecutor()])
 
@@ -18,11 +19,13 @@ the same turn already made it (PRODUCT.md E3.7, `ledger.find_prior`):
 - `STARTED` (outcome unknown): the call runs again only if the owning
   executor's `repeat_safe(name, ctx)` returns True; otherwise the model gets
   `ledger.OUTCOME_UNKNOWN_ERROR` and the operator a `tools.outcome_unknown`
-  warning. Executors without `repeat_safe` count as not safe.
+  warning. Executors without `repeat_safe` count as not safe. A repeated
+  call keeps the earlier row's `call_id` (`ToolContext.repeat_call_id`).
 
 A reused or refused call writes no `ToolExecution` row.
 """
 
+import dataclasses
 from collections.abc import Sequence
 from typing import Any
 
@@ -36,6 +39,7 @@ from app.tools import ledger
 from app.tools.base import NoopExecutor, ToolContext, ToolExecutor, ToolResult
 from app.tools.builtin import BuiltinExecutor
 from app.tools.http import HttpToolExecutor
+from app.tools.mcp import McpToolExecutor
 
 logger = structlog.get_logger(__name__)
 
@@ -46,8 +50,10 @@ def default_executors() -> list[ToolExecutor]:
     `HttpToolExecutor.can_handle` claims every name, so it stays last:
     `BuiltinExecutor` (`remember`, and `handoff_to_human`) is
     *prepended*, not appended, or it would never be reached.
+    `McpToolExecutor` comes before it and claims only the MCP tools of the
+    turn's agent (its `owns`), so an HTTP tool named `a__b` still reaches HTTP.
     """
-    return [BuiltinExecutor(), HttpToolExecutor()]
+    return [BuiltinExecutor(), McpToolExecutor(), HttpToolExecutor()]
 
 
 class ToolRegistry:
@@ -76,7 +82,7 @@ class ToolRegistry:
     async def execute(
         self, name: str, arguments: dict[str, Any], ctx: ToolContext
     ) -> ToolResult:
-        executor = self._route(name)
+        executor = await self._route(name, ctx)
         prior = await ledger.find_prior(ctx, name, arguments or {})
         if prior is None:
             return await executor.execute(name, arguments, ctx)
@@ -91,7 +97,10 @@ class ToolRegistry:
             return ledger.replay(prior)
         repeat_safe = getattr(executor, "repeat_safe", None)
         if repeat_safe is not None and await repeat_safe(name, ctx):
-            return await executor.execute(name, arguments, ctx)
+            # The repeat carries the earlier attempt's call id, so the endpoint
+            # can tell it is the same call.
+            repeat_ctx = dataclasses.replace(ctx, repeat_call_id=prior.call_id)
+            return await executor.execute(name, arguments, repeat_ctx)
         logger.warning(
             "tools.outcome_unknown",
             tool=name,
@@ -100,8 +109,14 @@ class ToolRegistry:
         )
         return ToolResult.failure(ledger.OUTCOME_UNKNOWN_ERROR)
 
-    def _route(self, name: str) -> ToolExecutor:
+    async def _route(self, name: str, ctx: ToolContext) -> ToolExecutor:
+        """The first executor whose `can_handle` is True and, if it has an
+        `owns(name, ctx)` (a check that needs the turn), whose `owns` is True."""
         for executor in self._executors:
-            if executor.can_handle(name):
-                return executor
+            if not executor.can_handle(name):
+                continue
+            owns = getattr(executor, "owns", None)
+            if owns is not None and not await owns(name, ctx):
+                continue
+            return executor
         return self._fallback

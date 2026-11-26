@@ -1,0 +1,20 @@
+# Lets the stub stack start with a placeholder .env (DEMO_MODE, a throwaway
+# SECRETS_KEY to encrypt the MCP server token) and gives the example project
+# its MCP token. Demo only: never on a server others can reach.
+# The key is made for the run and never stored in the repository:
+#   export DEMO_SECRETS_KEY=$(uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+#   docker compose -f docker-compose.yml -f docker-compose.stub.yml \
+#     -f docker-compose.example.yml -f docker-compose.demo.yml up -d --build --wait
+# Then: scripts/demo_business_tools.py
+services:
+  api:
+    environment:
+      DEMO_MODE: "true"
+      SECRETS_KEY: ${DEMO_SECRETS_KEY:?set DEMO_SECRETS_KEY to a Fernet key, see the top of docker-compose.demo.yml}
+  worker:
+    environment:
+      DEMO_MODE: "true"
+      SECRETS_KEY: ${DEMO_SECRETS_KEY:?set DEMO_SECRETS_KEY to a Fernet key, see the top of docker-compose.demo.yml}
+  project-inbox:
+    environment:
+      PARLEY_TOOLS_TOKEN: demo-tools-token

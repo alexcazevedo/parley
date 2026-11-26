@@ -228,3 +228,68 @@ async def test_embeddings_are_deterministic_and_close_for_shared_words(monkeypat
 
     assert abs(cosine(first[0], first[0]) - 1) < 1e-9
     assert cosine(first[0], first[1]) > cosine(first[0], first[2])
+
+
+SHOP_SEARCH = ToolSpec(
+    name="shop__search_product",
+    description="Search.",
+    parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+)
+
+
+async def test_tool_command_calls_an_offered_tool(provider):
+    response = await provider.complete(
+        [LLMMessage(role=ROLE_USER, content='/tool shop__search_product {"query": "human"}')],
+        [HANDOFF_SPEC, SEARCH_KNOWLEDGE_SPEC, SHOP_SEARCH],
+        model="stub",
+    )
+    [call] = response.tool_calls
+    assert call.name == "shop__search_product"
+    assert call.arguments == {"query": "human"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["/tool shop__search_product {not json", "/tool shop__search_product [1]", "/tool"],
+)
+async def test_malformed_tool_command(provider, text):
+    response = await provider.complete(
+        [LLMMessage(role=ROLE_USER, content=text)], [SHOP_SEARCH], model="stub"
+    )
+    assert response.tool_calls == []
+    assert response.content == "Stub: invalid /tool command."
+
+
+async def test_tool_command_for_a_tool_not_offered(provider):
+    response = await provider.complete(
+        [LLMMessage(role=ROLE_USER, content="/tool get_order {}")], [SHOP_SEARCH], model="stub"
+    )
+    assert response.tool_calls == []
+    assert "not offered" in (response.content or "")
+
+
+async def test_reply_after_a_tool_command_result():
+    raw = {
+        "model": "stub",
+        "messages": [
+            {"role": "user", "content": '/tool shop__search_product {"query": "x"}'},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_stub_tool",
+                        "type": "function",
+                        "function": {"name": "shop__search_product", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_stub_tool", "content": '{"ok": true}'},
+        ],
+        "tools": [{"type": "function", "function": {"name": "shop__search_product"}}],
+    }
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        body = (await client.post("http://stub/v1/chat/completions", json=raw)).json()
+    message = body["choices"][0]["message"]
+    assert message["content"] == 'Stub tool result: {"ok": true}'
+    assert not message.get("tool_calls")

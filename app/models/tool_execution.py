@@ -53,6 +53,12 @@ class ToolExecution(Base, TenantScoped):
     # A terminal result's `final_text` (`handoff_to_human`): the reply that
     # ended the loop, restored by `ledger.replay` so a reused call ends it too.
     terminal_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # One per call (app/tools/ledger.py `begin`); a repeat of an unknown-outcome
+    # call keeps the earlier row's. Sent to HTTP tools as `X-Parley-Call-Id`.
+    # Null on rows written before migration 0025.
+    call_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # Who the call was for (`CallContext.as_record()`); null on old rows.
+    context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

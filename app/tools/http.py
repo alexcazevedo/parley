@@ -22,6 +22,7 @@ from app.http_retry import RETRY_STATUSES, wait_before_retry
 from app.llm.base import ToolSpec
 from app.models.agent import Agent
 from app.models.tool import Tool
+from app.models.tool_execution import ToolExecution
 from app.security import secrets as secrets_crypto
 from app.tools import ledger
 from app.tools.base import UNKNOWN_TOOL_ERROR, ToolContext, ToolResult
@@ -87,7 +88,9 @@ class HttpToolExecutor:
         if invalid is not None:
             result, outcome_unknown = ToolResult.failure(invalid), False
         else:
-            result, outcome_unknown = await self._run(tool, name, arguments)
+            result, outcome_unknown = await self._run(
+                tool, name, arguments, self._context_headers(ctx, execution)
+            )
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         meta = {"latency_ms": latency_ms} | result.meta
@@ -118,7 +121,11 @@ class HttpToolExecutor:
         return result
 
     async def _run(
-        self, tool: Tool, name: str, arguments: dict[str, Any]
+        self,
+        tool: Tool,
+        name: str,
+        arguments: dict[str, Any],
+        context_headers: dict[str, str] | None = None,
     ) -> tuple[ToolResult, bool]:
         """The HTTP call, every failure shaped into a `ToolResult`.
 
@@ -132,7 +139,7 @@ class HttpToolExecutor:
         ledger row `STARTED`.
         """
         try:
-            return await self._call(tool, arguments), False
+            return await self._call(tool, arguments, context_headers), False
         except SSRFError as exc:
             return ToolResult.failure(f"blocked endpoint: {exc}"), False
         except httpx.TimeoutException as exc:
@@ -147,17 +154,27 @@ class HttpToolExecutor:
             logger.exception("tools.http.unexpected_error", tool=name)
             return ToolResult.failure("tool execution failed"), True
 
-    async def _call(self, tool: Tool, arguments: dict[str, Any]) -> ToolResult:
+    async def _call(
+        self,
+        tool: Tool,
+        arguments: dict[str, Any],
+        context_headers: dict[str, str] | None = None,
+    ) -> ToolResult:
         settings = get_settings()
         cap = settings.tool_max_response_bytes
         method = (tool.method or "POST").upper()
         # Only a GET is repeated on 429/5xx; anything else is sent exactly once.
         attempts = settings.http_retry_attempts if method == "GET" else 1
         # `identity`: a compressed body could expand far past the cap in memory.
+        # The call's context headers win over an auth header of the same name
+        # (compared case-insensitively). One set for every retry of a GET.
+        context_headers = context_headers or {}
+        reserved = {key.lower() for key in context_headers}
+        auth = {k: v for k, v in self._auth_headers(tool).items() if k.lower() not in reserved}
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "identity",
-        } | self._auth_headers(tool)
+        } | auth | context_headers
         params = None if method in BODY_METHODS else arguments
         body = arguments if method in BODY_METHODS else None
 
@@ -207,6 +224,12 @@ class HttpToolExecutor:
             return json.loads(raw)
         except ValueError:
             return {"text": raw.decode("utf-8", errors="replace")}
+
+    def _context_headers(self, ctx: ToolContext, execution: ToolExecution) -> dict[str, str]:
+        """The `X-Parley-*` headers for this call; none without a `CallContext`."""
+        if ctx.call is None or execution.call_id is None:
+            return {}
+        return ctx.call.as_headers(execution.call_id)
 
     def _auth_headers(self, tool: Tool) -> dict[str, str]:
         """Decrypt `auth_config` at call time. The token is never logged."""

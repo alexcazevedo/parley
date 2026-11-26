@@ -1,80 +1,84 @@
-# REPORT: Knowledge base (milestone 3 of 5)
+# REPORT: Business tools over MCP (milestone 4)
 
-- **Vision:** a knowledge base per tenant that the agent searches on demand, so tenant knowledge never sits in the prompt.
+- **Vision:** implement `docs/roadmap/1-business-tools-mcp.md`: an app runs an MCP server, and the parley agent calls its tools for the customer who is writing.
 - **Mode:** mvp. **Owner:** agent.
-- **Outcome:** done. All 7 tickets passed on the first attempt; `make check` is green (1246 passed, 1 skipped). Nothing is committed: the work is in the working tree on branch `fix/track-app-media`, waiting for your review.
+- **Outcome:** done. All 7 tickets finished; `make check` is green (1310 passed, 1 skipped). Committed and pushed on branch `feat/mcp-tools`.
 
 ## Grill
 
-AGREE 4, DIVERGE 0, ESCALATE 0. No DIVERGE or ESCALATE rows.
+AGREE 6, DIVERGE 0, ESCALATE 0. No DIVERGE or ESCALATE rows.
 
-Plan verdict from the owner: APPROVE. It raised one point that did not block: unique titles would have refused a replacement document uploaded under the same name. Fixed before the run: titles are unique for entries and pairs only.
+The five open items of the brief were decided as: the official MCP SDK, kept in one client module; the signature is a documented follow-up; tools attach per server, with an optional allow-list on the server; a server that asks for OAuth registers and shows status `error` with the reason; the stub model calls a tool on `/tool <name> <JSON arguments>`.
 
-Does the manifest fit? Partly, as you asked to be told. Entries and question-and-answer pairs are in an optional `knowledge` section. Documents are not: the manifest is one text file of at most 1 MiB and cannot carry a PDF. Export names each document in a warning; apply never touches them.
+Plan verdict from the owner: APPROVE, no objections.
 
 ## Tickets
 
 | # | ticket | model | status | attempts |
 |---|---|---|---|---|
-| 01 | Entries, pairs, passages, limits, keyword search, try-a-search route | opus | done | 1 of 3 |
-| 02 | Documents (PDF, text, Markdown) | sonnet | done | 1 of 3 |
-| 03 | `knowledge_enabled` and the `search_knowledge` tool | opus | done | 1 of 3 |
-| 04 | Semantic search, optional pgvector, re-index command | opus | done | 1 of 3 |
-| 05 | Manifest `knowledge` section | sonnet | done | 1 of 3 |
-| 06 | Success demo (test and script) | sonnet | done, with one check failing as written (below) | 1 of 3 |
+| 01 | Customer context and call id on every tool call | opus | done | 2 of 3 |
+| 02 | MCP servers: registration, discovery, re-sync | opus | done | 1 of 3 |
+| 03 | Agent field `mcp_servers`, executor, try route, stub command | opus | done | 1 of 3 |
+| 04 | Manifest `mcp_servers` section | sonnet | done | 1 of 3 |
+| 05 | Example project MCP server | sonnet | done | 1 of 3 |
+| 06 | Success demo (test and live script) | sonnet | done | 2 of 3 |
 | 07 | Docs | sonnet | done | 1 of 3 |
 
 No blocked tickets.
 
+## The success demo
+
+- **Test, scripted model, natural sentences** (`tests/test_mcp_demo.py`): "Vocês têm cartolina branca?" makes the agent call `shop__search_product` and reply with both products; "Sim, a primeira" makes it call `shop__add_to_quote`; the item is in that customer's quote and in no other; the same call id again adds nothing; a second customer gets their own quote; both `tool_executions` rows hold the customer context.
+- **Live, stub stack with the example project, no model key:** the script printed `business tools demo: ok`. On the stub the customer sends `/tool ...` commands in place of the sentences, because the stub does not reason.
+
 ## What did not go as planned
 
-- **Ticket 06, check 6 fails as written on this machine.** `.env` holds the placeholder `ADMIN_API_KEY`, so the API refuses to start in the compose stack. I did not edit `.env`. I ran the same demo with a throwaway override that sets `DEMO_MODE=true`, under its own compose project (`parley-kbdemo`, own volume, removed afterwards). Result: script exit 0; the agent with the switch on answered from the PDF and its run has a `search_knowledge` execution with status `ok`; the agent with the switch off has none.
-- **The script cannot show the tool call itself.** No endpoint lists agent runs or tool calls, so the script infers the search from the stub's reply; the test and my database query read the `tool_executions` row. "See in the agent run" today means reading that table.
-- **Ticket 05 touched files outside its list:** `app/models/manifest_item.py` and migration `0024`. A check constraint on manifest item kinds refused the new kinds. Ticket 07 also edited `tests/test_llms_served.py` (the fixed order of guides).
-
-## Things I changed outside the repository
-
-- Installed the `postgresql-16-pgvector` package inside the running `parley-test-pg` container, so the semantic tests run instead of skipping. No restart, no data touched. A recreated container from plain `postgres:16` will skip them again; `make db` now starts the pgvector image.
+- **Ticket 01, attempt 1:** an existing retry test calls the HTTP executor directly and broke on the new header argument; the argument became optional.
+- **Ticket 06, first live run:** registering a server with a token returned 500. `.env` on this machine has a placeholder `SECRETS_KEY`, and encrypting the token needs a real key. `.env` was not edited; the new `docker-compose.demo.yml` sets `DEMO_MODE` and takes a key made for the run.
+- **Ticket 04** also edited `app/api/manifest.py` (the sync after the apply commits), which I added to its files at dispatch.
 
 ## How to run the result
 
 ```
-docker compose -f docker-compose.yml -f docker-compose.stub.yml up -d --build --wait
-uv run python scripts/demo_knowledge.py --base-url http://localhost:8001 --admin-key <your admin key>
+export DEMO_SECRETS_KEY=$(uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+docker compose -f docker-compose.yml -f docker-compose.stub.yml -f docker-compose.example.yml -f docker-compose.demo.yml up -d --build --wait
+uv run python scripts/demo_business_tools.py --base-url http://localhost:8001 --inbox-url http://localhost:9200 --admin-key <the ADMIN_API_KEY of .env> --tools-token demo-tools-token
 ```
 
-It prints `knowledge demo: ok`. The stack needs a real `ADMIN_API_KEY` in `.env` (or `DEMO_MODE=true`). In tests: `uv run pytest -q tests/test_knowledge_demo.py`.
+It prints `business tools demo: ok`. In tests: `uv run pytest -q tests/test_mcp_demo.py`.
 
 ## Final review: diff summary
 
-56 files changed, 4496 insertions, 144 deletions, against `ca5c73e`.
+68 files changed, 5026 insertions, 265 deletions, against `392365e`.
 
 **New behaviour**
-- Routes, tenant key: `POST /knowledge/entries`, `POST /knowledge/qa`, `POST /knowledge/documents`, `GET /knowledge`, `GET /knowledge/{item_id}`, `PATCH /knowledge/{item_id}`, `DELETE /knowledge/{item_id}`, `POST /knowledge/search`.
-- Agent field `knowledge_enabled` (default off) and built-in tool `search_knowledge`. With the switch off, the prompt and the tool list are unchanged.
-- Worker loop that splits items into passages and extracts document text; a document goes `processing`, then `ready` or `failed` with a reason.
-- Keyword search always (Portuguese, accents ignored, so `horario` finds `horário`). Semantic search when `EMBEDDINGS_BASE_URL` is set and the database has pgvector; both rankings are merged. Any failure on the semantic path falls back to keyword.
-- `uv run python -m app.knowledge.reindex [--all]` after a change of embeddings model.
-- Manifest `knowledge` section; export warning per document.
+- Routes, tenant key: `POST /mcp-servers`, `GET /mcp-servers`, `GET /mcp-servers/{server_id}`, `PATCH /mcp-servers/{server_id}`, `DELETE /mcp-servers/{server_id}`, `POST /mcp-servers/{server_id}/sync`, `POST /mcp-servers/{server_id}/call` (try one tool).
+- Agent field `mcp_servers` (server names, default empty). The model sees each tool as `<server>__<tool>`.
+- Every tool call, MCP and HTTP, carries the conversation id, channel id, the app's own user id, the contact name when known, and a call id. MCP: in `_meta` under `parley/...`. HTTP tools: as `X-Parley-...` headers. Each call's row in `tool_executions` stores them (`call_id`, `context`).
+- Discovery at registration, on request and every `MCP_SYNC_INTERVAL_SECONDS` (300) in the worker. A failing server keeps its last tools and shows `error` with a reason.
+- A read-only tool may be repeated; any other is not. An error result reaches the model as a refusal it can explain.
+- Manifest section `mcp_servers`; an agent naming an unknown server is refused before any write.
+- Stub model: `/tool <name> <JSON arguments>`.
+- Example project: MCP server at `/mcp` with `search_product` and `add_to_quote`, `GET /quotes`.
 
 **Where the code is**
-- `app/knowledge/` (text, ingest, search, embeddings, reindex), `app/api/knowledge.py`, `app/repositories/knowledge.py`, `app/models/knowledge_item.py`, `app/models/knowledge_passage.py`.
-- Changed: `app/tools/builtin.py`, `app/agents/context.py`, `app/agents/runtime.py`, `app/api/agents.py`, `app/models/agent.py`, `app/manifest/` (schema, apply, export), `app/models/manifest_item.py`, `app/workers/main.py`, `app/media/storage.py`, `app/config.py`, `app/main.py`, `scripts/mock_llm_server.py`.
-- Migrations `0021` (knowledge tables), `0022` (`knowledge_enabled`), `0023` (embeddings table, only where pgvector is available), `0024` (manifest item kinds).
-- Settings: `KNOWLEDGE_MAX_ITEMS` (500), `KNOWLEDGE_MAX_ITEM_CHARS` (20000), `KNOWLEDGE_MAX_TOTAL_CHARS` (2000000), `KNOWLEDGE_INGEST_INTERVAL_SECONDS` (2.0), `EMBEDDINGS_BASE_URL`, `EMBEDDINGS_API_KEY`, `EMBEDDINGS_MODEL`.
-- Infrastructure: `docker-compose.yml` and `.github/workflows/ci.yml` now use `pgvector/pgvector:pg16`; the stub stack serves embeddings too.
-- Docs: new `docs/guides/knowledge.md`; setup, agent-behaviour, operations, quickstart, configuration, manifest, `ARCHITECTURE.md`, `llms.txt`, `AGENTS.md`, `docs/integrations/vendezap.md`.
-- Tests: 6 new test files, about 40 tests, including tenant isolation on the keyword path, the semantic path and the tool.
+- New: `app/mcp/` (client, sync), `app/tools/mcp.py`, `app/tools/context.py`, `app/api/mcp_servers.py`, `app/repositories/mcp.py`, `app/models/mcp_server.py`, `app/models/mcp_tool.py`, `examples/project_inbox/tools.py`, `scripts/demo_business_tools.py`, `docker-compose.demo.yml`.
+- Changed: `app/tools/` (base, ledger, registry, http), `app/agents/runtime.py`, `app/api/agents.py`, `app/models/agent.py`, `app/models/tool_execution.py`, `app/manifest/`, `app/api/manifest.py`, `app/workers/main.py`, `app/config.py`, `scripts/mock_llm_server.py`, `examples/project_inbox/app.py`, `docker-compose.example.yml`.
+- Migrations `0025` (call id and context on tool executions), `0026` (MCP tables), `0027` (`mcp_servers` on agents), `0028` (manifest kind).
+- New dependency: `mcp>=2.3.0`. It brings a second HTTP client library (`httpx2`) and a web server stack.
+- Docs: new `docs/guides/business-tools.md` (the app-side contract, 14 steps); pointers in setup, manifest, agent-behaviour, project-channel, operations, quickstart; `llms.txt`, `README.md`, `AGENTS.md`, `ARCHITECTURE.md`, `FOLLOW_UPS.md`, the vendezap brief, the roadmap index.
+- Tests: 6 new test files, about 60 tests, including tenant isolation on servers, on tool calls and on the context.
 
-**Decisions to check, made at plan time or found in the code**
-1. A document is cut at the existing `PDF_MAX_CHARS` (20000 characters) and `PDF_MAX_PAGES` (30), and flagged `truncated`. You asked to reuse those limits; for a knowledge document 20000 characters is small (roughly 8 pages). Raising `PDF_MAX_CHARS` also raises it for customer PDFs in a conversation.
-2. The compose default image changes to `pgvector/pgvector:pg16`. It is the same Postgres 16; an existing volume should open as it is, but I did not test an upgrade of an existing volume.
-3. Semantic results below cosine similarity 0.25 are dropped (`SEMANTIC_MIN_SIMILARITY`, a constant). The right value depends on the embeddings model; it was tested only against fake embeddings.
-4. An embeddings failure leaves an item `ready` on keyword search alone; the re-index command fills the gap later.
-5. The system prompt lists at most 30 titles of ready items, each cut to 80 characters.
-6. Vectors have no approximate index: each semantic query scans the tenant's vectors. Fine at the default limits; not measured.
-7. `ARCHITECTURE.md` is at 928 lines of a 930 limit.
+**Decisions to check**
+1. **Resolved after review: how "the call never ran" is told from "outcome unknown".** `McpError` now carries `sent`, set from the failure's type (address refused, connection never opened, token refused: not sent; a read timeout, a broken connection, a protocol error: unknown). No reason text is matched. This also corrected a case the text matching had wrong: a connection that broke after it opened used to count as "never ran".
+2. **Resolved after review: no key in the repository.** `docker-compose.demo.yml` takes `DEMO_SECRETS_KEY` from the shell and refuses to start without it; the guide shows the one line that makes a key for the run. The live demo was run again this way and passed.
+3. **Renaming a server detaches it from agents**, because agents list servers by name. Recorded as a follow-up.
+4. **A refusal reaches the model with a prefix** added by the SDK: `Error executing tool <name>: <your message>`.
+5. **Host names.** The SDK's server refuses (421) a request whose `Host` is not localhost unless the app allows the name. The example does; the guide warns app authors.
+6. **Not built, as decided:** the request signature and picking single tools per agent. Both are in `docs/FOLLOW_UPS.md`.
 
 **Not verified**
-- No real model and no real embeddings endpoint was called: only the scripted fake and the stub. Whether a real model reliably calls `search_knowledge` and refuses to invent is untested.
-- CI was not run; the workflow change is unexercised.
+- No real model was called: only the scripted fake and the stub. Whether a real model picks `search_product` from its description, and carries the product id into `add_to_quote`, is untested.
+- No third-party MCP server was tried: only the SDK's own server, in process and in the example.
+- OAuth detection was tested against a simulated 401, not a real OAuth server.
+- CI was not run.

@@ -8,10 +8,12 @@ words are close.
 
 Each auxiliary caller (boundary check, sentiment, categorization, summary,
 handoff brief) is recognized by a fragment of its system prompt and answered
-in the format its parser accepts. Anything else is the agent's turn: a
-handoff request calls `handoff_to_human`, any other message calls
-`search_knowledge` when it is offered, and the reply after a search quotes
-the first passage found.
+in the format its parser accepts. Anything else is the agent's turn: the
+command `/tool <name> <JSON arguments>` calls that tool when it is offered
+(and the reply after its result is `Stub tool result: <content>`), a handoff
+request calls `handoff_to_human`, any other message calls `search_knowledge`
+when it is offered, and the reply after a search quotes the first passage
+found.
 
 The fragments below duplicate the prompts in app/; tests/test_mock_llm_server.py
 fails when a prompt changes and a fragment stops matching.
@@ -50,6 +52,11 @@ HANDOFF_WORDS = ("human", "person", "pessoa", "atendente")
 KNOWLEDGE_TOOL = "search_knowledge"
 KNOWLEDGE_ANSWER_PREFIX = "Stub answer from knowledge: "
 KNOWLEDGE_NOTHING = "Stub: nothing found in the knowledge base."
+TOOL_COMMAND_RE = re.compile(r"^/tool(?=\s|$)\s*(\S*)(.*)$", re.DOTALL)
+TOOL_CALL_ID = "call_stub_tool"
+TOOL_RESULT_PREFIX = "Stub tool result: "
+TOOL_INVALID = "Stub: invalid /tool command."
+TOOL_NOT_OFFERED = "Stub: tool {name} is not offered."
 
 
 def _text(content: Any) -> str:
@@ -100,6 +107,24 @@ def _knowledge_answer(content: Any) -> str:
     return KNOWLEDGE_NOTHING
 
 
+def _tool_command(text: str) -> tuple[str, dict[str, Any]] | None | str:
+    """`(name, arguments)` for a `/tool` command, `TOOL_INVALID` for a malformed
+    one, None when the text is no `/tool` command."""
+    match = TOOL_COMMAND_RE.match(text.strip())
+    if match is None:
+        return None
+    name, rest = match.group(1), match.group(2).strip()
+    if not name:
+        return TOOL_INVALID
+    try:
+        arguments = json.loads(rest) if rest else {}
+    except ValueError:
+        return TOOL_INVALID
+    if not isinstance(arguments, dict):
+        return TOOL_INVALID
+    return name, arguments
+
+
 def _call(call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return {
         "role": "assistant",
@@ -126,6 +151,8 @@ def _answer(body: dict[str, Any]) -> dict[str, Any]:
 
     last = messages[-1] if messages else {}
     if last.get("role") == "tool":
+        if last.get("tool_call_id") == TOOL_CALL_ID:
+            return {"role": "assistant", "content": TOOL_RESULT_PREFIX + _text(last.get("content"))}
         if _tool_name(messages, last.get("tool_call_id")) == KNOWLEDGE_TOOL:
             return {"role": "assistant", "content": _knowledge_answer(last.get("content"))}
         return {"role": "assistant", "content": "Done. Is there anything else I can help with?"}
@@ -137,6 +164,14 @@ def _answer(body: dict[str, Any]) -> dict[str, Any]:
             break
 
     tools = body.get("tools")
+    command = _tool_command(last_user)
+    if isinstance(command, str):
+        return {"role": "assistant", "content": command}
+    if command is not None:
+        name, arguments = command
+        if not _offers(tools, name):
+            return {"role": "assistant", "content": TOOL_NOT_OFFERED.format(name=name)}
+        return _call(TOOL_CALL_ID, name, arguments)
     wants_human = any(word in last_user.lower() for word in HANDOFF_WORDS)
     if _offers(tools, HANDOFF_TOOL) and wants_human:
         return _call(

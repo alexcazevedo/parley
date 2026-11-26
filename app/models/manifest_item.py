@@ -1,4 +1,4 @@
-"""ManifestItem: what the manifest manages (agent, department, tool, channel, knowledge).
+"""ManifestItem: what the manifest manages (agent, department, tool, channel, knowledge, MCP).
 
 `key` is the author's key for agents and channels and the name for
 departments and tools. `item_id` points at the managed row; it is not a
@@ -22,6 +22,7 @@ MANIFEST_KINDS = (
     "channel",
     "knowledge_entry",
     "knowledge_qa",
+    "mcp_server",
 )
 
 
@@ -34,7 +35,7 @@ class ManifestItem(Base, TenantScoped):
         ),
         CheckConstraint(
             "kind IN ('agent', 'department', 'tool', 'channel', "
-            "'knowledge_entry', 'knowledge_qa')",
+            "'knowledge_entry', 'knowledge_qa', 'mcp_server')",
             name="ck_manifest_items_kind",
         ),
     )

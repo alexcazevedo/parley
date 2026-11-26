@@ -4,7 +4,7 @@ Four milestones, in the order to build them. Each file is a brief for one `/comb
 
 | Order | Brief | What it gives | Depends on |
 |---|---|---|---|
-| 1 | [Business tools over MCP](1-business-tools-mcp.md) | An app runs an MCP server; the agent calls its tools for the customer who is writing | nothing |
+| 1 | [Business tools over MCP](1-business-tools-mcp.md) | An app runs an MCP server; the agent calls its tools for the customer who is writing. **Done**: [guide](../guides/business-tools.md). The signature was left as a follow-up ([FOLLOW_UPS](../FOLLOW_UPS.md)) | nothing |
 | 2 | [A model per job](2-model-per-job.md) | Each auxiliary decision (boundary check, sentiment, department) can run on a small, cheap model, with typed answers | nothing; easier after 1 |
 | 3 | [Native providers](3-native-providers.md) | The agent turn can run on Anthropic, Google and others through their own APIs | 2 |
 | 4 | [Streaming](4-streaming.md) | Web chat shows the reply as it is written | 3 |
@@ -14,7 +14,7 @@ Four milestones, in the order to build them. Each file is a brief for one `/comb
 - **Parley keeps its own agent loop.** The loop in `app/agents/runtime.py` runs under a deadline, records every tool call in the ledger before it runs, ends on a terminal tool, and checks the reply against the boundaries before it is sent. No milestone here hands that loop to a framework.
 - **No LangChain and no LangGraph.** Parley already has what LangGraph would bring (loop, saved state, handoff to a person, retries), built around its own rules.
 - **Pydantic AI enters in milestone 2, as the model layer only**, behind the existing `LLMProvider` interface (`app/llm/base.py`). It is the same stack as parley (Pydantic, async) and brings native providers and typed outputs. Milestone 1 does not need it.
-- **MCP for tools, with parley as the client.** MCP defines discovery, the call and the result. Parley adds only what MCP leaves open: which customer the call is for, a call id for safe repeats, and a signature.
+- **MCP for tools, with parley as the client.** MCP defines discovery, the call and the result. Parley adds only what MCP leaves open: which customer the call is for, a call id for safe repeats, and (still to come, see FOLLOW_UPS) a signature.
 - **HTTP tools stay.** `POST /tools` and the manifest's `tools` section keep working unchanged.
 - **Nothing changes for an existing tenant until it opts in.** Every new capability is off by default.
 - **No real model, embeddings or network call in tests.**

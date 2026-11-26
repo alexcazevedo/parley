@@ -55,6 +55,7 @@ from app.models.memory import Memory
 from app.models.message import Message, MessageDirection, MessageRole
 from app.repositories.knowledge import KnowledgeItemsRepository
 from app.tools.base import ToolContext
+from app.tools.context import load_call_context
 from app.tools.registry import ToolRegistry
 
 logger = structlog.get_logger(__name__)
@@ -241,6 +242,7 @@ class AgentRuntime:
             agent=agent,
             agent_run_id=run.id,
             message_ids=message_ids,
+            call=await load_call_context(session, conversation.tenant_id, conversation.id),
         )
 
         for _ in range(max(1, agent.max_tool_iterations or 1)):

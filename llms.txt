@@ -2,7 +2,7 @@
 
 > Parley is a headless, multi-tenant service that runs AI conversations over HTTP. An application talks to it through a REST API; it is not a library.
 
-For a first integration follow quickstart, configuration, setup (or manifest, which sets up a whole business from one file), messaging and operators in that order: each step ends with a check that it worked. A project that keeps its own inbox follows project-channel after setup. An agent that answers from the business's own facts follows knowledge. The other guides are for tuning and running. Links are relative to the base URL of a running instance.
+For a first integration follow quickstart, configuration, setup (or manifest, which sets up a whole business from one file), messaging and operators in that order: each step ends with a check that it worked. A project that keeps its own inbox follows project-channel after setup. An agent that answers from the business's own facts follows knowledge. An agent that acts on the business (looks up products, writes a quote) follows business-tools. The other guides are for tuning and running. Links are relative to the base URL of a running instance.
 
 ## Guides
 
@@ -14,6 +14,7 @@ For a first integration follow quickstart, configuration, setup (or manifest, wh
 - [Operators](docs/guides/operators.md): read to hand a conversation to a human, read the waiting lines, claim, reply, resume or close, define categories, and build an operator screen.
 - [Project channel](docs/guides/project-channel.md): read to connect a project that has its own inbox and staff: forward messages, receive signed event pushes, read the event feed, hand back to the agent, departments and PDFs.
 - [Knowledge](docs/guides/knowledge.md): read to give the agent facts about the business: add entries, question-and-answer pairs and PDF, text or markdown documents, check their status, replace a document, try a search, switch the agent on with `knowledge_enabled`, and set up semantic search.
+- [Business tools](docs/guides/business-tools.md): read to give the agent tools that act on the business: what an MCP server must offer, the `_meta` keys and call id, register the server, check its status and tools, try a call, attach it to an agent with `mcp_servers`, and try it with the stub.
 - [Agent behaviour](docs/guides/agent-behaviour.md): read to tune instructions, memory, boundaries, sentiment escalation, the handoff message, failure texts and the context window.
 - [API conventions](docs/guides/api-conventions.md): read for authentication headers, the error shape and status codes, request ids, paging and limits.
 - [Operations](docs/guides/operations.md): read to run more than one replica, upgrade, or understand retries, dead letters and shutdown.

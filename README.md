@@ -10,7 +10,7 @@ Parley is a headless, multi-tenant service that runs AI conversations over HTTP.
 
 - Tenants with their own API key; every query is scoped to the tenant.
 - Agents with instructions, a model, tools, long-term memory and a rolling summary.
-- Business tools: HTTP endpoints you describe with a JSON Schema, guarded against calls to private addresses.
+- Business tools: an MCP server you run, discovered by parley and called for the customer who is writing, or HTTP endpoints you describe with a JSON Schema; both guarded against calls to private addresses.
 - Channels: web chat over REST, and WhatsApp through Evolution API, with images and voice notes (transcribed).
 - A debounce window turns a burst of messages into one agent turn; a message that arrives mid-reply supersedes the turn.
 - Human handoff: by the agent's tool, by a frustration score, or by an operator. A handoff carries a short AI-written brief.
@@ -61,6 +61,7 @@ Follow the guides in order; each one ends with a check that its step worked.
 - [Messaging](docs/guides/messaging.md): send and receive messages on web chat and WhatsApp; what the customer sees when something fails.
 - [Operators](docs/guides/operators.md): hand a conversation to a human; lines, claim, reply, resume, categories; a polling loop for an operator screen.
 - [Project channel](docs/guides/project-channel.md): connect a project with its own inbox: forward messages, signed event pushes, the event feed, departments, PDFs.
+- [Business tools](docs/guides/business-tools.md): give the agent tools that act on the business: an MCP server you run, discovery, the customer context and call id, trying a call, the allow-list.
 - [Agent behaviour](docs/guides/agent-behaviour.md): instructions, memory, boundaries, sentiment escalation, failure texts, context window.
 - [API conventions](docs/guides/api-conventions.md): authentication, errors, paging, polling, limits.
 - [Operations](docs/guides/operations.md): replicas, the image user, upgrading, retries, dead letters, shutdown.

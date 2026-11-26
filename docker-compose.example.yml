@@ -14,6 +14,7 @@ services:
       PARLEY_API_KEY: ${PARLEY_API_KEY:-}
       PARLEY_CHANNEL_ID: ${PARLEY_CHANNEL_ID:-}
       PARLEY_EVENTS_SECRET: ${PARLEY_EVENTS_SECRET:-}
+      PARLEY_TOOLS_TOKEN: ${PARLEY_TOOLS_TOKEN:-}
       # /tmp is the only writable place for the non-root user; it survives a
       # restart of the container, not its removal.
       INBOX_STATE_PATH: /tmp/inbox.json
@@ -25,10 +26,12 @@ services:
         condition: service_started
 
   # The worker pushes events to the project, so the SSRF rules must accept
-  # the compose-internal host name; the api validates events_url on create.
+  # the compose-internal host name (TOOL_ALLOWED_HOSTS: same for the MCP server); the api validates events_url on create.
   api:
     environment:
       CHANNEL_ALLOWED_HOSTS: project-inbox
+      TOOL_ALLOWED_HOSTS: project-inbox
   worker:
     environment:
       CHANNEL_ALLOWED_HOSTS: project-inbox
+      TOOL_ALLOWED_HOSTS: project-inbox

@@ -89,6 +89,12 @@ Parley calls any OpenAI-compatible chat-completions endpoint.
 - `CHANNEL_ALLOWED_HOSTS`: comma-separated host names an Evolution channel `base_url` or an `external` channel `events_url` (checked on create and update, and again on every push) may use even if the address is private, for example `evolution`. Default: empty, so only public hosts are allowed. It does not depend on the `TOOL_` settings.
 - `BOUNDARY_FLOOR_FILE`: path to a JSON file of boundaries applied to every agent of every tenant. Tenants can add to it but not loosen it. Default: empty, so there is no floor. A missing or broken file stops start-up. Shape: `{"scope": "optional text", "never": ["text"]}`.
 
+## MCP servers
+
+A tenant's MCP servers are checked with the same address rules as tools (`TOOL_ALLOWED_HOSTS`, `TOOL_SSRF_DISABLED`), when registered and before every connection.
+
+- `MCP_SYNC_INTERVAL_SECONDS`: how old a server's last discovery may get before the worker discovers its tools again. A server whose discovery failed is tried again after the same time. Default: `300`.
+
 ## Events pushed to a project
 
 Used by `external` channels. How the pushes work is in [project-channel](project-channel.md).

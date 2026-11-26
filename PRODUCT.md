@@ -5,100 +5,98 @@ parallel_default: sequential   # sequential | parallel
 owner: agent                   # human | agent (set by comb:auto)
 ---
 
-# Knowledge base (milestone 3 of 5)
+# Business tools over MCP (milestone 4)
+
+The brief is `docs/roadmap/1-business-tools-mcp.md`; the decisions common to
+the roadmap are in `docs/roadmap/README.md`. This file is the short form.
 
 ## What / why
 
-A tenant's own material (opening hours, exchange and return policy, payment
-and delivery rules, question-and-answer pairs, operation documents) can
-today only go in the agent's `instructions`, which fills the context on
-every turn and does not scale. This milestone gives each tenant a knowledge
-base that the agent searches on demand. The content never sits in the
-prompt. First tenant: vendezap.
+An agent can call a tenant's HTTP tools today, but the call carries only the
+model's arguments: the app cannot know which customer it is for, each tool
+is registered by hand, and no document says what an app must implement. This
+milestone lets an app expose its functions by running an MCP server. Parley
+connects as a client, discovers the tools, and calls them for the customer
+who is writing. First tenant: vendezap (search the catalog, add to a quote).
 
 ## Primary user story
 
-As an integrator with a tenant key, I store entries, question-and-answer
-pairs and documents, switch `knowledge_enabled` on for an agent, and the
-agent answers customers from that material, or hands off or says it does
-not know. It never invents an answer.
+As an app developer, I run an MCP server with my business functions,
+register its URL in parley with my tenant key, attach it to an agent, and
+the agent calls my tools with the customer's identity and a call id, so my
+writes land on the right customer and are safe to receive twice.
 
 ## In scope
 
-**Items**, tenant-scoped, through the HTTP API with the tenant key: entries
-(title and text), question-and-answer pairs, and documents (uploaded PDF,
-plain text or Markdown, turned into text with the existing PDF extraction
-and its limits). Create, read, paged list, update, delete. Every item has a
-status: processing, ready, or failed with a reason. Delete removes every
-passage of the item.
+**MCP servers.** Registered with the tenant key: name, URL (streamable HTTP
+only), a bearer or header token stored encrypted, an optional allow-list of
+tool names. Create, read, paged list, update, delete. The URL passes the
+tool address checks (`TOOL_ALLOWED_HOSTS`, the SSRF guard) at registration
+and before every connection; redirects are not followed.
 
-**Documents.** Parley keeps the extracted text only: no stored file, no
-download. The title can be changed; the content cannot. To replace a
-document, upload the new one, wait for ready, delete the old one. Entries
-and pairs are fully editable; an edit is split again in the worker.
+**Discovery.** Run at registration, on request and on a schedule in the
+worker. Parley keeps a copy of each tool, so a turn never waits on
+discovery. Tools that disappear are removed. A server that cannot be
+reached, refuses the token or asks for OAuth keeps its last known tools and
+shows status `error` with the reason.
 
-**Limits.** Set once by the server owner in the environment, the same for
-every tenant, counted per tenant: number of items, size of one entry or
-answer, the existing upload and PDF limits, total stored text. Going over
-is refused with an error naming the limit.
+**Attaching.** An agent lists server names and gets every imported tool of
+each, including tools added later. The model sees each tool under the
+server's name as a prefix.
 
-**Search.** Content is split into passages in the worker, never in the
-request. Keyword search (Postgres full-text, Portuguese) always works, on
-plain Postgres, with no extra service. Semantic search (pgvector) is added
-when an OpenAI-compatible embeddings endpoint is set in the environment;
-both results are merged. A re-index command recovers from a change of
-embeddings model. A tenant never reads another tenant's passages.
+**On every tool call**, MCP and HTTP alike, beside the model's arguments and
+never inside them: the conversation id, the channel id, the user id the app
+gave parley for that customer, the contact's name when known, and a call id
+that stays the same when parley repeats the call. MCP: in `_meta`. HTTP
+tools: as headers. Existing HTTP tools keep working.
 
-**The agent.** A built-in tool, `search_knowledge(query)`, switched per
-agent by `knowledge_enabled` (default off: existing agents do not change).
-It returns the few best passages with their source titles, under a fixed
-size budget. The system prompt gains only a short, capped list of titles.
-Retrieved text is data, not instructions; the boundary check still applies
-to the reply. The agent run records which passages were returned.
+**Repeats and results.** A tool marked read-only may be retried; any other
+is called at most once per model request. An error result is a refusal the
+model may explain; a transport failure is a failure. Results are data, not
+instructions; the boundary check still applies. Every call is recorded in
+`tool_executions` with its context.
 
-**Try a search.** A route: query in, passages and scores out, as the agent
-would get them.
-
-**Manifest.** An optional `knowledge` section with entries (identified by
-title, unique per tenant) and pairs (identified by the question), applied
-like departments. Documents stay API-only: export leaves them out with a
-warning naming each; apply never touches them. Older files stay valid.
-
-**Tests.** Ingestion, both search modes, the tool inside a turn, limits,
-deletion, tenant isolation. No real model or embeddings call.
-
-**Docs.** A knowledge-base guide in `docs/guides`; the setup, manifest and
-agent-behaviour guides; `llms.txt`; `docs/integrations/vendezap.md`.
+**Also.** Manifest support for servers and their attachment. A route to try
+one tool call. The stub model calls a tenant tool on the command
+`/tool <name> <JSON arguments>`. The example project gains an MCP server
+with `search_product` and `add_to_quote`. An app-side guide written as the
+contract, and a section in the vendezap brief.
 
 ## Out of scope
 
-Admin screen (vendezap builds its own on this API), crawling websites,
-images and audio as knowledge, Word and spreadsheet files, OCR of scanned
-PDFs, per-category or per-channel knowledge bases, per-tenant limit
-overrides, replacing a document's file in place, downloading the original
-file, answers without the agent.
+The request signature (a documented follow-up; the token over https is the
+minimum). Picking single tools per agent. Parley as an MCP server. The stdio
+transport. MCP resources, prompts, sampling, elicitation. OAuth. Importing
+OpenAPI. Confirmation before a tool that changes something. Tools returning
+files or images. Per-customer permissions on tools. Any change in the
+vendezap repository. Any admin screen. Any agent framework.
 
 ## Constraints
 
-- Follow the patterns already in the code; add no new ones.
-- Existing endpoints and agents behave as before.
-- A server without the embeddings setting, on plain `postgres:16`, still
-  migrates, starts and searches by keyword.
+- Follow the patterns already in the code; the official MCP Python SDK is
+  the only new dependency, kept inside one client module.
+- No real model or network call in tests: an in-process MCP server.
+- Nothing changes for a tenant that registers no server.
 
 ## Success demo
 
-Done when, with a tenant key, I can add an entry, a question-and-answer
-pair and a PDF, see the PDF become ready, switch `knowledge_enabled` on for
-an agent, send a customer message on a channel that only the PDF can
-answer, and see in the agent run that `search_knowledge` was called and the
-reply uses the passage; and the same question to an agent with the switch
-off makes no such call.
+Done when, with the example project beside parley and a scripted model, I
+register the example's MCP server with one call, attach it to an agent, and
+send "Vocês têm cartolina branca?" on an external channel: the agent calls
+`search_product` and replies with the two products; I answer "Sim, a
+primeira": it calls `add_to_quote`, the example shows the item in that
+customer's quote and no other, and the agent confirms; the same add with
+the same call id adds nothing; a second customer gets their own quote;
+`tool_executions` shows both calls with the customer context; and the same
+path runs on the stub stack with no model key.
 
 ## Grill log
 
 | # | question | recommendation | answer | tag |
 |---|----------|----------------|--------|-----|
 | 1 | Mode | (given by the human) | mvp | AGREE |
-| 2 | How does the knowledge base enter the manifest? | Optional `knowledge` section for entries and pairs; documents API-only, named in an export warning | As recommended. Entries keyed by title, pairs by question; older files stay valid | AGREE |
-| 3 | What does full CRUD mean for a document; is the original file kept? | Text only, no download; title editable, content not; replace by upload then delete; entries and pairs fully editable | As recommended | AGREE |
-| 4 | Who sets the per-tenant limits? | Server owner, in the environment, same for every tenant, counted per tenant; no override | As recommended | AGREE |
+| 2 | Official MCP SDK or a client of parley's own? | The SDK: follows the protocol, takes a caller's HTTP client, tests in process | The SDK, kept inside one client module; every connection goes through the address checks with redirects off | AGREE |
+| 3 | Signature now or later? | Later; context and call id now, authenticated by the token over https | Documented follow-up; the guide says no signature is sent yet | AGREE |
+| 4 | How are tools attached to an agent? | Per server, with an optional allow-list on the server; no per-agent picking | As recommended | AGREE |
+| 5 | A server that requires OAuth? | Registration succeeds; discovery fails; status `error` with the reason | As recommended: one failure path, also for a server that switches to OAuth later | AGREE |
+| 6 | How does the stub model call a tenant tool? | The command `/tool <name> <JSON arguments>` | As recommended; the natural sentences are covered by the scripted-model test | AGREE |

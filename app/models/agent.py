@@ -43,6 +43,11 @@ class Agent(Base, TenantScoped):
         server_default=DEFAULT_HANDOFF_MESSAGE,
     )
     tool_names: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    # Names of the tenant's MCP servers whose imported tools the agent gets
+    # (app/tools/mcp.py); a name with no such server is ignored. Migration 0027.
+    mcp_servers: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=sa.text("'[]'::jsonb")
+    )
     context_message_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     summary_threshold: Mapped[int] = mapped_column(Integer, nullable=False, default=40)
     # Per-agent opt-in for the sentiment-triggered escalation classifier (see

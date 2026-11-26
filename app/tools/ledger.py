@@ -52,7 +52,9 @@ async def begin(
 ) -> ToolExecution:
     """Insert and commit the call's row (`STARTED`) before the tool runs.
 
-    The commit also commits whatever the turn's session had pending.
+    The commit also commits whatever the turn's session had pending. The row
+    gets its call id (`ctx.repeat_call_id` for a repeat, else a new one) and
+    `ctx.call`'s record.
     """
     execution = ToolExecution(
         id=uuid.uuid4(),
@@ -62,6 +64,8 @@ async def begin(
         tool_name=tool_name,
         arguments=_jsonable(arguments) or {},
         status=ToolExecutionStatus.STARTED,
+        call_id=ctx.repeat_call_id or uuid.uuid4(),
+        context=ctx.call.as_record() if ctx.call is not None else None,
     )
     ctx.session.add(execution)
     await ctx.session.commit()
