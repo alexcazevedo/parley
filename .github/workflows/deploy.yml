@@ -1,0 +1,72 @@
+# Deploys parley by calling Dokploy's deploy webhooks on every push to `main`.
+# Dokploy builds the image from docker/Dockerfile on its own server; there is
+# no build or push-to-registry step here.
+#
+# Parley runs as two Dokploy apps built from the same image, so there are two
+# repo secrets, one webhook each:
+#   DOKPLOY_DEPLOY_WEBHOOK        - parley-api (runs the migrations on start)
+#   DOKPLOY_DEPLOY_WEBHOOK_WORKER - parley-worker
+# Each is https://dokploy.site.plugu.solutions/api/deploy/<app refreshToken>.
+#
+# Dokploy's webhook handler expects a GitHub-shaped push payload: it checks
+# `ref` against the app's branch and `commits[].added/modified/removed`
+# against the app's watchPaths, answering HTTP 301 + {"message":"... Not
+# Match"} otherwise. The `github.event` available inside Actions omits those
+# per-commit file lists, so a minimal payload is rebuilt from `git diff` and
+# sent with `x-github-event: push`.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Trigger Dokploy deploy webhooks
+        env:
+          WEBHOOK_API: ${{ secrets.DOKPLOY_DEPLOY_WEBHOOK }}
+          WEBHOOK_WORKER: ${{ secrets.DOKPLOY_DEPLOY_WEBHOOK_WORKER }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        # curl -f would treat Dokploy's 301 "Not Match" replies as success, so
+        # the status is checked explicitly and the body is shown.
+        run: |
+          if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            base="$BEFORE"
+          else
+            base="$AFTER~1"   # first push or force-push: fall back to the parent
+          fi
+          files=$(git diff --name-only "$base" "$AFTER" | jq -R . | jq -s .)
+          payload=$(jq -n --arg ref "$REF" --arg msg "$MESSAGE" --argjson files "$files" \
+            '{ref: $ref, head_commit: {message: $msg}, commits: [{added: [], removed: [], modified: $files}]}')
+
+          trigger() {
+            name="$1"; url="$2"
+            if [ -z "$url" ]; then
+              echo "$name: webhook secret is not set"
+              return 1
+            fi
+            body=$(mktemp)
+            code=$(curl -sS -o "$body" -w '%{http_code}' -X POST "$url" \
+              -H 'Content-Type: application/json' \
+              -H 'x-github-event: push' \
+              --data-binary "$payload")
+            echo "$name: HTTP $code $(cat "$body")"
+            [ "$code" = "200" ]
+          }
+
+          # The api goes first: it applies the migrations the worker needs.
+          trigger parley-api "$WEBHOOK_API"
+          trigger parley-worker "$WEBHOOK_WORKER"
