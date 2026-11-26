@@ -39,7 +39,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.boundaries import check_reply, effective_boundaries
-from app.agents.context import ContextBuilder
+from app.agents.context import KNOWLEDGE_PROMPT_TITLES, ContextBuilder
 from app.agents.loading import load_conversation_agent
 from app.config import Settings, get_settings
 from app.db import end_transaction
@@ -53,6 +53,7 @@ from app.models.channel import Channel
 from app.models.conversation import Conversation
 from app.models.memory import Memory
 from app.models.message import Message, MessageDirection, MessageRole
+from app.repositories.knowledge import KnowledgeItemsRepository
 from app.tools.base import ToolContext
 from app.tools.registry import ToolRegistry
 
@@ -210,6 +211,12 @@ class AgentRuntime:
         memories = await self._load_memories(session, agent, conversation)
         history = await self._recent_messages(session, agent, conversation)
         builder = self._context_builder or self._default_context_builder()
+        # Passed only with the flag on, so a flag-off prompt is built exactly as before.
+        knowledge: dict[str, Any] = {}
+        if agent.knowledge_enabled:
+            knowledge["knowledge_titles"] = await KnowledgeItemsRepository(session).titles(
+                conversation.tenant_id, KNOWLEDGE_PROMPT_TITLES
+            )
         messages = await builder.build(
             agent,
             conversation,
@@ -217,6 +224,7 @@ class AgentRuntime:
             memories,
             tool_specs,
             style_hint=await self._style_hint(session, conversation),
+            **knowledge,
         )
         if not any(message.role == ROLE_USER for message in messages):
             # The batch isn't visible on this session (or was pruned); the model

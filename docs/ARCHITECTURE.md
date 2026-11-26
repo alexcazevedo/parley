@@ -35,13 +35,14 @@ app/
                    provider), providers/ (openai_compatible.py is the only wire
                    format; fake.py is a scripted provider for tests and demos).
   tools/          base.py (ToolExecutor, ToolResult, ToolContext), registry.py,
-                   builtin.py (remember, handoff_to_human), http.py (the tenant's
+                   builtin.py (remember, handoff_to_human, search_knowledge), http.py (the tenant's
                    HTTP tools), ledger.py, ssrf.py, validation.py.
   media/          storage.py (local, tenant-scoped), sniff.py, stt.py, fetch.py
                    (worker download of WhatsApp media), prepare.py (audio -> text).
   handoff/        service.py (the only code that moves a conversation in or out
                    of HUMAN_HANDOFF), summarizer.py (the operator brief).
   memory/         MemoryService: long-term facts about a contact.
+  knowledge/      text.py (split, normalize), ingest.py, search.py, embeddings.py, reindex.py.
   security/       auth, secrets (Fernet), ratelimit (Redis counters), limits.
   queue/          Queue Protocol and RedisQueue.
   workers/        main.py (job loop, housekeeping loop, shutdown), scheduler.py.
@@ -70,7 +71,7 @@ explicitly; the column is the shape row-level security would key off.
 ```
 tenants (admin-created; api_key_hash)
   └─ agents (instructions, model, provider, tool_names[], memory_enabled,
-             handoff_enabled, handoff_message, max_tool_iterations,
+             knowledge_enabled, handoff_enabled, handoff_message, max_tool_iterations,
              context_message_limit, summary_threshold,
              sentiment_escalation_enabled, boundary_*, error_message,
              unsupported_media_message, ...)
@@ -97,6 +98,10 @@ tenants (admin-created; api_key_hash)
   └─ memories (contact_id, type, content, importance, expires_at,
                last_accessed_at, meta) — facts about a contact, independent of
                any one conversation
+  └─ knowledge_items (kind, title, body, status, error, chars, truncated,
+                      filename, source_key, claimed_until)
+       └─ knowledge_passages (position, heading, content, search_vector)
+            └─ knowledge_embeddings (model, vector; raw SQL, only with pgvector)
 ```
 
 **States.** `ConversationState` is `ACTIVE_AI`, `WAITING`, `HUMAN_HANDOFF` and
@@ -459,9 +464,9 @@ Two sources merged by `ToolRegistry`, in priority order (the first executor whos
 `can_handle` matches owns the name; `NoopExecutor` is the last resort and fails
 with `unknown tool`):
 
-1. **Built-in** (`app/tools/builtin.py`): `remember` and `handoff_to_human`,
-   table-driven as `(ToolSpec, agent-flag)` pairs gated by the agent's
-   `memory_enabled` and `handoff_enabled`; the flag controls both what is
+1. **Built-in** (`app/tools/builtin.py`): `remember`, `handoff_to_human` and
+   `search_knowledge`, table-driven as `(ToolSpec, agent-flag)` pairs gated by the
+   agent's `memory_enabled`, `handoff_enabled` and `knowledge_enabled`; the flag controls both what is
    advertised and what runs. They write through the ledger like any tool.
 2. **HTTP** (`app/tools/http.py`): the tenant's own `Tool` rows. `can_handle`
    claims every name (it has no session to know what exists), so it is registered
@@ -490,6 +495,10 @@ with `unknown tool`):
 `ToolResult.meta` is also the terminal-tool mechanism: any executor can set
 `{"terminal": True, "final_text": ...}` to end the loop; `handoff_to_human` is the
 only user.
+
+## Knowledge
+
+`app/api/knowledge.py` stores entries, pairs and uploaded documents as `knowledge_items` in `processing` (a file goes to media storage; limits are checked on write). `knowledge_ingest_loop` in the worker calls `app/knowledge/ingest.process_due` every `KNOWLEDGE_INGEST_INTERVAL_SECONDS`: it takes an item with `FOR UPDATE SKIP LOCKED` and a 120 s lease, extracts the text outside any transaction, splits it (`text.split_passages`, 700 characters, title as heading) and in one transaction replaces the passages and sets `ready`, or `failed`. The write is conditional on the `updated_at` read at claim, so an edit made meanwhile leaves the item `processing` for the next pass. `app/knowledge/search.py` ranks `knowledge_passages.search_vector` (`portuguese` text search over accent-stripped text, `ts_rank_cd`, query lexemes ORed); with `EMBEDDINGS_BASE_URL` set and the `knowledge_embeddings` table present it also ranks by cosine similarity (at least 0.25, current model only) and fuses both by reciprocal rank (`mode` `hybrid`); any failure of that path returns the keyword result. Every query filters on `tenant_id`. The built-in `search_knowledge` calls `search` with the tenant of the run and returns at most 4 passages; `ContextBuilder` adds a section with up to 30 ready titles for an agent with `knowledge_enabled`. The call is a `tool_executions` row like any other.
 
 ## Humanizer
 

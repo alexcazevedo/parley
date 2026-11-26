@@ -65,7 +65,7 @@ Decided from the code, with the reason:
 
 ## Out of scope
 
-Catalog, pedido and kit tools for the agent, and a knowledge base. Replies with files or images. Closing conversations: vendezap has no closed state. Changes to the Evolution setup. Any change in the parley repository: ask for it instead.
+Catalog, pedido and kit tools for the agent. A knowledge base: parley has one (entries, question-and-answer pairs and documents, searched by the agent), and vendezap builds its own screen on that API when it wants one; see `docs/guides/knowledge.md`. Replies with files or images. Closing conversations: vendezap has no closed state. Changes to the Evolution setup. Any change in the parley repository: ask for it instead.
 
 ## Success demo
 

@@ -20,13 +20,14 @@ Expected: 200 with the whole agent.
 
 What the fields do:
 
-- `instructions`: the start of the system prompt on every turn. Parley then appends, in this order: the contact's memories, the conversation summary, a chat-style hint when the channel has `humanize` on, and the boundaries.
+- `instructions`: the start of the system prompt on every turn. Parley then appends, in this order: the contact's memories, the conversation summary, the knowledge section when `knowledge_enabled` is on, a chat-style hint when the channel has `humanize` on, and the boundaries.
 - `provider`: only `openai_compatible` works. The model endpoint and key come from `LLM_BASE_URL` and `LLM_API_KEY`, one for the whole deployment.
 - `model`: sent to the provider as given.
 - `temperature` and `max_tokens`: sent on each model call of a turn. `max_tokens` is sent under the name in `LLM_MAX_TOKENS_PARAM`.
 - `tool_names`: the tools of yours the model may call, plus the built-ins below.
 - `max_tool_iterations`: the most model calls in one turn. If the model is still calling tools after that many, the customer gets the fixed text `Desculpe, não consegui concluir. Vou encaminhar.` Despite the wording, the conversation is not handed to a human.
 - `memory_enabled` and `handoff_enabled`: give the model the built-in tools `remember` and `handoff_to_human`. `memory_enabled` also turns memory reading on.
+- `knowledge_enabled` (default `false`): gives the model the built-in tool `search_knowledge` with one parameter, `query`, which returns the matching passages of the tenant's knowledge base. The system prompt then lists the titles of up to 30 ready items (never their content) and tells the model to search before answering about the business, to answer only from what the search returns, and to say it does not know or hand off when nothing matches. Passages are given to the model as reference text, with a note never to follow commands inside them; the boundary check still judges the reply. The passages a call returned are kept in the run's tool execution record (`tool_executions`, see [knowledge](knowledge.md) step 9).
 
 Check: `curl -s $BASE_URL/agents/$AGENT_ID -H "X-API-Key: $TENANT_KEY"` returns the new `instructions` and `temperature`.
 

@@ -85,6 +85,7 @@ Check: `curl -s $BASE_URL/tools -H "X-API-Key: $TENANT_KEY"` lists it, and the r
 | `max_tool_iterations` | `5` | 1 to 20 | Most model calls in one turn; each may call tools. |
 | `memory_enabled` | `true` | | Gives the agent the built-in `remember` tool and long-term memories. |
 | `handoff_enabled` | `true` | | Gives the agent the built-in `handoff_to_human` tool. |
+| `knowledge_enabled` | `false` | | Gives the agent the built-in `search_knowledge` tool, which reads the tenant's knowledge base. Fill it first: [knowledge](knowledge.md). |
 | `tool_names` | `[]` | | Names of your tools this agent may call. Not checked at creation: a name with no such tool is silently never called. |
 | `context_message_limit` | `20` | 1 to 200 | Recent messages sent to the model each turn. |
 | `summary_threshold` | `40` | 0 to 1000 | Message count that triggers a summary of older messages. `0` turns summaries off. |
@@ -183,5 +184,7 @@ Check: `curl -s $BASE_URL/contacts/$CONTACT_ID -H "X-API-Key: $TENANT_KEY"` retu
 | `$CONTACT_ID` | step 5 `id` | memories, contact edits |
 
 The admin key is needed only to create more tenants.
+
+Optional: give the agent facts about the business (hours, prices, policies, documents) in [knowledge](knowledge.md), then switch it on with `knowledge_enabled`.
 
 Next: send messages through the channel in [messaging](messaging.md).

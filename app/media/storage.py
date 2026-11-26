@@ -18,6 +18,8 @@ _EXTENSIONS: dict[str, str] = {
     "image/png": ".png",
     "image/webp": ".webp",
     "application/pdf": ".pdf",
+    "text/plain": ".txt",
+    "text/markdown": ".md",
     "audio/ogg": ".ogg",
     "audio/mpeg": ".mp3",
     "audio/mp3": ".mp3",
@@ -46,6 +48,10 @@ class LocalMediaStorage:
 
     async def get(self, key: str) -> bytes:
         return await asyncio.to_thread(self.path(key).read_bytes)
+
+    async def delete(self, key: str) -> None:
+        """Remove the file; a missing one is not an error."""
+        await asyncio.to_thread(self.path(key).unlink, missing_ok=True)
 
     def path(self, key: str) -> Path:
         if ".." in key or key.startswith("/"):

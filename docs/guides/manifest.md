@@ -29,6 +29,7 @@ Top-level keys:
 | `departments` | up to 200 departments (categories, see [operators](operators.md)) | `name` |
 | `tools` | up to 200 HTTP tools | `name` |
 | `channels` | up to 50 channels | `key` |
+| `knowledge` | `entries` and `qa`, up to 500 of each (below) | `title`, `question` |
 
 A key not in this list is refused, in the file and inside every item. Each section is optional.
 
@@ -87,6 +88,24 @@ channels:
     config:
       events_url: https://inbox.example.com/parley/events
 ```
+
+### Knowledge
+
+An optional `knowledge` section holds the entries and question-and-answer pairs of the knowledge base. Documents are not in the manifest: they are uploaded through the API.
+
+```yaml
+knowledge:
+  entries:
+    - title: Opening hours
+      text: We open Monday to Friday, from 9:00 to 18:00.
+  qa:
+    - question: How long does delivery take?
+      answer: Delivery takes 3 to 5 business days.
+```
+
+- `entries` is a list of `title` and `text`; `qa` is a list of `question` and `answer`. Both lists hold at most 500 items, and an unknown key is refused. The key of an entry is its `title`, the key of a pair is its `question`.
+- A file without the `knowledge` section changes no knowledge. A file with the section makes it declarative: a managed entry or pair no longer in it is deleted (with its passages), and a hand-made one of the same title is adopted. An item that is created or whose text changes is `processing` until the worker has split it, as with the API. Documents and hand-made items that the file does not name are never touched.
+- The limits `KNOWLEDGE_MAX_ITEMS`, `KNOWLEDGE_MAX_ITEM_CHARS` and `KNOWLEDGE_MAX_TOTAL_CHARS` apply to the result of the apply (documents count), before anything is written.
 
 Complete examples for a shop, a clinic and a law firm are in step 10.
 
@@ -151,7 +170,7 @@ Expected: 200 with `dry_run`, `changes` and `generated`. On an empty tenant:
  "generated": {}}
 ```
 
-Each change has `kind` (`department`, `tool`, `agent` or `channel`), `key` (the `key` of an agent or channel, the `name` of a department or tool), `action`, `fields` and `id`. `id` is the id of the item (the channel id that a message needs, for one). It is `null` for a `create` in a dry run, since nothing exists yet, and for a `delete` after it ran; a real apply gives the id of every created item, and a dry run gives the existing id for `update`, `adopt`, `unchanged` and `delete`. `changes` lists departments, tools, agents and channels in that order, then the deletes (channels, agents, tools, departments).
+Each change has `kind` (`department`, `tool`, `agent`, `channel`, `knowledge_entry` or `knowledge_qa`), `key` (the `key` of an agent or channel, the `name` of a department or tool, the `title` of an entry, the `question` of a pair), `action`, `fields` and `id`. `id` is the id of the item (the channel id that a message needs, for one). It is `null` for a `create` in a dry run, since nothing exists yet, and for a `delete` after it ran; a real apply gives the id of every created item, and a dry run gives the existing id for `update`, `adopt`, `unchanged` and `delete`. `changes` lists departments, knowledge entries and pairs, tools, agents and channels in that order, then the deletes (channels, agents, tools, departments, entries, pairs).
 
 | `action` | Meaning | `fields` |
 |---|---|---|
@@ -161,7 +180,7 @@ Each change has `kind` (`department`, `tool`, `agent` or `channel`), `key` (the 
 | `unchanged` | Nothing to do. | `[]` |
 | `delete` | A managed item is no longer in the file (step 6). | `[]` |
 
-The names in `fields` are those of the item: for an agent, its `POST /agents` fields (not `key`); for a tool, its `POST /tools` fields; for a department, `name` or `description`; for a channel, `name`, `agent`, `config` or `secret`. An `external` channel's signing secret is never compared.
+The names in `fields` are those of the item: for an agent, its `POST /agents` fields (not `key`); for a tool, its `POST /tools` fields; for a department, `name` or `description`; for a channel, `name`, `agent`, `config` or `secret`; for an entry, `title` or `text`; for a pair, `question` or `answer`. An `external` channel's signing secret is never compared.
 
 Check: the call returns 200 and `GET /agents` lists nothing yet.
 
@@ -301,7 +320,7 @@ If someone deletes a managed item by hand, the next apply creates it again when 
 
 ## 7. Take over a tenant set up by hand
 
-`GET /manifest` writes the tenant as a manifest: every agent, department, tool and channel, managed or not.
+`GET /manifest` writes the tenant as a manifest: every agent, department, tool, channel, knowledge entry and pair, managed or not.
 
 ```
 curl -s "$BASE_URL/manifest?format=yaml" -H "X-API-Key: $TENANT_KEY"
@@ -314,7 +333,7 @@ Expected: 200. For the tenant of the steps above, `secrets_needed` is `[]` (`ord
 - A field equal to its default is left out, and so are empty sections and an empty `config`.
 - A stored token becomes a reference named `tool_<tool name>_token` (the tool name slugged to `[a-z0-9_]`). A WhatsApp channel's key becomes `channel_<key>_secret`. The values are not exported and cannot be read. `secrets_needed` lists the referenced names not set yet: set each one with `PUT /secrets/{name}` and the real value before you apply. A managed item keeps the secret names it was applied with: the export of the file in step 2 names `orders_token`, so applying the export changes nothing. The generated names are only for items made by hand.
 - An `external` channel's signing secret is not exported, and an apply never changes it.
-- `warnings` says what the file cannot say: two hand-made agents with one name, a tool whose credentials cannot be decrypted, a managed department or tool renamed by hand.
+- `warnings` says what the file cannot say: a document (`document '<title>' is not in the manifest: documents are uploaded through the API`), two hand-made agents with one name, a tool whose credentials cannot be decrypted, a managed department or tool renamed by hand.
 
 Applying a file adopts the items already there instead of making copies. A hand-made item is matched only among items the manifest does not manage:
 
@@ -384,7 +403,9 @@ Problems found against the tenant:
 | `agents[0].name`, `channels[0].name` | `2 agents are named 'Sales'; rename one or delete it` |
 | `agents[0].name`, `channels[0].name` | `another agent in the file also adopts the agent named 'Sales'; rename one` |
 | `departments[0].name`, `tools[0].name` | `already managed by the manifest under another name` and `already exists, not managed by the manifest` (both follow a hand rename of a managed department or tool) |
-| `channels`, `agents`, `tools`, `departments` | a refused removal (step 6) |
+| `knowledge.entries[1].title`, `knowledge.qa[1].question` | `duplicate name in the file`, `already managed by the manifest under another name` and `already exists, not managed by the manifest` |
+| `knowledge` | `knowledge limit exceeded: KNOWLEDGE_MAX_ITEMS is 500` (also `KNOWLEDGE_MAX_ITEM_CHARS` and `KNOWLEDGE_MAX_TOTAL_CHARS`, with the setting's value) |
+| `channels`, `agents`, `tools`, `departments` | a refused removal (step 6); entries and pairs have no in-use rule |
 
 Other statuses of `POST /manifest/apply`:
 
@@ -405,7 +426,7 @@ Other statuses of `POST /manifest/apply`:
 - A hand edit of a managed item is overwritten by the next apply, field by field, as `update` lists it. A field left out of the file is reset, not kept.
 - One tenant has one manifest. Applying another file removes the managed items the new file does not name. The examples of step 10 are meant for an empty tenant.
 - The signing secret of an `external` channel is shown once (step 5).
-- There is no section for knowledge or for importing tools. Any key that step 2 does not list is refused.
+- There is no section for documents or for importing tools. Any key that step 2 and the knowledge section do not list is refused. An export lists each document as a warning.
 
 ## 10. Examples
 

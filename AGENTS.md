@@ -18,6 +18,7 @@ For an agent changing parley's code. Product docs for integrators are in `docs/g
 - `app/channels/`: `ChannelAdapter` and its webchat and Evolution implementations.
 - `app/conversations/`: resolver, debounce, lock, retry, `process_turn`, humanizer, rolling summary.
 - `app/handoff/`: `HandoffService` and the handoff brief.
+- `app/knowledge/`: the knowledge base: text splitting, ingest of items into passages, keyword and semantic search, embeddings, the re-index command.
 - `app/llm/`: provider protocol and the OpenAI-compatible provider (plus a scripted fake for tests).
 - `app/media/`: storage, content sniffing, speech-to-text, media preparation.
 - `app/memory/`: long-term memory per contact.

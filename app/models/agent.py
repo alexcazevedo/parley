@@ -63,6 +63,11 @@ class Agent(Base, TenantScoped):
     # 0017); null means "use the default constant".
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     unsupported_media_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Built-in `search_knowledge` tool and the knowledge section of the system
+    # prompt (app/tools/builtin.py, app/agents/context.py). Migration 0022.
+    knowledge_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa.false()
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

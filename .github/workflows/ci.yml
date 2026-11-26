@@ -19,7 +19,7 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://harness:harness@localhost:5434/harness_test
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: harness
           POSTGRES_PASSWORD: harness

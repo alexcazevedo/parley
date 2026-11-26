@@ -16,6 +16,7 @@ from app.api import (
     dev,
     external,
     health,
+    knowledge,
     lines,
     llms,
     manifest,
@@ -63,6 +64,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(channels.router)
     app.include_router(tools.router)
     app.include_router(categories.router)
+    app.include_router(knowledge.router)
     app.include_router(secrets.router)
     app.include_router(manifest.router)
     app.include_router(contacts.router)

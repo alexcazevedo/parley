@@ -74,6 +74,10 @@ NON_SETTINGS_NAMES: set[str] = {
     "PARLEY_API_KEY",
     "PARLEY_CHANNEL_ID",
     "PARLEY_EVENTS_SECRET",
+    # Added by knowledge.md.
+    "ENTRY_ID",
+    "DOCUMENT_ID",
+    "NEW_DOCUMENT_ID",
     # Settings the vendezap brief asks vendezap to add (docs/integrations/vendezap.md).
     "PARLEY_URL",
     # Vendezap's own setting, named in the same brief.

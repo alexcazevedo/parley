@@ -108,6 +108,18 @@ class Settings(BaseSettings):
     event_push_max_attempts: int = Field(default=7, ge=1)
     event_push_timeout_seconds: float = Field(default=5.0, gt=0)
     event_push_interval_seconds: float = Field(default=1.0, gt=0)
+    # Knowledge base (see app/api/knowledge.py and app/knowledge/): items per
+    # tenant, characters of one entry or answer, characters stored per tenant,
+    # and how often the worker looks for items to split into passages.
+    knowledge_max_items: int = Field(default=500, ge=1)
+    knowledge_max_item_chars: int = Field(default=20000, ge=1)
+    knowledge_max_total_chars: int = Field(default=2000000, ge=1)
+    knowledge_ingest_interval_seconds: float = Field(default=2.0, gt=0)
+    # Semantic knowledge search (see app/knowledge/embeddings.py): an
+    # OpenAI-compatible embeddings endpoint. Empty base URL: keyword only.
+    embeddings_base_url: str = ""
+    embeddings_api_key: str = ""
+    embeddings_model: str = "text-embedding-3-small"
 
 
 class InsecureSettingsError(RuntimeError):

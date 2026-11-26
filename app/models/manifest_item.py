@@ -1,4 +1,4 @@
-"""ManifestItem: which agent, department, tool or channel the manifest manages.
+"""ManifestItem: what the manifest manages (agent, department, tool, channel, knowledge).
 
 `key` is the author's key for agents and channels and the name for
 departments and tools. `item_id` points at the managed row; it is not a
@@ -15,7 +15,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TenantScoped
 
-MANIFEST_KINDS = ("agent", "department", "tool", "channel")
+MANIFEST_KINDS = (
+    "agent",
+    "department",
+    "tool",
+    "channel",
+    "knowledge_entry",
+    "knowledge_qa",
+)
 
 
 class ManifestItem(Base, TenantScoped):
@@ -26,7 +33,8 @@ class ManifestItem(Base, TenantScoped):
             "tenant_id", "kind", "item_id", name="uq_manifest_items_tenant_kind_item"
         ),
         CheckConstraint(
-            "kind IN ('agent', 'department', 'tool', 'channel')",
+            "kind IN ('agent', 'department', 'tool', 'channel', "
+            "'knowledge_entry', 'knowledge_qa')",
             name="ck_manifest_items_kind",
         ),
     )

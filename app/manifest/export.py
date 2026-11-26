@@ -22,6 +22,7 @@ from app.api.tools import ToolCreate, decode_auth_config
 from app.manifest.apply import TenantState, load_state, unmanaged_items
 from app.models.agent import DEFAULT_HANDOFF_MESSAGE, Agent
 from app.models.channel import Channel, ChannelType
+from app.models.knowledge_item import KnowledgeItemKind
 from app.models.tenant import Tenant
 from app.models.tool import Tool
 from app.repositories.secrets import SecretsRepository
@@ -238,6 +239,23 @@ async def export_manifest(session: AsyncSession, tenant: Tenant) -> ExportResult
                     "apply the manifest to adopt the new name"
                 )
 
+    by_title = sorted(state.knowledge_items, key=lambda i: i.title)
+    entries = [
+        {"title": i.title, "text": i.body or ""}
+        for i in by_title
+        if i.kind == KnowledgeItemKind.ENTRY
+    ]
+    qa = [
+        {"question": i.title, "answer": i.body or ""}
+        for i in by_title
+        if i.kind == KnowledgeItemKind.QA
+    ]
+    warnings += [
+        f"document '{i.title}' is not in the manifest: documents are uploaded through the API"
+        for i in by_title
+        if i.kind == KnowledgeItemKind.DOCUMENT
+    ]
+
     manifest: dict[str, Any] = {"version": 1}
     for section, items in (
         ("agents", agents),
@@ -247,6 +265,10 @@ async def export_manifest(session: AsyncSession, tenant: Tenant) -> ExportResult
     ):
         if items:
             manifest[section] = items
+
+    knowledge = {name: items for name, items in (("entries", entries), ("qa", qa)) if items}
+    if knowledge:
+        manifest["knowledge"] = knowledge
 
     present = {s.name for s in await SecretsRepository(session).names(tenant.id)}
     return ExportResult(

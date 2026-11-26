@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import app.handoff.summarizer as summarizer_module
 from app.agents.runtime import AgentRuntime
@@ -43,6 +44,12 @@ _VAR = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)\}?")
 _FLAGS_WITH_ARG = {"-X", "-H", "-d", "-F", "-o", "-w", "--data", "--data-raw", "--data-binary"}
 
 # `file=@name` in a guide's curl is replaced with the bytes below.
+# `file=@name.txt` and `file=@name.md`: the text the guide writes with `cat`.
+TEXT = (
+    b"Returns policy\n\nYou may return any item within 30 days of delivery. The item must be "
+    b"unused and in its original packaging.\n\nRefunds are paid to the original payment method "
+    b"within 10 business days after we receive the item.\n"
+)
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 # `file=@name.pdf`: a PDF with no readable text (the turn answers it as unsupported).
 PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n"
@@ -200,7 +207,12 @@ class Agent:
             for form in curl.forms:
                 name, _, value = self.fill(form, placeholders).partition("=")
                 if value.startswith("@"):
-                    content = PDF if value.endswith(".pdf") else JPEG
+                    if value.endswith(".pdf"):
+                        content = PDF
+                    elif value.endswith((".txt", ".md")):
+                        content = TEXT
+                    else:
+                        content = JPEG
                     files[name] = (value[1:], content, "application/octet-stream")
                 else:
                     data[name] = value
@@ -827,7 +839,14 @@ async def test_the_manifest_guide(client):
 
     # The inline checks, last.
     r = await step("GET", "/manifest/schema", 200)
-    assert set(r.json()["properties"]) == {"version", "agents", "departments", "tools", "channels"}
+    assert set(r.json()["properties"]) == {
+        "version",
+        "agents",
+        "departments",
+        "tools",
+        "channels",
+        "knowledge",
+    }
     r = await step("GET", "/agents", 200)
     assert [a["name"] for a in r.json()] == ["Acme support"]
     r = await step("GET", "/channels", 200)
@@ -837,6 +856,203 @@ async def test_the_manifest_guide(client):
     assert next(queue, None) is None, "a curl of manifest.md was not replayed"
     assert len(replayed) == len(curls)
     print(f"manifest.md curls replayed: {len(replayed)}")
+
+
+KNOWLEDGE = "knowledge"
+
+
+@pytest.fixture
+def factory(test_engine):
+    return async_sessionmaker(bind=test_engine, expire_on_commit=False)
+
+
+async def test_the_knowledge_guide(client, fake_redis, db_session, factory, media_root):
+    """An integrator follows knowledge.md: an entry, a pair, a document and its status,
+    the replacement of the document, a limit, a search, the switch and the record of what
+    the agent was given. Every curl of the guide is replayed in the guide's order (the
+    inline checks last); only the model is scripted and the worker is driven by hand."""
+    import os
+
+    from sqlalchemy import text as sql
+
+    from app.knowledge.ingest import process_due
+    from app.llm.base import ToolCall
+
+    me = Agent(client)
+    v = me.vars
+    v["ADMIN_API_KEY"] = os.environ["ADMIN_API_KEY"]
+    r = await me.run("setup", "POST", "/tenants", 201)
+    v["TENANT_ID"], v["TENANT_KEY"] = r.json()["id"], r.json()["api_key"]
+    r = await me.run("setup", "POST", "/agents", 201)
+    v["AGENT_ID"] = r.json()["id"]
+    assert r.json()["knowledge_enabled"] is False
+    r = await me.run("setup", "POST", "/channels", 201, contains="webchat")
+    v["CHANNEL_ID"] = r.json()["id"]
+    text = _read(KNOWLEDGE)
+    for line in TEXT.decode().split("\n\n"):
+        assert line.strip() in text
+
+    curls, _ = extract(KNOWLEDGE)
+    queue = iter(curls)
+    replayed: list[Curl] = []
+
+    async def step(method: str, path: str, status: int):
+        curl = next(queue)
+        assert (curl.method, curl.path) == (method, path), f"{curl.method} {curl.path}"
+        replayed.append(curl)
+        response = await me.send(curl)
+        assert response.status_code == status, f"{method} {path}: {response.text}"
+        return response
+
+    item_keys = {
+        "id", "kind", "title", "text", "filename", "status", "error", "chars", "passages",
+        "truncated", "created_at", "updated_at",
+    }
+
+    # 2. An entry.
+    r = await step("POST", "/knowledge/entries", 201)
+    v["ENTRY_ID"] = r.json()["id"]
+    assert set(r.json()) == item_keys
+    assert (r.json()["kind"], r.json()["status"], r.json()["passages"]) == (
+        "entry", "processing", 0,
+    )
+    assert r.json()["chars"] == 135 and '"chars": 135' in text
+    again = await me.client.post(
+        "/knowledge/entries",
+        json={"title": "Opening hours", "text": "x"},
+        headers={"X-API-Key": v["TENANT_KEY"]},
+    )
+    assert again.status_code == 409 and again.json()["error"]["message"] == "title already exists"
+    # 3. A pair.
+    r = await step("POST", "/knowledge/qa", 201)
+    assert (r.json()["kind"], r.json()["title"]) == ("qa", "Do you deliver on Sundays?")
+    assert r.json()["text"].startswith("No. Deliveries")
+    # 4. A document.
+    r = await step("POST", "/knowledge/documents", 201)
+    v["DOCUMENT_ID"] = r.json()["id"]
+    assert (r.json()["kind"], r.json()["status"], r.json()["text"]) == (
+        "document", "processing", None,
+    )
+    assert (r.json()["filename"], r.json()["title"]) == ("returns.txt", "Returns policy")
+    headers = {"X-API-Key": v["TENANT_KEY"]}
+    unsupported = "unsupported file: send a PDF, a .txt or a .md file"
+    refused = await client.post(
+        "/knowledge/documents", files={"file": ("a.png", JPEG, "image/png")}, headers=headers
+    )
+    assert (refused.status_code, refused.json()["error"]["message"]) == (415, unsupported)
+    assert unsupported in text
+    # 5. Statuses: the worker makes everything ready; a file with no text fails.
+    await process_due(factory)
+    r = await step("GET", "/knowledge/$DOCUMENT_ID", 200)
+    assert (r.json()["status"], r.json()["error"], r.json()["truncated"]) == ("ready", None, False)
+    assert r.json()["passages"] >= 1
+    empty = await client.post(
+        "/knowledge/documents",
+        files={"file": ("empty.txt", b"  \n", "text/plain")},
+        headers=headers,
+    )
+    await process_due(factory)
+    failed = await client.get(f"/knowledge/{empty.json()['id']}", headers=headers)
+    assert (failed.json()["status"], failed.json()["error"]) == (
+        "failed", "no text found in the file (scanned, empty or protected PDF)",
+    )
+    from app.knowledge import ingest
+
+    reasons = (ingest.NO_TEXT, "the file is not UTF-8 text", "KNOWLEDGE_MAX_TOTAL_CHARS reached")
+    for reason in reasons:
+        assert f"`{reason}`" in text
+    await client.delete(f"/knowledge/{empty.json()['id']}", headers=headers)
+    # 6. Replace the document under the same title.
+    r = await step("POST", "/knowledge/documents", 201)
+    v["NEW_DOCUMENT_ID"] = r.json()["id"]
+    assert v["NEW_DOCUMENT_ID"] != v["DOCUMENT_ID"] and r.json()["title"] == "Returns policy"
+    await process_due(factory)
+    r = await me.get(f"/knowledge/{v['NEW_DOCUMENT_ID']}")
+    assert r.json()["status"] == "ready"
+    r = await step("DELETE", "/knowledge/$DOCUMENT_ID", 204)
+    assert r.text == ""
+    gone = await me.get(f"/knowledge/{v['DOCUMENT_ID']}", 404)
+    assert gone.json()["error"]["message"] == "knowledge item not found"
+    patched = await client.patch(
+        f"/knowledge/{v['NEW_DOCUMENT_ID']}", json={"text": "x"}, headers=headers
+    )
+    assert patched.status_code == 422 and patched.json()["error"]["message"] == (
+        "the text of a document cannot be changed; upload a new document"
+    )
+    assert patched.json()["error"]["message"] in text
+    # 7. The limit names the setting and its value.
+    settings = get_settings()
+    too_long = await client.post(
+        "/knowledge/entries",
+        json={"title": "Long", "text": "a" * (settings.knowledge_max_item_chars + 1)},
+        headers=headers,
+    )
+    limit = settings.knowledge_max_item_chars
+    message = f"knowledge limit exceeded: KNOWLEDGE_MAX_ITEM_CHARS is {limit}"
+    assert too_long.status_code == 422 and too_long.json()["error"]["message"] == message
+    items = f"knowledge limit exceeded: KNOWLEDGE_MAX_ITEMS is {settings.knowledge_max_items}"
+    assert items in text and (settings.knowledge_max_items, settings.pdf_max_chars) == (500, 20000)
+    # 8. A search, the way the agent does it.
+    await process_due(factory)
+    r = await step("POST", "/knowledge/search", 200)
+    assert r.json()["mode"] == "keyword"
+    first = r.json()["results"][0]
+    assert set(first) == {
+        "passage_id", "item_id", "kind", "title", "text", "score", "keyword_rank", "semantic_rank",
+    }
+    assert (first["title"], first["kind"], first["item_id"]) == (
+        "Returns policy", "document", v["NEW_DOCUMENT_ID"],
+    )
+    assert first["text"].startswith("Returns policy\n") and "30 days" in first["text"]
+    assert (first["keyword_rank"], first["semantic_rank"]) == (1, None) and first["score"] > 0
+    nothing = await client.post(
+        "/knowledge/search", json={"query": "zebra"}, headers=headers
+    )
+    assert nothing.json() == {"mode": "keyword", "results": []}
+    # 9. Switch the agent on; the run records what it was given.
+    r = await step("PATCH", "/agents/$AGENT_ID", 200)
+    assert r.json()["knowledge_enabled"] is True
+    sent = await client.post(
+        "/channels/webchat/messages",
+        json={"channel_id": v["CHANNEL_ID"], "user_id": "u-1", "message": "Days to return?"},
+        headers=headers,
+    )
+    assert sent.status_code == 201, sent.text
+    call = ToolCall(
+        id="call_1", name="search_knowledge", arguments={"query": "days to return an item"}
+    )
+    provider = FakeLLMProvider([LLMResponse(tool_calls=[call]), LLMResponse(content="30 days.")])
+    runtime = AgentRuntime(provider=provider, registry=ToolRegistry())
+    queue_ = RedisQueue(fake_redis)
+    while await fake_redis.llen(JOBS_KEY) > 0:
+        assert await run_once(queue_, timeout=1, debounce_seconds=DEBOUNCE_SECONDS) is not None
+    await tick(fake_redis, _session_factory(db_session), runtime, now=time.time() + 5)
+    assert "search_knowledge" in [spec.name for spec in provider.calls[0]["tools"]]
+    system = provider.calls[0]["messages"][0].content
+    assert "## Knowledge base" in system and "Opening hours" in system and "30 days" not in system
+    query = re.search(r"^(SELECT created_at.*?;)$", text, re.S | re.M).group(1)
+    rows = (
+        await db_session.execute(
+            sql(query.replace("<your tenant id>", v["TENANT_ID"]).rstrip(";"))
+        )
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].query == "days to return an item"
+    [passage] = [p for p in rows[0].passages if p["item_id"] == v["NEW_DOCUMENT_ID"]][:1]
+    assert set(passage) == {"id", "item_id", "title", "text", "score"}
+    assert "30 days" in passage["text"]
+    # The inline checks, last.
+    r = await step("GET", "/knowledge/$ENTRY_ID", 200)
+    assert r.json()["id"] == v["ENTRY_ID"] and r.json()["status"] == "ready"
+    r = await step("GET", "/knowledge", 200)
+    assert [i["kind"] for i in r.json()] == ["qa"]
+    r = await step("GET", "/knowledge", 200)
+    assert r.json() == []
+    r = await step("GET", "/knowledge", 200)
+    assert [i["id"] for i in r.json()] == [v["NEW_DOCUMENT_ID"]]
+    assert next(queue, None) is None, "a curl of knowledge.md was not replayed"
+    assert len(replayed) == len(curls)
+    print(f"knowledge.md curls replayed: {len(replayed)}")
 
 
 def test_the_manifest_guide_names_every_problem_the_code_can_give():

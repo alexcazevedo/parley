@@ -2,7 +2,7 @@
 
 Every item model is the API's own create model (`AgentCreate`, `CategoryCreate`,
 `ToolCreate`) with unknown keys rejected, so the file accepts exactly what the
-endpoints accept. Later sections (knowledge) are new optional lists.
+endpoints accept. `knowledge` is an optional section of entries and pairs.
 """
 
 import re
@@ -13,6 +13,7 @@ from pydantic_core import PydanticCustomError
 
 from app.api.agents import AgentCreate
 from app.api.categories import CategoryCreate
+from app.api.knowledge import EntryCreate, QACreate
 from app.api.secrets import SECRET_NAME_PATTERN
 from app.api.tools import ToolCreate
 from app.models.channel import ChannelType
@@ -24,6 +25,8 @@ MAX_AGENTS = 50
 MAX_DEPARTMENTS = 200
 MAX_TOOLS = 200
 MAX_CHANNELS = 50
+MAX_KNOWLEDGE_ENTRIES = 500
+MAX_KNOWLEDGE_QA = 500
 
 NOT_A_REFERENCE = 'credentials must be secret references; use {"secret": "<name>"}'
 
@@ -93,6 +96,29 @@ class ManifestChannel(BaseModel):
         return value
 
 
+class ManifestKnowledgeEntry(EntryCreate):
+    """A knowledge entry; identified by `title`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ManifestKnowledgeQA(QACreate):
+    """A question-and-answer pair; identified by `question`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ManifestKnowledge(BaseModel):
+    """Entries and pairs of the knowledge base. Documents are uploaded through the API."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[ManifestKnowledgeEntry] = Field(
+        default_factory=list, max_length=MAX_KNOWLEDGE_ENTRIES
+    )
+    qa: list[ManifestKnowledgeQA] = Field(default_factory=list, max_length=MAX_KNOWLEDGE_QA)
+
+
 class Manifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -103,3 +129,5 @@ class Manifest(BaseModel):
     )
     tools: list[ManifestTool] = Field(default_factory=list, max_length=MAX_TOOLS)
     channels: list[ManifestChannel] = Field(default_factory=list, max_length=MAX_CHANNELS)
+    # None: the file says nothing about knowledge, so none is touched.
+    knowledge: ManifestKnowledge | None = None

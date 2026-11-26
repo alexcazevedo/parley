@@ -1,5 +1,6 @@
 """The stub model (scripts/mock_llm_server.py) against the real provider and parsers."""
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -13,7 +14,7 @@ from app.conversations.summary import SUMMARIZER_SYSTEM_PROMPT
 from app.handoff.summarizer import HANDOFF_SUMMARY_SYSTEM_PROMPT
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage, ToolSpec
 from app.llm.providers.openai_compatible import OpenAICompatibleProvider
-from app.tools.builtin import HANDOFF_SPEC
+from app.tools.builtin import HANDOFF_SPEC, SEARCH_KNOWLEDGE_SPEC
 from app.tools.validation import validate_arguments
 from scripts.mock_llm_server import AUXILIARY_ANSWERS, app
 
@@ -87,6 +88,66 @@ async def test_tool_result_gets_short_text(provider):
     assert message["content"] and not message.get("tool_calls")
 
 
+async def test_knowledge_search_call_with_the_user_message(provider):
+    response = await provider.complete(
+        [LLMMessage(role=ROLE_SYSTEM, content="You are helpful."),
+         LLMMessage(role=ROLE_USER, content="What are your hours?")],
+        [HANDOFF_SPEC, SEARCH_KNOWLEDGE_SPEC],
+        model="stub",
+    )
+    [call] = response.tool_calls
+    assert call.name == "search_knowledge"
+    assert call.arguments == {"query": "What are your hours?"}
+    assert validate_arguments(SEARCH_KNOWLEDGE_SPEC.parameters, call.arguments) is None
+
+
+async def test_handoff_request_wins_over_knowledge_search(provider):
+    response = await provider.complete(
+        [LLMMessage(role=ROLE_USER, content="a human please")],
+        [HANDOFF_SPEC, SEARCH_KNOWLEDGE_SPEC],
+        model="stub",
+    )
+    assert [call.name for call in response.tool_calls] == ["handoff_to_human"]
+
+
+def _after_search(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model": "stub",
+        "messages": [
+            {"role": "user", "content": "hours?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_k",
+                        "type": "function",
+                        "function": {"name": "search_knowledge", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_k", "content": json.dumps(result)},
+        ],
+        "tools": [{"type": "function", "function": {"name": "search_knowledge"}}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("passages", "expected"),
+    [
+        ([{"id": "p", "text": "We open at 9."}, {"id": "q", "text": "x"}],
+         "Stub answer from knowledge: We open at 9."),
+        ([], "Stub: nothing found in the knowledge base."),
+    ],
+)
+async def test_reply_after_knowledge_search(passages, expected):
+    raw = _after_search({"ok": True, "data": {"passages": passages, "note": "n"}})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        body = (await client.post("http://stub/v1/chat/completions", json=raw)).json()
+    message = body["choices"][0]["message"]
+    assert message["content"] == expected and not message.get("tool_calls")
+
+
 async def test_multimodal_user_content(provider):
     raw = {
         "messages": [
@@ -141,3 +202,29 @@ async def test_every_fragment_still_matches_its_prompt():
     assert len(prompts) == len(AUXILIARY_ANSWERS)
     for prompt, (fragment, _) in zip(prompts, AUXILIARY_ANSWERS, strict=True):
         assert fragment in prompt
+
+
+async def test_embeddings_are_deterministic_and_close_for_shared_words(monkeypatch):
+    import app.knowledge.embeddings as embeddings_module
+    from app.config import get_settings
+
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app))
+    monkeypatch.setattr(embeddings_module, "shared_client", lambda: client)
+    monkeypatch.setenv("EMBEDDINGS_BASE_URL", "http://stub/v1")
+    monkeypatch.setenv("EMBEDDINGS_MODEL", "stub")
+    get_settings.cache_clear()
+    try:
+        texts = ["frete gratis acima de cem reais", "frete gratis", "horario de atendimento"]
+        first = await embeddings_module.embed(texts)
+        again = await embeddings_module.embed(list(texts))
+    finally:
+        await client.aclose()
+        get_settings.cache_clear()
+    assert first == again
+    assert [len(v) for v in first] == [64, 64, 64]
+
+    def cosine(a: list[float], b: list[float]) -> float:
+        return sum(x * y for x, y in zip(a, b, strict=True))
+
+    assert abs(cosine(first[0], first[0]) - 1) < 1e-9
+    assert cosine(first[0], first[1]) > cosine(first[0], first[2])

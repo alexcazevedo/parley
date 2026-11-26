@@ -16,6 +16,9 @@ both against the real Redis/Postgres connections until `SIGTERM` or `SIGINT`.
 `event_push_loop` runs `app.events.delivery.deliver_due` every
 `EVENT_PUSH_INTERVAL_SECONDS` in its own task (pushes of `external` channel
 events); an error is logged as `worker.event_push_error` and the loop goes on.
+`knowledge_ingest_loop` runs `app.knowledge.ingest.process_due` every
+`KNOWLEDGE_INGEST_INTERVAL_SECONDS` the same way (`worker.knowledge_ingest_error`)
+and is stopped like the push loop.
 
 Shutdown (PRODUCT.md E3.4): the signal sets `stop`. The job loop ends after
 its current `run_once` (at most `DEQUEUE_TIMEOUT_SECONDS`) or at once if it is
@@ -48,6 +51,7 @@ from app.conversations.turn import AnyTurnRuntime
 from app.db import async_session_maker
 from app.events.delivery import SessionFactory, deliver_due
 from app.http_client import close_shared_client, shared_client
+from app.knowledge.ingest import process_due
 from app.observability.logging import configure_logging
 from app.queue.base import Job, Queue
 from app.queue.redis_queue import WORKER_TTL_SECONDS, RedisQueue
@@ -169,14 +173,37 @@ async def event_push_loop(
             pass
 
 
-async def _stop_event_push(task: asyncio.Task) -> None:
-    """Wait for the push loop's current pass, then cancel it if still running."""
+async def knowledge_ingest_loop(
+    session_factory: SessionFactory, stop: asyncio.Event, interval: float
+) -> None:
+    """Run `process_due` every `interval` seconds until `stop` is set.
+
+    An error is logged as `worker.knowledge_ingest_error`; the next pass comes
+    after the same interval. The wait is cut short by `stop`.
+    """
+    while not stop.is_set():
+        try:
+            await process_due(session_factory)
+        except Exception:
+            logger.exception("worker.knowledge_ingest_error")
+        try:
+            async with asyncio.timeout(interval):
+                await stop.wait()
+        except TimeoutError:
+            pass
+
+
+async def _stop_event_push(
+    task: asyncio.Task, failed_event: str = "worker.event_push_failed"
+) -> None:
+    """Wait for the push loop's (or the ingest loop's) current pass, then
+    cancel it if still running."""
     done, _ = await asyncio.wait({task}, timeout=EVENT_PUSH_SHUTDOWN_SECONDS)
     if not done:
         task.cancel()
     results = await asyncio.gather(task, return_exceptions=True)
     if isinstance(results[0], Exception):
-        logger.error("worker.event_push_failed", exc_info=results[0])
+        logger.error(failed_event, exc_info=results[0])
 
 
 def _install_stop_signals(
@@ -259,12 +286,23 @@ async def main() -> None:
     push_task = asyncio.create_task(
         event_push_loop(async_session_maker, stop, settings.event_push_interval_seconds)
     )
+    ingest_task = asyncio.create_task(
+        knowledge_ingest_loop(
+            async_session_maker, stop, settings.knowledge_ingest_interval_seconds
+        )
+    )
     try:
         await job_loop(queue, redis, stop, settings.debounce_seconds)
     finally:
         stop.set()
         try:
-            await asyncio.gather(_stop_scheduler(scheduler_task), _stop_event_push(push_task))
+            await asyncio.gather(
+                _stop_scheduler(scheduler_task),
+                _stop_event_push(push_task),
+                # Same bounded wait as the push loop: an item cut off is taken
+                # again after its claim lease.
+                _stop_event_push(ingest_task, "worker.knowledge_ingest_failed"),
+            )
         finally:
             housekeeping_task.cancel()
             await asyncio.gather(housekeeping_task, return_exceptions=True)

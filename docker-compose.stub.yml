@@ -1,6 +1,7 @@
 # Try parley without a model key:
 #   docker compose -f docker-compose.yml -f docker-compose.stub.yml up -d
-# A stub (scripts/mock_llm_server.py) answers in place of the model.
+# A stub (scripts/mock_llm_server.py) answers in place of the model and of the
+# embeddings endpoint (semantic knowledge search).
 services:
   mock-llm:
     build:
@@ -15,6 +16,9 @@ services:
       LLM_BASE_URL: http://mock-llm:9100/v1
       LLM_API_KEY: stub
       LLM_MODEL: stub
+      EMBEDDINGS_BASE_URL: http://mock-llm:9100/v1
+      EMBEDDINGS_API_KEY: stub
+      EMBEDDINGS_MODEL: stub
     depends_on:
       mock-llm:
         condition: service_started
@@ -24,6 +28,9 @@ services:
       LLM_BASE_URL: http://mock-llm:9100/v1
       LLM_API_KEY: stub
       LLM_MODEL: stub
+      EMBEDDINGS_BASE_URL: http://mock-llm:9100/v1
+      EMBEDDINGS_API_KEY: stub
+      EMBEDDINGS_MODEL: stub
     depends_on:
       mock-llm:
         condition: service_started

@@ -1,12 +1,17 @@
 """Stub model for trying parley without a model key.
 
-Answers `POST /v1/chat/completions` (the one endpoint parley's
-OpenAI-compatible provider calls) deterministically, never streams and never
-fails: every request gets a valid response.
+Answers `POST /v1/chat/completions` (the endpoint parley's OpenAI-compatible
+provider calls) deterministically, never streams and never fails: every
+request gets a valid response. `POST /v1/embeddings` answers each input with
+a deterministic 64-number vector from its hashed words, so texts sharing
+words are close.
 
 Each auxiliary caller (boundary check, sentiment, categorization, summary,
 handoff brief) is recognized by a fragment of its system prompt and answered
-in the format its parser accepts. Anything else is the agent's turn.
+in the format its parser accepts. Anything else is the agent's turn: a
+handoff request calls `handoff_to_human`, any other message calls
+`search_knowledge` when it is offered, and the reply after a search quotes
+the first passage found.
 
 The fragments below duplicate the prompts in app/; tests/test_mock_llm_server.py
 fails when a prompt changes and a fragment stops matching.
@@ -15,7 +20,10 @@ Runs as the `mock-llm` service of docker-compose.stub.yml.
 Standalone: `uv run uvicorn scripts.mock_llm_server:app --port 9100`.
 """
 
+import hashlib
 import json
+import math
+import re
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -39,6 +47,9 @@ AUXILIARY_ANSWERS: list[tuple[str, str]] = [
 
 HANDOFF_TOOL = "handoff_to_human"
 HANDOFF_WORDS = ("human", "person", "pessoa", "atendente")
+KNOWLEDGE_TOOL = "search_knowledge"
+KNOWLEDGE_ANSWER_PREFIX = "Stub answer from knowledge: "
+KNOWLEDGE_NOTHING = "Stub: nothing found in the knowledge base."
 
 
 def _text(content: Any) -> str:
@@ -54,15 +65,53 @@ def _text(content: Any) -> str:
     return ""
 
 
-def _offers_handoff(tools: Any) -> bool:
+def _offers(tools: Any, name: str) -> bool:
     if not isinstance(tools, list):
         return False
     return any(
         isinstance(tool, dict)
         and isinstance(tool.get("function"), dict)
-        and tool["function"].get("name") == HANDOFF_TOOL
+        and tool["function"].get("name") == name
         for tool in tools
     )
+
+
+def _tool_name(messages: list[dict[str, Any]], call_id: Any) -> str:
+    """The name of the tool call `call_id` in the assistant messages."""
+    for message in messages:
+        for call in message.get("tool_calls") or []:
+            if isinstance(call, dict) and call.get("id") == call_id:
+                function = call.get("function")
+                if isinstance(function, dict):
+                    return str(function.get("name") or "")
+    return ""
+
+
+def _knowledge_answer(content: Any) -> str:
+    """The reply after a `search_knowledge` result: its first passage, or nothing found."""
+    try:
+        payload = json.loads(_text(content))
+    except ValueError:
+        payload = None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    passages = data.get("passages") if isinstance(data, dict) else None
+    if isinstance(passages, list) and passages and isinstance(passages[0], dict):
+        return KNOWLEDGE_ANSWER_PREFIX + str(passages[0].get("text") or "")
+    return KNOWLEDGE_NOTHING
+
+
+def _call(call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+        ],
+    }
 
 
 def _answer(body: dict[str, Any]) -> dict[str, Any]:
@@ -77,6 +126,8 @@ def _answer(body: dict[str, Any]) -> dict[str, Any]:
 
     last = messages[-1] if messages else {}
     if last.get("role") == "tool":
+        if _tool_name(messages, last.get("tool_call_id")) == KNOWLEDGE_TOOL:
+            return {"role": "assistant", "content": _knowledge_answer(last.get("content"))}
         return {"role": "assistant", "content": "Done. Is there anything else I can help with?"}
 
     last_user = ""
@@ -85,23 +136,14 @@ def _answer(body: dict[str, Any]) -> dict[str, Any]:
             last_user = _text(message.get("content"))
             break
 
-    if _offers_handoff(body.get("tools")) and any(
-        word in last_user.lower() for word in HANDOFF_WORDS
-    ):
-        return {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": "call_stub_handoff",
-                    "type": "function",
-                    "function": {
-                        "name": HANDOFF_TOOL,
-                        "arguments": json.dumps({"reason": "The customer asked for a human."}),
-                    },
-                }
-            ],
-        }
+    tools = body.get("tools")
+    wants_human = any(word in last_user.lower() for word in HANDOFF_WORDS)
+    if _offers(tools, HANDOFF_TOOL) and wants_human:
+        return _call(
+            "call_stub_handoff", HANDOFF_TOOL, {"reason": "The customer asked for a human."}
+        )
+    if _offers(tools, KNOWLEDGE_TOOL) and not wants_human and last_user.strip():
+        return _call("call_stub_knowledge", KNOWLEDGE_TOOL, {"query": last_user})
     return {"role": "assistant", "content": f"Stub reply to: {last_user}"}
 
 
@@ -126,6 +168,43 @@ async def chat_completions(request: Request) -> dict[str, Any]:
             }
         ],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+EMBEDDING_DIMENSIONS = 64
+_WORD_RE = re.compile(r"\w+")
+
+
+def embedding(text: str) -> list[float]:
+    """Unit vector counting the text's words in hashed buckets (a lone bucket when none)."""
+    vector = [0.0] * EMBEDDING_DIMENSIONS
+    for word in _WORD_RE.findall(text.lower()):
+        digest = hashlib.sha256(word.encode("utf-8")).digest()
+        vector[int.from_bytes(digest[:4], "big") % EMBEDDING_DIMENSIONS] += 1.0
+    if not any(vector):
+        vector[0] = 1.0
+    norm = math.sqrt(sum(x * x for x in vector))
+    return [x / norm for x in vector]
+
+
+@app.post("/v1/embeddings")
+async def embeddings(request: Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    raw = body.get("input")
+    texts = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+    return {
+        "object": "list",
+        "model": str(body.get("model") or "stub"),
+        "data": [
+            {"object": "embedding", "index": index, "embedding": embedding(str(item))}
+            for index, item in enumerate(texts)
+        ],
+        "usage": {"prompt_tokens": len(texts), "total_tokens": len(texts)},
     }
 
 

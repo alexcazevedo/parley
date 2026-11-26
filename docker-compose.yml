@@ -1,6 +1,9 @@
 services:
   postgres:
-    image: postgres:16
+    # Postgres 16 with the `vector` extension (semantic knowledge search).
+    # Same server and data directory as `postgres:16`, which also works
+    # (search then stays keyword only).
+    image: pgvector/pgvector:pg16
     env_file: .env
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-harness}

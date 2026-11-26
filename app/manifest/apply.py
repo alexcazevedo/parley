@@ -40,6 +40,7 @@ default, so an update writes every changed field, never a partial patch.
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -52,12 +53,14 @@ from app.api.categories import category_values
 from app.api.channels import channel_secret
 from app.api.channels import endpoint_problem as channel_endpoint_problem
 from app.api.tools import decode_auth_config, endpoint_problem, tool_values
+from app.config import get_settings
 from app.manifest.schema import Manifest, ManifestChannel, ManifestTool
 from app.models.agent import Agent
 from app.models.category import Category
 from app.models.channel import Channel, ChannelType
 from app.models.contact import Contact
 from app.models.conversation import Conversation, ConversationState
+from app.models.knowledge_item import KnowledgeItem, KnowledgeItemKind, KnowledgeItemStatus
 from app.models.manifest_item import ManifestItem
 from app.models.tenant import Tenant
 from app.models.tool import Tool
@@ -65,6 +68,7 @@ from app.repositories.agents import AgentsRepository
 from app.repositories.base import BaseRepository
 from app.repositories.categories import CategoriesRepository
 from app.repositories.channels import ChannelsRepository
+from app.repositories.knowledge import KnowledgeItemsRepository
 from app.repositories.secrets import SecretsRepository
 from app.repositories.tools import ToolsRepository
 from app.security import secrets as secrets_crypto
@@ -163,6 +167,10 @@ class TenantState:
     tools: dict[uuid.UUID, Tool]
     tools_by_name: dict[str, Tool]
     channels: dict[uuid.UUID, Channel]
+    # Every knowledge item of the tenant; entries and pairs are also by kind.
+    knowledge_items: list[KnowledgeItem] = field(default_factory=list)
+    entries: dict[uuid.UUID, KnowledgeItem] = field(default_factory=dict)
+    qa: dict[uuid.UUID, KnowledgeItem] = field(default_factory=dict)
     # Values of the secrets the file references, by name (never logged or returned).
     secrets: dict[str, str] = field(default_factory=dict, repr=False)
     # Unmanaged rows a file item adopts in this apply, by `(kind, key)`.
@@ -174,6 +182,8 @@ class TenantState:
             "department": self.departments,
             "tool": self.tools,
             "channel": self.channels,
+            "knowledge_entry": self.entries,
+            "knowledge_qa": self.qa,
         }
         return rows[kind]
 
@@ -254,7 +264,20 @@ async def load_state(session: AsyncSession, tenant_id: uuid.UUID) -> TenantState
     departments = await CategoriesRepository(session).list(tenant_id)
     tools = await ToolsRepository(session).list(tenant_id)
     channels = await ChannelsRepository(session).list(tenant_id)  # no cap: every channel
+    items = list(
+        (
+            await session.scalars(
+                select(KnowledgeItem)
+                .where(KnowledgeItem.tenant_id == tenant_id)
+                .order_by(KnowledgeItem.created_at, KnowledgeItem.id)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+    )
     return TenantState(
+        knowledge_items=items,
+        entries={i.id: i for i in items if i.kind == KnowledgeItemKind.ENTRY},
+        qa={i.id: i for i in items if i.kind == KnowledgeItemKind.QA},
         records=await load_records(session, tenant_id),
         agents={a.id: a for a in agents},
         departments={d.id: d for d in departments},
@@ -361,6 +384,127 @@ def _plan_departments(
         values = {name: desired[name] for name in fields}
         changes.append(_update_or_unchanged("department", item.name, row.id, fields, values))
     return changes
+
+
+_KNOWLEDGE_KINDS = {
+    "knowledge_entry": (KnowledgeItemKind.ENTRY, "entries", "title", "text"),
+    "knowledge_qa": (KnowledgeItemKind.QA, "qa", "question", "answer"),
+}
+
+
+def knowledge_over(setting: str, value: int) -> str:
+    return f"knowledge limit exceeded: {setting} is {value}"
+
+
+def _knowledge_current(row: KnowledgeItem, names: tuple[str, str]) -> dict[str, Any]:
+    return {names[0]: row.title, names[1]: row.body}
+
+
+def _knowledge_writes(
+    fields: list[str], desired: dict[str, Any], names: tuple[str, str]
+) -> dict[str, Any]:
+    """Column values for the changed file `fields` of an entry or a pair."""
+    out: dict[str, Any] = {}
+    for name in fields:
+        if name == names[0]:
+            out["title"] = desired[name]
+        else:
+            out["body"] = desired[name]
+            out["chars"] = len(desired[name])
+    return out
+
+
+def _plan_knowledge(
+    manifest: Manifest, state: TenantState, problems: Problems
+) -> list[PlannedChange]:
+    """Entries and pairs; a file without the section changes no knowledge.
+    The key is the title (the question of a pair); `fields` use the file's names."""
+    section = manifest.knowledge
+    if section is None:
+        return []
+    changes: list[PlannedChange] = []
+    for kind, (item_kind, plural, title_name, text_name) in _KNOWLEDGE_KINDS.items():
+        pairs = (
+            [(e.title, e.text) for e in section.entries]
+            if item_kind == KnowledgeItemKind.ENTRY
+            else [(q.question, q.answer) for q in section.qa]
+        )
+        _check_unique(
+            [t for t, _ in pairs], f"knowledge.{plural}", title_name, DUPLICATE_NAME, problems
+        )
+        rows = state.rows(kind)
+        by_title = {row.title: row for row in rows.values()}
+        managed = state.managed_ids(kind)
+        for i, (title, text) in enumerate(pairs):
+            path = f"knowledge.{plural}[{i}]"
+            desired = {title_name: title, text_name: text}
+            names = (title_name, text_name)
+
+            record = state.records.get((kind, title))
+            row = rows.get(record.item_id) if record else None
+            existing = by_title.get(title)
+            if row is None:
+                if existing is not None:
+                    if existing.id in managed:
+                        problems.add(f"{path}.{title_name}", MANAGED_ELSEWHERE)
+                        continue
+                    fields = changed_fields(_knowledge_current(existing, names), desired)
+                    writes = _knowledge_writes(fields, desired, names)
+                    changes.append(_adopt(kind, title, existing.id, fields, writes, record, state))
+                    continue
+                values = {
+                    "kind": item_kind,
+                    "title": title,
+                    "body": text,
+                    "chars": len(text),
+                    "truncated": False,
+                    "status": KnowledgeItemStatus.PROCESSING,
+                }
+                changes.append(PlannedChange(kind, title, "create", record=record, values=values))
+                continue
+            fields = changed_fields(_knowledge_current(row, names), desired)
+            if title_name in fields and existing is not None and existing.id != row.id:
+                problems.add(f"{path}.{title_name}", NOT_MANAGED)
+                continue
+            writes = _knowledge_writes(fields, desired, names)
+            changes.append(_update_or_unchanged(kind, title, row.id, fields, writes))
+    return changes
+
+
+def _check_knowledge_limits(
+    state: TenantState, changes: list[PlannedChange], problems: Problems
+) -> None:
+    """The limits of the knowledge base, applied to the tenant as it will be
+    after this apply (nothing is written when one is over)."""
+    settings = get_settings()
+    stored = {i.id: i for i in state.knowledge_items}
+    count = len(stored)
+    total = sum(i.chars for i in stored.values())
+    for change in changes:
+        if not change.kind.startswith("knowledge_"):
+            continue
+        old = stored[change.item_id].chars if change.item_id in stored else 0
+        if change.action == "create":
+            count += 1
+            total += len(change.values["body"])
+        elif change.action == "delete":
+            count -= 1
+            total -= old
+        elif "body" in change.values:
+            total += len(change.values["body"]) - old
+    for change in changes:
+        body = change.values.get("body")
+        if change.kind.startswith("knowledge_") and body is not None:
+            if len(body) > settings.knowledge_max_item_chars:
+                limit = settings.knowledge_max_item_chars
+                problems.add("knowledge", knowledge_over("KNOWLEDGE_MAX_ITEM_CHARS", limit))
+                break
+    if count > settings.knowledge_max_items:
+        limit = settings.knowledge_max_items
+        problems.add("knowledge", knowledge_over("KNOWLEDGE_MAX_ITEMS", limit))
+    if total > settings.knowledge_max_total_chars:
+        limit = settings.knowledge_max_total_chars
+        problems.add("knowledge", knowledge_over("KNOWLEDGE_MAX_TOTAL_CHARS", limit))
 
 
 def secret_references(manifest: Manifest) -> list[tuple[str, str]]:
@@ -626,24 +770,44 @@ def plan_changes(
     """Every change the file asks for, in execution order (agents after tools,
     channels last: they name agents; deletes after everything else)."""
     _check_secrets_exist(manifest, state, problems)
-    return [
+    changes = [
         *_plan_departments(manifest, state, problems),
+        *_plan_knowledge(manifest, state, problems),
         *_plan_tools(manifest, state, problems),
         *_plan_agents(manifest, state, problems),
         *_plan_channels(manifest, state, problems),
         *_plan_removals(manifest, state),
     ]
+    if manifest.knowledge is not None:
+        _check_knowledge_limits(state, changes, problems)
+    return changes
 
 
 # Deletes run in this order so that foreign keys hold (a channel names an
 # agent; tools and departments are named by nothing with a foreign key).
-DELETE_ORDER = ("channel", "agent", "tool", "department")
-_PLURALS = {"channel": "channels", "agent": "agents", "tool": "tools", "department": "departments"}
+DELETE_ORDER = (
+    "channel",
+    "agent",
+    "tool",
+    "department",
+    "knowledge_entry",
+    "knowledge_qa",
+)
+_PLURALS = {
+    "channel": "channels",
+    "agent": "agents",
+    "tool": "tools",
+    "department": "departments",
+    "knowledge_entry": "knowledge.entries",
+    "knowledge_qa": "knowledge.qa",
+}
 _MODELS: dict[str, Any] = {
     "channel": Channel,
     "agent": Agent,
     "tool": Tool,
     "department": Category,
+    "knowledge_entry": KnowledgeItem,
+    "knowledge_qa": KnowledgeItem,
 }
 
 
@@ -653,6 +817,15 @@ def _file_keys(manifest: Manifest) -> set[tuple[str, str]]:
         *(("department", d.name) for d in manifest.departments),
         *(("tool", t.name) for t in manifest.tools),
         *(("channel", c.key) for c in manifest.channels),
+        *(
+            key
+            for section in [manifest.knowledge]
+            if section is not None
+            for key in (
+                *(("knowledge_entry", e.title) for e in section.entries),
+                *(("knowledge_qa", q.question) for q in section.qa),
+            )
+        ),
     }
 
 
@@ -664,6 +837,8 @@ def _plan_removals(manifest: Manifest, state: TenantState) -> list[PlannedChange
     for (kind, key), record in state.records.items():
         if (kind, key) in in_file:
             continue
+        if kind.startswith("knowledge_") and manifest.knowledge is None:
+            continue  # a file without the section leaves knowledge alone
         row = state.rows(kind).get(record.item_id)
         if row is None:  # deleted by hand: `stale_records` drops the record
             continue
@@ -867,6 +1042,35 @@ async def execute_with_repository(
             )
 
 
+async def execute_knowledge(
+    session: AsyncSession, tenant_id: uuid.UUID, change: PlannedChange, generated: dict[str, Any]
+) -> None:
+    """Create, update or adopt an entry or a pair. A changed title or text sets
+    `processing`, a new `updated_at` and no lease, so the worker rebuilds the
+    passages and never finishes the old text (see app/knowledge/ingest.py)."""
+    repo = KnowledgeItemsRepository(session)
+    if change.action == "create":
+        row = await repo.create(tenant_id, **change.values)
+        change.item_id = row.id
+        await record_item(session, tenant_id, change.kind, change.key, row.id, change.record)
+        return
+    assert change.item_id is not None
+    if change.values:
+        await repo.update(
+            tenant_id,
+            change.item_id,
+            **change.values,
+            status=KnowledgeItemStatus.PROCESSING,
+            error=None,
+            claimed_until=None,
+            updated_at=datetime.now(UTC),
+        )
+    if change.action == "adopt":
+        await record_item(
+            session, tenant_id, change.kind, change.key, change.item_id, change.record
+        )
+
+
 async def execute_channel(
     session: AsyncSession, tenant_id: uuid.UUID, change: PlannedChange, generated: dict[str, Any]
 ) -> None:
@@ -911,6 +1115,8 @@ _EXECUTORS: dict[str, Executor] = {
     "agent": execute_with_repository,
     "department": execute_with_repository,
     "tool": execute_with_repository,
+    "knowledge_entry": execute_knowledge,
+    "knowledge_qa": execute_knowledge,
 }
 
 

@@ -97,6 +97,21 @@ Used by `external` channels. How the pushes work is in [project-channel](project
 - `EVENT_PUSH_TIMEOUT_SECONDS`: longest wait for the project's answer to one push. Default: `5`.
 - `EVENT_PUSH_INTERVAL_SECONDS`: pause between two passes of the push loop in the worker. Default: `1`.
 
+## Knowledge base
+
+Counted per tenant, the same for every tenant. A request past a limit is refused with 422 naming the setting.
+
+- `KNOWLEDGE_MAX_ITEMS`: most knowledge items (entries, pairs and documents) of one tenant. Default: `500`.
+- `KNOWLEDGE_MAX_ITEM_CHARS`: longest text of one entry or answer, in characters. Default: `20000`.
+- `KNOWLEDGE_MAX_TOTAL_CHARS`: most characters of knowledge text stored by one tenant. Default: `2000000`.
+- `KNOWLEDGE_INGEST_INTERVAL_SECONDS`: pause between two passes of the worker loop that splits new and edited items into passages. Default: `2`.
+
+Semantic search is optional. With an embeddings endpoint set, the worker stores a vector for every passage and a search also ranks passages by meaning, merged with the keyword ranking (`mode` `hybrid`). It needs the Postgres `vector` extension: the compose image `pgvector/pgvector:pg16` has it; on plain `postgres:16` search stays keyword only. After changing the model, or to embed passages written before the endpoint was set, run `uv run python -m app.knowledge.reindex` (`--all` re-embeds every passage).
+
+- `EMBEDDINGS_BASE_URL`: base URL of an OpenAI-compatible embeddings endpoint (parley calls `{base}/embeddings`). Default: empty, which turns semantic search off.
+- `EMBEDDINGS_API_KEY`: bearer key for that endpoint. Default: empty.
+- `EMBEDDINGS_MODEL`: embeddings model. Vectors of another model are ignored until re-indexed. Default: `text-embedding-3-small`.
+
 ## Demo
 
 - `WEBCHAT_DEMO_API_KEY`: fixed key of the demo webchat tenant. Default: `demo-webchat-key`. Outside demo mode the API rejects this key with 401, so never use it in production.
