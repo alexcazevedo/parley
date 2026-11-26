@@ -1,0 +1,56 @@
+# Production manifest of the vendezap tenant on parley.site.plugu.solutions.
+#
+# Applied by scripts/setup_vendezap_tenant.py; run it again after editing this
+# file. The persona and the departments below are a cautious starting point:
+# the agent has no tools and no knowledge of the catalog yet, so it greets,
+# sorts the conversation into a department and hands over to a person rather
+# than answer about products, prices or orders.
+version: 1
+
+agents:
+  - key: atendimento
+    name: Atendimento
+    model: gpt-4o-mini
+    temperature: 0.3
+    instructions: |
+      Você é a atendente virtual da loja. Responda em português do Brasil,
+      com frases curtas e um tom simpático.
+
+      Cumprimente o cliente, entenda o que ele precisa e faça no máximo uma
+      pergunta por vez. Você ainda não tem acesso ao catálogo, aos preços,
+      ao estoque nem aos pedidos: nunca invente essas informações. Quando o
+      cliente quiser comprar, pedir um orçamento, saber de um pedido ou de
+      um pagamento, ou quando você não souber responder, diga que vai chamar
+      uma pessoa da equipe e passe o atendimento.
+    boundary_scope: >-
+      Atendimento inicial da loja: entender o que o cliente precisa e
+      encaminhar para a equipe.
+    boundary_never:
+      - Informar preço, estoque, prazo ou situação de pedido.
+      - Prometer desconto, reembolso ou prazo de entrega.
+      - Pedir ou repetir número completo de cartão ou senha.
+    boundary_refusal_message: >-
+      Só consigo ajudar com assuntos da loja. Posso chamar uma pessoa da
+      equipe se quiser.
+    handoff_message: Vou chamar uma pessoa da nossa equipe para continuar com você.
+
+departments:
+  - name: Vendas
+    description: >-
+      Antes da compra: produtos, kits, preços, orçamento, estoque e formas
+      de pagamento.
+  - name: Pedidos
+    description: >-
+      Pedido já feito: situação, pagamento, entrega, retirada e alterações.
+  - name: Suporte
+    description: >-
+      Depois da compra: troca, devolução, defeito, reclamação e outras
+      dúvidas.
+
+channels:
+  - key: vendezap
+    type: external
+    name: Vendezap
+    agent: atendimento
+    config:
+      events_url: https://vendezap.site.plugu.solutions/api/webhooks/parley
