@@ -27,7 +27,7 @@ Library facts in these briefs (the MCP specification, the MCP Python SDK, Pydant
 
 ## One thing still to decide by the owner
 
-Milestone 2 names "a small decision model" without naming one. The owner mentioned a model called "Jev"; it could not be identified when these briefs were written. Milestone 2 works with any model the model layer can reach; put the vendor and model name in the brief before running it if a specific one is wanted.
+Decided: the small decision model of milestone 2 is TypeSafe's (Jev), used through Pydantic AI's own support for it (`pydantic-ai-slim[typesafe]`, key in `TYPESAFE_API_KEY`). The live part of that milestone's success demo needs a TypeSafe key; without one the run proves it with a fake and says so.
 
 ## Prompts
 
