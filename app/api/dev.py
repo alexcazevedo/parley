@@ -14,7 +14,7 @@ from app.api.deps import get_current_tenant, get_db, get_redis
 from app.api.webchat import IngestOut, ingest_message, resolve_channel
 from app.models.tenant import Tenant
 from app.security.limits import check_message_size
-from app.security.ratelimit import check_rate_limit
+from app.security.ratelimit import enforce_inbound_limits
 
 router = APIRouter(prefix="/dev", tags=["dev"])
 
@@ -34,11 +34,7 @@ async def post_dev_message(
 ) -> IngestOut:
     channel = await resolve_channel(db, tenant, payload.channel_id)
 
-    # Rate limit: channel_id:user_id
-    from app.config import get_settings
-    settings = get_settings()
-    user_key = f"{payload.channel_id}:{payload.user_id}"
-    await check_rate_limit(redis, "user", user_key, settings.rate_limit_user_per_min)
+    await enforce_inbound_limits(redis, tenant.id, channel.id, payload.user_id)
 
     # Size limit: strict enforcement (413 if exceeded)
     within_limit, _message = check_message_size(

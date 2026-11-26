@@ -7,22 +7,31 @@ webhooks.py` compares it against the `apikey` header) and as the outbound
 `apikey` header on `send_message`.
 """
 
+import asyncio
 import base64
-import logging
+import json
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-import httpx
+import structlog
 
 from app.channels.base import ChannelAdapter, IncomingMedia, IncomingMessage, OutgoingMessage
+from app.config import get_settings
+from app.http_client import shared_client
 from app.models.channel import Channel
 from app.models.contact import Contact
 from app.security import secrets as secrets_crypto
+from app.tools.ssrf import SSRFError, assert_safe_channel_url
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _JID_SUFFIX = "@s.whatsapp.net"
+_LID_SUFFIX = "@lid"
+
+# Total time for the media request and body read. httpx's `timeout` is per
+# read, so a server dripping bytes would otherwise hold the turn's download open.
+MEDIA_DOWNLOAD_DEADLINE_SECONDS = 30.0
 
 # Message keys that carry a still-unsupported media type: the content shown
 # to the customer/operator, no media fetched (see PRODUCT.md "Out of
@@ -38,11 +47,86 @@ _UNSUPPORTED_KINDS = {
 }
 
 
+class MediaTooLarge(Exception):
+    """Media response exceeded the size limit."""
+
+
 class IgnoredEvent(Exception):
     """Raised by `parse_incoming` for payloads that should be acknowledged
     (HTTP 200) but not persisted: any event other than `messages.upsert`,
     outbound echoes (`key.fromMe`), and non-text messages.
     """
+
+
+_BINARY_KEYS = frozenset({"base64", "jpegThumbnail"})
+
+
+def strip_base64(payload: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `payload` without any `base64` or `jpegThumbnail` key, at any depth.
+
+    Applied to every event before it is stored (`messages.raw_payload`), so
+    the stored copy never carries inline media. Lists are walked too; the
+    input is left untouched (every dict and list of the result is new).
+
+    Walked with an explicit stack, not recursion: a payload nested deeper
+    than Python's recursion limit must not raise (a 500 Evolution redelivers).
+    """
+    result: dict[str, Any] = {}
+    # (source container, its new copy); each copy is filled from its source.
+    stack: list[tuple[Any, Any]] = [(payload, result)]
+    while stack:
+        source, target = stack.pop()
+        if isinstance(source, dict):
+            for key, value in source.items():
+                if key in _BINARY_KEYS:
+                    continue
+                target[key] = _empty_copy(value, stack)
+        else:
+            for item in source:
+                target.append(_empty_copy(item, stack))
+    return result
+
+
+def _empty_copy(value: Any, stack: list[tuple[Any, Any]]) -> Any:
+    """A scalar as it is; for a dict or list, a new empty one queued to be filled."""
+    if isinstance(value, dict):
+        copy: Any = {}
+    elif isinstance(value, list):
+        copy = []
+    else:
+        return value
+    stack.append((value, copy))
+    return copy
+
+
+def _person_id(remote_jid: str) -> str:
+    """`external_user_id` for a `remoteJid`, or `IgnoredEvent` if it is not a person.
+
+    - `@s.whatsapp.net`: a person; the id is the number without the suffix.
+    - `@lid` (WhatsApp privacy id): a person; the id is the full JID.
+    - no `@`, not empty: accepted as it is.
+    - anything else (`@g.us`, `@broadcast`, `@newsletter`, empty, unknown): ignored.
+
+    NOTE: whether Evolution delivers a send to an `@lid` number cannot be
+    tested here; it needs one check against a real instance.
+    """
+    if remote_jid.endswith(_JID_SUFFIX):
+        return remote_jid.removesuffix(_JID_SUFFIX)
+    if remote_jid.endswith(_LID_SUFFIX):
+        return remote_jid
+    if not remote_jid:
+        raise IgnoredEvent("missing remoteJid")
+    if "@" not in remote_jid:
+        return remote_jid
+    suffix = remote_jid.rsplit("@", 1)[1]
+    if suffix == "g.us":
+        raise IgnoredEvent("group message")
+    if suffix == "broadcast":
+        raise IgnoredEvent("broadcast or status message")
+    if suffix == "newsletter":
+        raise IgnoredEvent("newsletter message")
+    logger.warning("evolution.ignored_unknown_jid_suffix", suffix=suffix)
+    raise IgnoredEvent(f"unknown jid suffix: {suffix!r}")
 
 
 class EvolutionAdapter(ChannelAdapter):
@@ -55,6 +139,8 @@ class EvolutionAdapter(ChannelAdapter):
 
         if key.get("fromMe"):
             raise IgnoredEvent("message is fromMe (outbound echo)")
+
+        external_user_id = _person_id(key.get("remoteJid") or "")
 
         message = data.get("message") or {}
         text = message.get("conversation") or (message.get("extendedTextMessage") or {}).get(
@@ -86,11 +172,8 @@ class EvolutionAdapter(ChannelAdapter):
             msg_type = "unsupported"
             content = _UNSUPPORTED_KINDS[kind]
         else:
-            logger.info("ignoring non-text evolution message, keys=%s", list(message.keys()))
+            logger.info("evolution.ignored_non_text", keys=list(message.keys()))
             raise IgnoredEvent("non-text message")
-
-        remote_jid = key.get("remoteJid") or ""
-        external_user_id = remote_jid.removesuffix(_JID_SUFFIX)
 
         raw_ts = data.get("messageTimestamp")
         timestamp = (
@@ -99,7 +182,8 @@ class EvolutionAdapter(ChannelAdapter):
             else datetime.now(UTC)
         )
 
-        raw: dict[str, Any] = dict(payload)
+        # What is stored as `messages.raw_payload`: never inline media.
+        raw: dict[str, Any] = strip_base64(payload)
         if raw_extra is not None:
             raw["_media"] = raw_extra
 
@@ -114,85 +198,130 @@ class EvolutionAdapter(ChannelAdapter):
             raw=raw,
         )
 
-    async def fetch_media(self, incoming: IncomingMessage, channel: Channel) -> IncomingMedia:
-        base_url, instance, apikey = self._connection(channel)
+    async def fetch_media(
+        self, external_message_id: str, fallback_mime: str | None, channel: Channel
+    ) -> IncomingMedia:
+        """Download one inbound message's media from Evolution.
 
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
+        `fallback_mime` (the mimetype the webhook declared, `raw_payload
+        ["_media"]["mimetype"]`) is used when Evolution's answer has none.
+        Goes through `_connection` (SSRF check) like every outbound call;
+        raises on any failure, including `MediaTooLarge` and `TimeoutError`.
+        """
+        base_url, instance, apikey = await self._connection(channel)
+
+        max_bytes = get_settings().media_max_bytes
+        # base64 expansion (4/3) plus the JSON envelope.
+        raw_cap = max_bytes * 4 // 3 + 65_536
+
+        async with asyncio.timeout(MEDIA_DOWNLOAD_DEADLINE_SECONDS):
+            async with shared_client().stream(
+                "POST",
                 f"{base_url}/chat/getBase64FromMediaMessage/{instance}",
-                headers={"apikey": apikey},
+                # `identity`: a compressed body could expand far past the cap in memory.
+                headers={"apikey": apikey, "Accept-Encoding": "identity"},
+                timeout=20,
                 json={
-                    "message": {"key": {"id": incoming.external_message_id}},
+                    "message": {"key": {"id": external_message_id}},
                     "convertToMp4": False,
                 },
-            )
-        response.raise_for_status()
-        body = response.json()
-        fallback_mime = (incoming.raw.get("_media") or {}).get("mimetype")
-        return IncomingMedia(
-            data=base64.b64decode(body["base64"]),
-            mime=body.get("mimetype") or fallback_mime,
-        )
+            ) as response:
+                response.raise_for_status()
+                encoding = response.headers.get("content-encoding", "identity")
+                if encoding.strip().lower() not in ("", "identity"):
+                    raise MediaTooLarge("unsupported response encoding")
+                buf = bytearray()
+                async for chunk in response.aiter_raw():
+                    buf.extend(chunk)
+                    if len(buf) > raw_cap:
+                        raise MediaTooLarge("response exceeds size limit")
+
+        body = json.loads(bytes(buf))
+        data = base64.b64decode(body["base64"])
+        if len(data) > max_bytes:
+            raise MediaTooLarge("media exceeds size limit")
+        mime = body.get("mimetype") or fallback_mime
+        if not mime:
+            raise ValueError("media has no mimetype")
+        return IncomingMedia(data=data, mime=mime)
 
     async def send_message(
         self, message: OutgoingMessage, contact: Contact, channel: Channel
     ) -> None:
-        config = channel.config or {}
-        base_url = str(config["base_url"]).rstrip("/")
-        instance = config["instance"]
-        apikey = (
-            secrets_crypto.decrypt(channel.secret_encrypted) if channel.secret_encrypted else ""
-        )
+        base_url, instance, apikey = await self._connection(channel)
 
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(
-                f"{base_url}/message/sendText/{instance}",
-                headers={"apikey": apikey},
-                json={"number": contact.external_user_id, "text": message.content},
-            )
+        response = await shared_client().post(
+            f"{base_url}/message/sendText/{instance}",
+            headers={"apikey": apikey},
+            json={"number": contact.external_user_id, "text": message.content},
+            timeout=10,
+        )
         response.raise_for_status()
 
     async def mark_read(
         self, external_message_id: str, contact: Contact, channel: Channel
     ) -> None:
-        base_url, instance, apikey = self._connection(channel)
+        base_url, instance, apikey = await self._connection(channel)
 
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(
-                f"{base_url}/chat/markMessageAsRead/{instance}",
-                headers={"apikey": apikey},
-                json={
-                    "readMessages": [
-                        {
-                            "remoteJid": f"{contact.external_user_id}{_JID_SUFFIX}",
-                            "fromMe": False,
-                            "id": external_message_id,
-                        }
-                    ]
-                },
-            )
+        response = await shared_client().post(
+            f"{base_url}/chat/markMessageAsRead/{instance}",
+            headers={"apikey": apikey},
+            json={
+                "readMessages": [
+                    {
+                        "remoteJid": (
+                            contact.external_user_id
+                            if "@" in contact.external_user_id
+                            else f"{contact.external_user_id}{_JID_SUFFIX}"
+                        ),
+                        "fromMe": False,
+                        "id": external_message_id,
+                    }
+                ]
+            },
+            timeout=10,
+        )
         response.raise_for_status()
 
     async def send_typing(
         self, contact: Contact, channel: Channel, duration_seconds: float
     ) -> None:
-        base_url, instance, apikey = self._connection(channel)
+        base_url, instance, apikey = await self._connection(channel)
 
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(
-                f"{base_url}/chat/sendPresence/{instance}",
-                headers={"apikey": apikey},
-                json={
-                    "number": contact.external_user_id,
-                    "presence": "composing",
-                    "delay": int(duration_seconds * 1000),
-                },
-            )
+        response = await shared_client().post(
+            f"{base_url}/chat/sendPresence/{instance}",
+            headers={"apikey": apikey},
+            json={
+                "number": contact.external_user_id,
+                "presence": "composing",
+                "delay": int(duration_seconds * 1000),
+            },
+            timeout=10,
+        )
         response.raise_for_status()
 
-    def _connection(self, channel: Channel) -> tuple[str, str, str]:
+    async def check_endpoint(self, channel: Channel) -> None:
+        """The same per-call check as every outbound call (logs
+        `channel.endpoint_refused` and raises `SSRFError` on refusal)."""
+        await self._connection(channel)
+
+    async def _connection(self, channel: Channel) -> tuple[str, str, str]:
+        """`(base_url, instance, apikey)` for an outbound call, after the SSRF
+        check: `base_url` is tenant-controlled (PRODUCT.md F1), so every call
+        re-checks it, resolving DNS. A refusal is logged and re-raised.
+        """
         config = channel.config or {}
         base_url = str(config["base_url"]).rstrip("/")
+        try:
+            await assert_safe_channel_url(base_url)
+        except SSRFError as exc:
+            logger.warning(
+                "channel.endpoint_refused",
+                channel_id=str(channel.id),
+                tenant_id=str(channel.tenant_id),
+                reason=str(exc),
+            )
+            raise
         instance = config["instance"]
         apikey = (
             secrets_crypto.decrypt(channel.secret_encrypted) if channel.secret_encrypted else ""

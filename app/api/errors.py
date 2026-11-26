@@ -1,7 +1,10 @@
 """Global exception handler: safe error responses with request_id."""
 
+from typing import Any, cast
+
 import structlog
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
@@ -21,8 +24,10 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     )
 
 
-async def validation_error_handler(request: Request, exc: ValidationError) -> JSONResponse:
-    """Validation errors (422) keep field detail."""
+async def validation_error_handler(
+    request: Request, exc: RequestValidationError | ValidationError
+) -> JSONResponse:
+    """Validation errors (422) keep field name and message; never the input."""
     request_id = structlog.contextvars.get_contextvars().get("request_id", "unknown")
     errors = []
     for error in exc.errors():
@@ -62,6 +67,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 
 def add_exception_handlers(app: FastAPI) -> None:
     """Register exception handlers on the FastAPI app."""
-    app.add_exception_handler(HTTPException, http_exception_handler)
-    app.add_exception_handler(ValidationError, validation_error_handler)
+    app.add_exception_handler(HTTPException, cast(Any, http_exception_handler))
+    app.add_exception_handler(RequestValidationError, cast(Any, validation_error_handler))
+    app.add_exception_handler(ValidationError, cast(Any, validation_error_handler))
     app.add_exception_handler(Exception, generic_exception_handler)

@@ -27,4 +27,5 @@ def get_provider(agent: Agent, settings: Settings | None = None) -> LLMProvider:
     return OpenAICompatibleProvider(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
+        max_tokens_param=settings.llm_max_tokens_param,
     )

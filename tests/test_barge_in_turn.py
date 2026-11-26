@@ -137,7 +137,7 @@ async def _inbound(db_session, conversation_id: uuid.UUID) -> list[Message]:
             Message.conversation_id == conversation_id,
             Message.direction == MessageDirection.IN,
         )
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 
@@ -150,7 +150,7 @@ async def _replies(db_session, conversation_id: uuid.UUID) -> list[str]:
             Message.role == MessageRole.ASSISTANT,
             Message.type == "text",
         )
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return [row.content for row in result.scalars().all()]
 
@@ -295,7 +295,7 @@ async def test_sentiment_escalation_is_never_superseded(client, db_session, monk
         client, db_session, monkeypatch, sentiment=True
     )
 
-    async def frustrated(session, conversation, agent, input_text):
+    async def frustrated(session, conversation, agent, input_text, message_ids=()):
         return 0.9
 
     monkeypatch.setattr(turn_module, "score_frustration", frustrated)

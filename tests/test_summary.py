@@ -77,6 +77,12 @@ async def _message_count(db_session, conversation_id: uuid.UUID) -> int:
     )
 
 
+async def _last_seq(db_session, conversation_id: uuid.UUID) -> int:
+    return await db_session.scalar(
+        select(func.max(Message.seq)).where(Message.conversation_id == conversation_id)
+    )
+
+
 async def test_summary_set_after_threshold_and_message_count_unchanged(
     client, fake_redis, db_session
 ):
@@ -91,7 +97,8 @@ async def test_summary_set_after_threshold_and_message_count_unchanged(
 
     conversation = await db_session.get(Conversation, conversation_id)
     assert conversation.summary is not None
-    assert conversation.summary_cursor == 2
+    # Covers both messages: the user's and the reply.
+    assert conversation.summary_last_seq == await _last_seq(db_session, conversation_id)
     # Two messages (user + assistant reply) went in; the raw table is untouched.
     assert await _message_count(db_session, conversation_id) == 2
     assert provider.call_count == 2  # the reply, then the summarizer
@@ -109,7 +116,7 @@ async def test_maybe_summarize_noop_below_threshold(client, fake_redis, db_sessi
 
     conversation = await db_session.get(Conversation, conversation_id)
     assert conversation.summary is None
-    assert conversation.summary_cursor is None
+    assert conversation.summary_last_seq is None
     assert provider.call_count == 1  # no summarizer call below threshold
 
 
@@ -134,7 +141,9 @@ async def test_maybe_summarize_carries_prior_summary_into_the_prompt_and_advance
 
     conversation = await db_session.get(Conversation, conversation_id)
     assert conversation.summary == "Resumo atualizado"
-    assert conversation.summary_cursor == 4
+    # Covers all four messages of the two turns.
+    assert await _message_count(db_session, conversation_id) == 4
+    assert conversation.summary_last_seq == await _last_seq(db_session, conversation_id)
 
     # The reply call (0) sees the prior summary in its system prompt...
     assert "## Conversation summary" in provider2.calls[0]["messages"][0].content

@@ -1,10 +1,11 @@
 """Best-effort operator-brief generation at handoff time.
 
 `app/handoff/service.py` stays a pure state machine on purpose — this module
-is where the one extra LLM call for the warm-handoff summary lives, and where
-both handoff call sites (`app/tools/builtin.py`'s `handoff_to_human`,
-`app/api/conversations.py`'s `POST /{id}/handoff`) go through
-`handoff_with_summary` instead of `HandoffService.handoff` directly.
+is where the one extra LLM call for the warm-handoff summary lives. The tool
+`handoff_to_human` (`app/tools/builtin.py`) and the turn's sentiment path go
+through `handoff_with_summary`; the operator endpoint
+(`app/api/conversations.py`'s `POST /{id}/handoff`) calls `HandoffService.handoff`,
+commits, then calls `generate_handoff_summary` and stores the brief.
 
 Generation is strictly best-effort: any failure (LLM error, timeout, bad
 response) is logged and swallowed — `generate_handoff_summary` returns
@@ -18,6 +19,8 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.loading import load_conversation_agent
+from app.db import end_transaction
 from app.handoff.service import HandoffService
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage
 from app.llm.factory import get_provider, resolve_model
@@ -69,33 +72,27 @@ async def generate_handoff_summary(
     into `None` so a broken/slow summarizer never blocks the handoff.
     """
     try:
-        return await asyncio.wait_for(
-            _generate(session, conversation, reason), timeout=SUMMARY_TIMEOUT_SECONDS
+        # Missing or another tenant's agent: no brief (the loader logs a mismatch).
+        agent = await load_conversation_agent(session, conversation)
+        if agent is None:
+            logger.warning(
+                "handoff.summary_skipped_missing_agent", conversation_id=str(conversation.id)
+            )
+            return None
+        prompt = await _build_prompt(session, agent, conversation, reason)
+        provider = get_provider(agent)
+        model = resolve_model(agent)
+        # No transaction open during the model call; the timeout wraps only it.
+        await end_transaction(session)
+        response = await asyncio.wait_for(
+            provider.complete(prompt, model=model, temperature=0.2, max_tokens=512),
+            timeout=SUMMARY_TIMEOUT_SECONDS,
         )
+        summary = (response.content or "").strip()
+        return summary or None
     except Exception:
-        logger.exception(
-            "handoff.summary_failed", conversation_id=str(conversation.id)
-        )
+        logger.exception("handoff.summary_failed", conversation_id=str(conversation.id))
         return None
-
-
-async def _generate(
-    session: AsyncSession, conversation: Conversation, reason: str | None
-) -> str | None:
-    agent = await session.get(Agent, conversation.agent_id)
-    if agent is None:
-        logger.warning(
-            "handoff.summary_skipped_missing_agent", conversation_id=str(conversation.id)
-        )
-        return None
-
-    prompt = await _build_prompt(session, agent, conversation, reason)
-    provider = get_provider(agent)
-    response = await provider.complete(
-        prompt, model=resolve_model(agent), temperature=0.2, max_tokens=512
-    )
-    summary = (response.content or "").strip()
-    return summary or None
 
 
 async def handoff_with_summary(
@@ -106,13 +103,18 @@ async def handoff_with_summary(
 ) -> Handoff:
     """`HandoffService.handoff` plus the best-effort operator brief.
 
-    `IllegalTransitionError` from the underlying transition propagates
-    unchanged — both call sites already handle it (tool failure / 409).
+    Order: refuse an illegal state first (`IllegalTransitionError`, before any
+    write or model call; both call sites handle it: tool failure / 409), then
+    generate the brief with no transaction open, then do the transition and set
+    the summary. The state change and the `Handoff` row are left for the
+    caller to commit. Anything the caller wrote before this call is committed
+    while the brief is generated.
     """
-    record = await HandoffService(session).handoff(conversation, reason, requested_by)
-    record.summary = await generate_handoff_summary(session, conversation, reason)
-    await session.flush()
-    return record
+    service = HandoffService(session)
+    service.ensure_can_handoff(conversation)
+    summary = await generate_handoff_summary(session, conversation, reason)
+    # The brief goes in with the transition so the `conversation.handoff` event carries it.
+    return await service.handoff(conversation, reason, requested_by, brief=summary)
 
 
 async def _build_prompt(
@@ -143,7 +145,7 @@ async def _recent_messages(session: AsyncSession, conversation: Conversation) ->
     result = await session.execute(
         select(Message)
         .where(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at.desc(), Message.id.desc())
+        .order_by(Message.seq.desc())
         .limit(SUMMARY_MESSAGE_LIMIT)
     )
     return list(reversed(result.scalars().all()))

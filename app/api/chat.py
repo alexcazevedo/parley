@@ -1,4 +1,4 @@
-"""Bootstrap endpoint for the demo web chat page (ticket 13 consumes this).
+"""Bootstrap endpoint for the demo web chat page.
 
 No auth — dev/demo shortcut (prototype mode, see PRODUCT.md). Seeds a fixed
 demo tenant (identified by a FIXED plaintext API key, since keys are only
@@ -8,6 +8,7 @@ same tenant/channel/agent instead of creating duplicates.
 """
 
 from pathlib import Path
+from typing import cast
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
@@ -31,7 +32,7 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 @router.get("", include_in_schema=False)
 async def chat_page() -> FileResponse:
-    """Serves the self-contained demo web chat page (ticket 13)."""
+    """Serves the self-contained demo web chat page."""
     return FileResponse(_STATIC_DIR / "chat.html")
 
 
@@ -64,7 +65,7 @@ async def _get_or_create_webchat_channel(db: AsyncSession, tenant: Tenant) -> Ch
             # Merge the new key into the config dict and update
             new_config = {**channel.config, "humanize": True}
             updated_channel = await channels_repo.update(tenant.id, channel.id, config=new_config)
-            channel = updated_channel
+            channel = cast(Channel, updated_channel)
 
         # Idempotent upgrade: flip the demo agent's sentiment escalation flag
         # on if an earlier bootstrap left it off. Plain bool column — simple

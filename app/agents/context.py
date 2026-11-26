@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable, Sequence
 
 import structlog
 
+from app.agents.boundaries import effective_boundaries, render_boundaries
 from app.config import get_settings
 from app.llm.base import (
     ROLE_ASSISTANT,
@@ -37,8 +38,10 @@ SUMMARY_HEADER = "## Conversation summary"
 
 # How a media message reads when the model only gets text: either because
 # vision is off/unavailable (images) or because transcription produced nothing
-# (audio, ticket 28). The wording is addressed to the model, in the same
+# (audio). The wording is addressed to the model, in the same
 # language as the agent's prompts.
+# The defaults of the `image_placeholder` / `audio_placeholder` settings, which
+# are read at call time (`render_message_text`).
 IMAGE_PLACEHOLDER = "[imagem enviada pelo cliente]"
 AUDIO_PLACEHOLDER = "[áudio enviado pelo cliente]"
 
@@ -65,11 +68,12 @@ def render_message_text(message: Message) -> str:
     """
     content = (message.content or "").strip()
     if message.type == "image":
-        return f"{IMAGE_PLACEHOLDER}: {content}" if content else IMAGE_PLACEHOLDER
+        placeholder = get_settings().image_placeholder
+        return f"{placeholder}: {content}" if content else placeholder
     if message.type == "audio":
         # Ticket 28 stores the transcript as the content; until then (or on a
         # failed transcription) the model is told a voice note came in.
-        return content or AUDIO_PLACEHOLDER
+        return content or get_settings().audio_placeholder
     return message.content or ""
 
 
@@ -116,7 +120,10 @@ class ContextBuilder:
         tools: Sequence[ToolSpec] = (),
         style_hint: str | None = None,
     ) -> list[LLMMessage]:
-        """System prompt + the last `agent.context_message_limit` messages.
+        """System prompt + the history the runtime selected.
+
+        `agent.context_message_limit` is applied by the runtime (it counts
+        conversation messages, not tool rows); this does not cut again.
 
         `tools` is accepted (and validated to be spec-shaped by the type) but not
         injected into the prompt: OpenAI-compatible backends receive tools through
@@ -127,14 +134,13 @@ class ContextBuilder:
         `style_hint` is appended as the final system-prompt part — the humanizer
         uses it to ask for short, blank-line-separated chat bubbles.
         """
-        limit = agent.context_message_limit or 20
         messages: list[LLMMessage] = [
             LLMMessage(
                 role=ROLE_SYSTEM,
                 content=self._system_prompt(agent, conversation, memories, style_hint),
             )
         ]
-        messages.extend(await self._history(list(recent_messages)[-limit:]))
+        messages.extend(await self._history(list(recent_messages)))
         return messages
 
     def _system_prompt(
@@ -153,6 +159,9 @@ class ContextBuilder:
             parts.append(SUMMARY_HEADER + "\n" + summary)
         if style_hint and style_hint.strip():
             parts.append(style_hint.strip())
+        boundaries = effective_boundaries(agent)
+        if boundaries is not None:
+            parts.append(render_boundaries(boundaries))
         return "\n\n".join(parts)
 
     async def _history(self, window: Sequence[Message]) -> list[LLMMessage]:
@@ -180,9 +189,7 @@ class ContextBuilder:
             tool_calls = _tool_calls_from(message) if role == ROLE_ASSISTANT else []
             if tool_calls:
                 open_call_ids.update(call.id for call in tool_calls)
-                built.append(
-                    LLMMessage(role=ROLE_ASSISTANT, content=None, tool_calls=tool_calls)
-                )
+                built.append(LLMMessage(role=ROLE_ASSISTANT, content=None, tool_calls=tool_calls))
                 continue
             built.append(
                 LLMMessage(role=role, content=await self._content_for(message, with_bytes))
@@ -221,7 +228,7 @@ class ContextBuilder:
         caption = (message.content or "").strip()
         return [
             ImagePart(mime=message.media_mime or "", data=data),
-            TextPart(text=caption or IMAGE_PLACEHOLDER),
+            TextPart(text=caption or get_settings().image_placeholder),
         ]
 
     async def _load_image(self, message: Message) -> bytes | None:

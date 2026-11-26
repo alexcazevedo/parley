@@ -13,6 +13,8 @@ from typing import Any
 import httpx
 import structlog
 
+from app.http_client import shared_client
+from app.http_retry import send_with_retry
 from app.llm.base import (
     ContentPart,
     ImagePart,
@@ -117,7 +119,9 @@ class OpenAICompatibleProvider:
         *,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         client: httpx.AsyncClient | None = None,
+        max_tokens_param: str = "max_tokens",
     ) -> None:
+        self._max_tokens_param = max_tokens_param
         self.base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout
@@ -126,7 +130,7 @@ class OpenAICompatibleProvider:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self._timeout)
+            return shared_client()
         return self._client
 
     async def aclose(self) -> None:
@@ -147,7 +151,7 @@ class OpenAICompatibleProvider:
             "model": model,
             "messages": [_message_to_wire(message) for message in messages],
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            self._max_tokens_param: max_tokens,
         }
         if tools:
             payload["tools"] = [_tool_to_wire(spec) for spec in tools]
@@ -155,13 +159,16 @@ class OpenAICompatibleProvider:
 
         started = time.perf_counter()
         try:
-            response = await self._get_client().post(
-                f"{self.base_url}/chat/completions",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
+            response = await send_with_retry(
+                lambda: self._get_client().post(
+                    f"{self.base_url}/chat/completions",
+                    json=payload,
+                    timeout=self._timeout,
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                    },
+                )
             )
             response.raise_for_status()
             body = response.json()

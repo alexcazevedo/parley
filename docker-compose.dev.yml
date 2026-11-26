@@ -1,0 +1,11 @@
+# For work from the host (tests, `uv run`), never for a server: it publishes
+# the database and Redis on the host. Use it with
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml ...
+services:
+  postgres:
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+
+  redis:
+    ports:
+      - "${REDIS_PORT:-6380}:6379"

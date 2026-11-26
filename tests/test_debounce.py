@@ -90,7 +90,7 @@ async def _assistant_messages(db_session, conversation_id: uuid.UUID) -> list[Me
             Message.conversation_id == conversation_id,
             Message.role == MessageRole.ASSISTANT,
         )
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 

@@ -8,6 +8,8 @@
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f2f3f5; color: #1a1a1a; }
   header { background: #1a1a2e; color: #fff; padding: 14px 20px; font-size: 18px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+  header .header-right { display: flex; align-items: center; gap: 14px; }
+  #operator-id { padding: 5px 9px; border: 1px solid #444a78; border-radius: 6px; background: #26264a; color: #fff; font-size: 13px; width: 150px; }
   header a { color: #cfd3ff; font-size: 13px; font-weight: 400; text-decoration: none; cursor: pointer; }
   header a:hover { text-decoration: underline; }
   /* --- key gate --- */
@@ -57,6 +59,15 @@
   #assumir-btn { background: #d67b1c; color: #fff; }
   #action-buttons button:disabled { opacity: 0.6; cursor: not-allowed; }
   #action-error { color: #d64545; font-size: 12px; padding: 6px 16px 0; min-height: 14px; }
+  .line-header { display: flex; justify-content: space-between; padding: 8px 14px; background: #f2f3f5; border-bottom: 1px solid #e0e0e0; font-size: 12px; font-weight: 600; color: #444; }
+  .line-empty { padding: 10px 14px; font-size: 12px; color: #999; border-bottom: 1px solid #eee; }
+  .claim-btn { margin-top: 6px; padding: 5px 12px; border: none; border-radius: 6px; background: #d67b1c; color: #fff; font-size: 12px; cursor: pointer; }
+  .claim-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  #list-error { padding: 0 14px; }
+  #pane-tools { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 13px; }
+  #category-select { padding: 6px 8px; border: 1px solid #ccc; border-radius: 8px; font-size: 13px; }
+  #release-btn { padding: 6px 12px; border: none; border-radius: 8px; background: #999; color: #fff; font-size: 13px; cursor: pointer; }
+  #release-btn:disabled { opacity: 0.6; cursor: not-allowed; }
   #notice { padding: 16px; color: #555; font-size: 13px; text-align: center; }
 </style>
 </head>
@@ -72,14 +83,19 @@
 <div id="app" style="display:none">
   <header>
     Acme — Operador
-    <a id="logout-link">Sair</a>
+    <span class="header-right">
+      <input id="operator-id" type="text" placeholder="Seu nome" maxlength="200" />
+      <a id="logout-link">Sair</a>
+    </span>
   </header>
   <div id="app-body" style="display:flex; height:calc(100% - 49px);">
     <div id="list-col">
       <div id="tabs">
-        <div class="tab active" data-tab="inbox">Caixa de entrada</div>
+        <div class="tab active" data-tab="inbox">Filas</div>
+        <div class="tab" data-tab="minhas">Minhas</div>
         <div class="tab" data-tab="ativas">Ativas</div>
       </div>
+      <div id="list-error" class="error-line"></div>
       <div id="list"></div>
       <div id="empty-state" style="display:none">Nenhuma conversa aguardando</div>
     </div>
@@ -94,8 +110,11 @@
   "use strict";
 
   const GATE_KEY = "harness_operator_api_key";
+  const OPERATOR_KEY = "harness_operator_id";
+  const DEFAULT_OPERATOR = "operador-demo";
   const TABS = {
-    inbox: { states: ["HUMAN_HANDOFF"] },
+    inbox: { states: ["HUMAN_HANDOFF"], lines: true },
+    minhas: { states: ["HUMAN_HANDOFF"], mine: true },
     ativas: { states: ["ACTIVE_AI", "WAITING"] },
   };
   const STATE_LABEL = {
@@ -120,9 +139,36 @@
   const listEl = document.getElementById("list");
   const emptyStateEl = document.getElementById("empty-state");
   const convColEl = document.getElementById("conv-col");
+  const listErrorEl = document.getElementById("list-error");
+  const operatorInput = document.getElementById("operator-id");
   const tabEls = document.querySelectorAll(".tab");
 
-  gateInput.value = "demo-webchat-key";
+  // Demo mode only: the server hands out a key at /chat/bootstrap; elsewhere it is 404.
+  fetch("/chat/bootstrap", { method: "POST" })
+    .then(async (res) => {
+      if (!res.ok) return;
+      const body = await res.json();
+      if (!gateInput.value && body && body.api_key) gateInput.value = body.api_key;
+    })
+    .catch(() => {});
+
+  operatorInput.value = localStorage.getItem(OPERATOR_KEY) || DEFAULT_OPERATOR;
+
+  function operatorId() {
+    return operatorInput.value.trim() || DEFAULT_OPERATOR;
+  }
+
+  // The API's error body is {"error": {"message": ...}}.
+  const API_MESSAGES_PT = {
+    "conversation is already claimed": "Esta conversa já está com outro atendente.",
+    "conversation is not waiting for an operator": "Esta conversa não está aguardando atendimento.",
+    "conversation is not claimed": "Esta conversa não está com nenhum atendente.",
+  };
+  function apiMessage(data, fallback) {
+    const message = data && data.error && data.error.message;
+    if (!message) return fallback;
+    return API_MESSAGES_PT[message] || message;
+  }
 
   let apiKey = null;
   let activeTab = "inbox";
@@ -131,6 +177,9 @@
   let selectedConversation = null;
   let lastMessagesJson = "";
   let listTimer = null;
+  let waitTimer = null;
+  let listSeq = 0;
+  let paneOperator = null; // operator id the pane was rendered for
   let messagesTimer = null;
   let sending = false;
 
@@ -199,8 +248,10 @@
   function stopTimers() {
     if (listTimer) clearInterval(listTimer);
     if (messagesTimer) clearInterval(messagesTimer);
+    if (waitTimer) clearInterval(waitTimer);
     listTimer = null;
     messagesTimer = null;
+    waitTimer = null;
   }
 
   async function apiFetch(path, options) {
@@ -236,52 +287,162 @@
     return text.length > n ? text.slice(0, n) + "…" : text;
   }
 
+  // Refresh the "aguardando ..." texts in place; rows are not rebuilt.
+  function refreshWaitTimes() {
+    for (const row of listEl.querySelectorAll(".row[data-waiting-since]")) {
+      const time = row.querySelector(".row-time");
+      if (time) time.textContent = "aguardando " + relativeTime(row.dataset.waitingSince);
+    }
+  }
+
   async function fetchList() {
+    const tab = activeTab;
+    const seq = ++listSeq;
     const params = new URLSearchParams();
-    for (const s of TABS[activeTab].states) params.append("state", s);
-    params.append("include_handoff", "true");
-    params.append("limit", "100");
-    const res = await apiFetch("/conversations?" + params.toString());
+    let path;
+    if (TABS[tab].lines) {
+      params.append("include_handoff", "true");
+      path = "/lines?" + params.toString();
+    } else {
+      for (const s of TABS[tab].states) params.append("state", s);
+      if (TABS[tab].mine) params.append("claimed_by", operatorId());
+      params.append("include_handoff", "true");
+      params.append("limit", "100");
+      path = "/conversations?" + params.toString();
+    }
+    const res = await apiFetch(path);
     if (!res.ok) return;
-    const conversations = await res.json();
-    const json = JSON.stringify(conversations);
-    if (json === lastListJson) return;
+    const data = await res.json();
+    if (seq !== listSeq) return; // a newer list request superseded this one
+    if (tab !== activeTab) return; // the tab changed while the request was in flight
+    const json = JSON.stringify(data);
+    if (json === lastListJson) {
+      refreshWaitTimes();
+      return;
+    }
     lastListJson = json;
-    renderList(conversations);
+    if (TABS[tab].lines) renderLines(data);
+    else renderList(data);
+  }
+
+  function buildRow(c, withHandoff, withClaim) {
+    const row = document.createElement("div");
+    row.className = "row" + (c.id === selectedId ? " selected" : "");
+    row.dataset.id = c.id;
+    if (withClaim && c.waiting_since) row.dataset.waitingSince = c.waiting_since;
+    const top = document.createElement("div");
+    top.className = "row-top";
+    const contact = document.createElement("span");
+    contact.className = "row-contact";
+    contact.textContent = c.contact_display_name || c.contact_external_user_id || c.id;
+    const time = document.createElement("span");
+    time.className = "row-time";
+    time.textContent = withClaim
+      ? "aguardando " + relativeTime(c.waiting_since)
+      : relativeTime(c.last_message_at);
+    top.appendChild(contact);
+    top.appendChild(time);
+    row.appendChild(top);
+    if (!withClaim) {
+      const chip = document.createElement("span");
+      chip.className = "row-chip";
+      chip.textContent = STATE_LABEL[c.state] || c.state;
+      row.appendChild(chip);
+    }
+    if (withHandoff && c.latest_handoff) {
+      const by = REQUESTED_BY_LABEL[c.latest_handoff.requested_by] || c.latest_handoff.requested_by;
+      const handoff = document.createElement("div");
+      handoff.className = "row-handoff";
+      handoff.textContent = by + ": " + truncate(c.latest_handoff.reason || "", 60);
+      row.appendChild(handoff);
+    }
+    if (withClaim) {
+      const btn = document.createElement("button");
+      btn.className = "claim-btn";
+      btn.textContent = "Atender";
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        claim(c, btn);
+      });
+      row.appendChild(btn);
+    }
+    row.addEventListener("click", () => selectConversation(c));
+    return row;
   }
 
   function renderList(conversations) {
     listEl.innerHTML = "";
+    emptyStateEl.textContent =
+      activeTab === "minhas" ? "Nenhuma conversa sua" : "Nenhuma conversa aguardando";
     emptyStateEl.style.display = conversations.length === 0 ? "block" : "none";
     for (const c of conversations) {
-      const row = document.createElement("div");
-      row.className = "row" + (c.id === selectedId ? " selected" : "");
-      row.dataset.id = c.id;
-      const label = c.contact_display_name || c.contact_external_user_id || c.id;
-      let html =
-        '<div class="row-top"><span class="row-contact"></span>' +
-        '<span class="row-time"></span></div>' +
-        '<span class="row-chip"></span>';
-      if (activeTab === "inbox" && c.latest_handoff) {
-        html += '<div class="row-handoff"></div>';
+      listEl.appendChild(buildRow(c, activeTab !== "ativas", false));
+    }
+  }
+
+  function renderLines(lines) {
+    listEl.innerHTML = "";
+    emptyStateEl.style.display = "none";
+    for (const line of lines) {
+      const header = document.createElement("div");
+      header.className = "line-header";
+      const name = document.createElement("span");
+      name.textContent = line.category_name || "Sem categoria";
+      const count = document.createElement("span");
+      count.textContent = String(line.conversations.length);
+      header.appendChild(name);
+      header.appendChild(count);
+      listEl.appendChild(header);
+      if (line.conversations.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "line-empty";
+        empty.textContent = "Ninguém aguardando";
+        listEl.appendChild(empty);
       }
-      row.innerHTML = html;
-      row.querySelector(".row-contact").textContent = label;
-      row.querySelector(".row-time").textContent = relativeTime(c.last_message_at);
-      row.querySelector(".row-chip").textContent = STATE_LABEL[c.state] || c.state;
-      if (activeTab === "inbox" && c.latest_handoff) {
-        const by = REQUESTED_BY_LABEL[c.latest_handoff.requested_by] || c.latest_handoff.requested_by;
-        row.querySelector(".row-handoff").textContent =
-          by + ": " + truncate(c.latest_handoff.reason || "", 60);
+      for (const c of line.conversations) {
+        listEl.appendChild(buildRow(c, true, true));
       }
-      row.addEventListener("click", () => selectConversation(c));
-      listEl.appendChild(row);
+    }
+  }
+
+  function clearPane() {
+    if (messagesTimer) clearInterval(messagesTimer);
+    messagesTimer = null;
+    selectedId = null;
+    selectedConversation = null;
+    convColEl.innerHTML = '<div id="conv-empty">Selecione uma conversa</div>';
+  }
+
+  async function claim(c, btn) {
+    listErrorEl.textContent = "";
+    btn.disabled = true;
+    const res = await apiFetch("/conversations/" + c.id + "/claim", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operator_id: operatorId() }),
+    });
+    if (res.ok) {
+      const conversation = await res.json();
+      conversation.latest_handoff = conversation.latest_handoff || c.latest_handoff;
+      switchTab("minhas");
+      selectConversation(conversation);
+    } else if (res.authFailed) {
+      // gate already shown
+    } else if (res.network) {
+      btn.disabled = false;
+      listErrorEl.textContent = "Falha de rede. Tente novamente.";
+    } else {
+      const data = await res.json().catch(() => ({}));
+      listErrorEl.textContent = apiMessage(data, "Não foi possível atender a conversa.");
+      lastListJson = "";
+      fetchList();
     }
   }
 
   function switchTab(tab) {
     activeTab = tab;
     lastListJson = "";
+    listErrorEl.textContent = "";
     tabEls.forEach((el) => el.classList.toggle("active", el.dataset.tab === tab));
     fetchList();
   }
@@ -299,20 +460,14 @@
 
   function renderConversationPane() {
     const c = selectedConversation;
-    const isInbox = c.state === "HUMAN_HANDOFF";
-    let briefHtml = "";
-    if (c.latest_handoff) {
-      const by = REQUESTED_BY_LABEL[c.latest_handoff.requested_by] || c.latest_handoff.requested_by;
-      const summary = c.latest_handoff.summary || "Resumo indisponível";
-      briefHtml =
-        '<div id="brief"><b>Handoff solicitado por ' + by + '</b>' +
-        (c.latest_handoff.reason ? " — " + c.latest_handoff.reason : "") +
-        "<br>" + summary + "</div>";
-    }
+    const isHandoff = c.state === "HUMAN_HANDOFF";
+    const isMine = isHandoff && c.claimed_by === operatorId();
+    paneOperator = operatorId();
     let actionsHtml;
-    if (isInbox) {
+    if (isMine) {
       actionsHtml =
         '<div id="actions">' +
+        '<div id="pane-tools"></div>' +
         '<textarea id="reply-input" placeholder="Responder ao cliente…"></textarea>' +
         '<div id="action-error"></div>' +
         '<div id="action-buttons">' +
@@ -320,16 +475,38 @@
         '<button id="resume-btn">Resumir</button>' +
         '<button id="close-btn">Fechar</button>' +
         "</div></div>";
+    } else if (isHandoff) {
+      actionsHtml =
+        '<div id="actions">' +
+        '<div id="pane-tools"></div>' +
+        '<div id="action-error"></div>' +
+        '<div id="action-buttons"></div></div>';
     } else {
       actionsHtml =
         '<div id="actions"><div id="action-error"></div><div id="action-buttons">' +
         '<button id="assumir-btn">Assumir</button>' +
         "</div></div>";
     }
-    convColEl.innerHTML =
-      briefHtml + '<div id="messages"></div>' + actionsHtml;
+    convColEl.innerHTML = '<div id="messages"></div>' + actionsHtml;
+    if (c.latest_handoff) {
+      const by = REQUESTED_BY_LABEL[c.latest_handoff.requested_by] || c.latest_handoff.requested_by;
+      const brief = document.createElement("div");
+      brief.id = "brief";
+      const bold = document.createElement("b");
+      bold.textContent = "Handoff solicitado por " + by;
+      brief.appendChild(bold);
+      if (c.latest_handoff.reason) {
+        brief.appendChild(document.createTextNode(" — " + c.latest_handoff.reason));
+      }
+      brief.appendChild(document.createElement("br"));
+      brief.appendChild(
+        document.createTextNode(c.latest_handoff.summary || "Resumo indisponível")
+      );
+      convColEl.prepend(brief);
+    }
 
-    if (isInbox) {
+    if (isMine) {
+      buildPaneTools(c, true);
       const input = document.getElementById("reply-input");
       document.getElementById("send-btn").addEventListener("click", sendReply);
       document.getElementById("resume-btn").addEventListener("click", () => transition("resume"));
@@ -340,8 +517,105 @@
           sendReply();
         }
       });
+    } else if (isHandoff) {
+      buildPaneTools(c, false);
+      const buttons = document.getElementById("action-buttons");
+      if (c.claimed_by) {
+        const note = document.createElement("div");
+        note.id = "claimed-note";
+        note.textContent = "Em atendimento por " + c.claimed_by;
+        buttons.appendChild(note);
+      } else {
+        const btn = document.createElement("button");
+        btn.id = "pane-claim-btn";
+        btn.className = "claim-btn";
+        btn.textContent = "Atender";
+        btn.addEventListener("click", () => claim(selectedConversation, btn));
+        buttons.appendChild(btn);
+      }
     } else {
       document.getElementById("assumir-btn").addEventListener("click", assumir);
+    }
+  }
+
+  function buildPaneTools(c, mine) {
+    const tools = document.getElementById("pane-tools");
+    const select = document.createElement("select");
+    select.id = "category-select";
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "Sem categoria";
+    select.appendChild(none);
+    select.value = "";
+    tools.appendChild(select);
+    const forId = c.id;
+    apiFetch("/categories").then(async (res) => {
+      if (!res.ok) return;
+      const categories = await res.json();
+      if (selectedId !== forId) return;
+      for (const cat of categories) {
+        const opt = document.createElement("option");
+        opt.value = cat.id;
+        opt.textContent = cat.name;
+        select.appendChild(opt);
+      }
+      select.value = selectedConversation.category_id || "";
+    });
+    select.addEventListener("change", () => moveCategory(select));
+    if (mine) {
+      const btn = document.createElement("button");
+      btn.id = "release-btn";
+      btn.textContent = "Devolver à fila";
+      btn.addEventListener("click", () => release(btn));
+      tools.appendChild(btn);
+    }
+  }
+
+  async function moveCategory(select) {
+    showActionError("");
+    const previous = selectedConversation.category_id || "";
+    const forId = selectedId;
+    const res = await apiFetch("/conversations/" + forId + "/category", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ category_id: select.value || null }),
+    });
+    if (selectedId !== forId) return;
+    if (res.ok) {
+      const conversation = await res.json();
+      conversation.latest_handoff =
+        conversation.latest_handoff || selectedConversation.latest_handoff;
+      selectedConversation = conversation;
+      lastListJson = "";
+      fetchList();
+      return;
+    }
+    select.value = previous;
+    if (res.authFailed) return;
+    if (res.network) {
+      showActionError("Falha de rede. Tente novamente.");
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showActionError(apiMessage(data, "Não foi possível mover a conversa."));
+    }
+  }
+
+  async function release(btn) {
+    showActionError("");
+    btn.disabled = true;
+    const res = await apiFetch("/conversations/" + selectedId + "/release", { method: "POST" });
+    if (res.ok) {
+      switchTab("inbox");
+      clearPane();
+      return;
+    }
+    btn.disabled = false;
+    if (res.authFailed) return;
+    if (res.network) {
+      showActionError("Falha de rede. Tente novamente.");
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showActionError(apiMessage(data, "Não foi possível devolver a conversa."));
     }
   }
 
@@ -417,7 +691,7 @@
       showActionError("Falha de rede. Tente novamente.");
     } else {
       const data = await res.json().catch(() => ({}));
-      showActionError(res.status === 409 ? data.detail : "Não foi possível enviar a mensagem.");
+      showActionError(res.status === 409 ? apiMessage(data, "Não foi possível enviar a mensagem.") : "Não foi possível enviar a mensagem.");
     }
     sending = false;
     const btn = document.getElementById("send-btn");
@@ -444,7 +718,7 @@
       showActionError("Falha de rede. Tente novamente.");
     } else {
       const data = await res.json().catch(() => ({}));
-      showActionError(res.status === 409 ? data.detail : "Não foi possível concluir a ação.");
+      showActionError(res.status === 409 ? apiMessage(data, "Não foi possível concluir a ação.") : "Não foi possível concluir a ação.");
     }
   }
 
@@ -456,18 +730,36 @@
       body: JSON.stringify({ reason: "assumido pelo operador" }),
     });
     if (res.ok) {
-      const conversation = await res.json();
-      switchTab("inbox");
-      lastListJson = "";
-      await fetchList();
-      selectConversation(conversation);
+      const handedOff = await res.json();
+      const claimRes = await apiFetch("/conversations/" + handedOff.id + "/claim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operator_id: operatorId() }),
+      });
+      if (claimRes.ok) {
+        const conversation = await claimRes.json();
+        conversation.latest_handoff = conversation.latest_handoff || handedOff.latest_handoff;
+        switchTab("minhas");
+        selectConversation(conversation);
+      } else if (claimRes.authFailed) {
+        // gate already shown
+      } else {
+        let text = "Falha de rede. Tente novamente.";
+        if (!claimRes.network) {
+          const data = await claimRes.json().catch(() => ({}));
+          text = apiMessage(data, "Não foi possível atender a conversa.");
+        }
+        clearPane();
+        switchTab("inbox");
+        listErrorEl.textContent = text;
+      }
     } else if (res.authFailed) {
       // gate already shown
     } else if (res.network) {
       showActionError("Falha de rede. Tente novamente.");
     } else {
       const data = await res.json().catch(() => ({}));
-      showActionError(res.status === 409 ? data.detail : "Não foi possível assumir a conversa.");
+      showActionError(res.status === 409 ? apiMessage(data, "Não foi possível assumir a conversa.") : "Não foi possível assumir a conversa.");
     }
   }
 
@@ -478,6 +770,8 @@
     fetchList();
     if (listTimer) clearInterval(listTimer);
     listTimer = setInterval(fetchList, 3000);
+    if (waitTimer) clearInterval(waitTimer);
+    waitTimer = setInterval(refreshWaitTimes, 30000);
   }
 
   gateBtn.addEventListener("click", () => {
@@ -493,13 +787,22 @@
     location.reload();
   });
 
+  operatorInput.addEventListener("input", () => {
+    localStorage.setItem(OPERATOR_KEY, operatorInput.value.trim());
+    if (selectedConversation && paneOperator !== operatorId()) {
+      renderConversationPane();
+      lastMessagesJson = "";
+      fetchMessages();
+    }
+    if (activeTab === "minhas") {
+      lastListJson = "";
+      fetchList();
+    }
+  });
+
   tabEls.forEach((el) => {
     el.addEventListener("click", () => {
-      selectedId = null;
-      selectedConversation = null;
-      if (messagesTimer) clearInterval(messagesTimer);
-      messagesTimer = null;
-      convColEl.innerHTML = '<div id="conv-empty">Selecione uma conversa</div>';
+      clearPane();
       switchTab(el.dataset.tab);
     });
   });

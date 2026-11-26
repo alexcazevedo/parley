@@ -1,20 +1,30 @@
 """CRUD REST for channels. `secret` is write-only: encrypted on the way in via
 `app.security.secrets`, never returned in any response.
+
+An `external` channel gets a generated secret (the key its event pushes are
+signed with), stored like any channel secret and returned once, as
+`events_secret`, in the create response only. `PATCH` refuses a `secret` for
+an `external` channel (422), and checks a new `events_url` like create does.
 """
 
+import secrets
 import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant, get_db
+from app.api.pagination import DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, set_next_cursor
 from app.models.channel import ChannelType
 from app.models.tenant import Tenant
+from app.repositories.agents import AgentsRepository
+from app.repositories.base import parse_after
 from app.repositories.channels import ChannelsRepository
 from app.security import secrets as secrets_crypto
+from app.tools.ssrf import SSRFError, validate_channel_base_url
 
 router = APIRouter(prefix="/channels", tags=["channels"])
 
@@ -45,33 +55,101 @@ class ChannelOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ChannelCreatedOut(ChannelOut):
+    # Only for an `external` channel, and only in the create response.
+    events_secret: str | None = None
+
+
 def _repo(db: AsyncSession) -> ChannelsRepository:
     return ChannelsRepository(db)
 
 
-@router.post("", response_model=ChannelOut, status_code=status.HTTP_201_CREATED)
+async def _require_agent(db: AsyncSession, tenant: Tenant, agent_id: uuid.UUID) -> None:
+    # Same answer for missing and foreign ids: no existence oracle.
+    if await AgentsRepository(db).get(tenant.id, agent_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="agent not found"
+        )
+
+
+_ENDPOINT_KEYS = {
+    ChannelType.WHATSAPP_EVOLUTION: "base_url",
+    ChannelType.EXTERNAL: "events_url",
+}
+
+
+def endpoint_problem(channel_type: ChannelType, config: dict[str, Any] | None) -> str | None:
+    """Static check (no DNS) of an Evolution `base_url` (PRODUCT.md F1) or an
+    external channel's `events_url`: the refusal message, or None when allowed.
+    The adapter re-checks with DNS on every call. Shared with `app/manifest/apply.py`.
+    """
+    key = _ENDPOINT_KEYS.get(channel_type)
+    if key is None or not config or key not in config:
+        return None
+    try:
+        validate_channel_base_url(str(config[key]))
+    except SSRFError as exc:
+        return f"invalid {key}: {exc}"
+    return None
+
+
+def _check_endpoint(channel_type: ChannelType, config: dict[str, Any] | None) -> None:
+    """Refuse a non-public endpoint in `config` before any write."""
+    problem = endpoint_problem(channel_type, config)
+    if problem is not None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=problem)
+
+
+def channel_secret(
+    channel_type: ChannelType, secret: str | None
+) -> tuple[str | None, str | None]:
+    """`(secret_encrypted, events_secret)` of a new channel. An `external`
+    channel's secret is generated, never chosen by the caller, and is the
+    `events_secret` shown once. Shared with `app/manifest/apply.py`."""
+    events_secret: str | None = None
+    if channel_type == ChannelType.EXTERNAL:
+        events_secret = secrets.token_urlsafe(32)
+        secret = events_secret
+    return (secrets_crypto.encrypt(secret) if secret is not None else None), events_secret
+
+
+@router.post("", response_model=ChannelCreatedOut, status_code=status.HTTP_201_CREATED)
 async def create_channel(
     payload: ChannelCreate,
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
-) -> ChannelOut:
+) -> ChannelCreatedOut:
+    _check_endpoint(payload.type, payload.config)
+    await _require_agent(db, tenant, payload.agent_id)
     data = payload.model_dump()
-    secret = data.pop("secret")
-    if secret is not None:
-        data["secret_encrypted"] = secrets_crypto.encrypt(secret)
+    secret_encrypted, events_secret = channel_secret(payload.type, data.pop("secret"))
+    if secret_encrypted is not None:
+        data["secret_encrypted"] = secret_encrypted
     channel = await _repo(db).create(tenant.id, **data)
     await db.commit()
     await db.refresh(channel)
-    return ChannelOut.model_validate(channel)
+    out = ChannelCreatedOut.model_validate(channel)
+    out.events_secret = events_secret
+    return out
 
 
 @router.get("", response_model=list[ChannelOut])
 async def list_channels(
+    response: Response,
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    cursor: str | None = Query(default=None),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> list[ChannelOut]:
-    channels = await _repo(db).list(tenant.id)
-    return [ChannelOut.model_validate(c) for c in channels]
+    after = parse_after(decode_cursor(cursor))
+    rows = await _repo(db).list_page(tenant.id, limit=limit + 1, after=after)
+    more = len(rows) > limit
+    rows = rows[:limit]
+    if more:
+        set_next_cursor(
+            response, {"created_at": rows[-1].created_at.isoformat(), "id": str(rows[-1].id)}
+        )
+    return [ChannelOut.model_validate(c) for c in rows]
 
 
 @router.get("/{channel_id}", response_model=ChannelOut)
@@ -93,7 +171,25 @@ async def update_channel(
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> ChannelOut:
+    existing = await _repo(db).get(tenant.id, channel_id)
+    if existing is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="channel not found")
     changes = payload.model_dump(exclude_unset=True)
+    if "secret" in changes and existing.type == ChannelType.EXTERNAL:
+        # The generated secret signs event pushes; it cannot be overwritten.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="secret of an external channel is generated and cannot be set",
+        )
+    if "config" in changes:
+        _check_endpoint(existing.type, changes["config"])
+    if "agent_id" in changes:
+        if changes["agent_id"] is None:
+            # A null agent_id is ignored: the column is non-null, so the
+            # channel keeps its current agent.
+            changes.pop("agent_id")
+        else:
+            await _require_agent(db, tenant, changes["agent_id"])
     if "secret" in changes:
         secret = changes.pop("secret")
         changes["secret_encrypted"] = secrets_crypto.encrypt(secret) if secret is not None else None

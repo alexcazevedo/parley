@@ -8,8 +8,9 @@ tool, `app/agents/runtime.py`'s context load, `app/api/contacts.py`'s REST
 CRUD).
 """
 
+import re
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +37,15 @@ class MemoryService:
         metadata: dict[str, Any] | None = None,
     ) -> Memory:
         memory_type = type if isinstance(type, MemoryType) else MemoryType(type)
+        normalized = re.sub(r"\s+", " ", content.strip()).lower()
+        existing = await self._repo.find_active_by_normalized_content(
+            tenant_id, contact_id, normalized
+        )
+        if existing is not None:
+            if importance > existing.importance:
+                existing.importance = importance
+                await self._session.flush()
+            return existing
         return await self._repo.create(
             tenant_id,
             contact_id=contact_id,
@@ -50,19 +60,12 @@ class MemoryService:
     async def get_contact_memories(
         self, tenant_id: uuid.UUID, contact_id: uuid.UUID, limit: int = DEFAULT_LIMIT
     ) -> list[Memory]:
-        """Every non-expired memory for `contact_id`, importance-first.
+        """Non-expired memories for `contact_id`: importance first, then newest.
 
-        Bumps `last_accessed_at` on every row returned — the harness's only
-        signal that a fact was actually used, and the seam a future
-        pruning/decay job would read.
+        Read-only: nothing is written or flushed. The `last_accessed_at`
+        column stays but is no longer set by anything.
         """
-        memories = await self._repo.list_active_for_contact(tenant_id, contact_id, limit=limit)
-        if memories:
-            now = datetime.now(UTC)
-            for memory in memories:
-                memory.last_accessed_at = now
-            await self._session.flush()
-        return memories
+        return await self._repo.list_active_for_contact(tenant_id, contact_id, limit=limit)
 
     async def search(
         self, tenant_id: uuid.UUID, contact_id: uuid.UUID, query: str, limit: int = DEFAULT_LIMIT

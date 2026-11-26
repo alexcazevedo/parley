@@ -1,216 +1,82 @@
-# Conversational Agent Harness
+# Parley
 
-Headless, multi-tenant infrastructure for AI-powered conversational apps. The
-harness owns the operational complexity of a conversation — ingestion, queue,
-per-conversation debounce, conversation state, short/long-term memory, LLM
-execution, tool orchestration, human handoff, retries, idempotency,
-observability — so a customer only implements business logic as HTTP tools
-and points a channel (WhatsApp via Evolution API, or their own Web Chat
-widget) at the harness.
+Parley is a headless, multi-tenant service that runs AI conversations over HTTP. Your application talks to it through a REST API; it is not a library and it has no product UI of its own (two demo pages aside).
 
-Warm handoff: when a conversation escalates to a human, the harness writes a
-best-effort AI-summarized operator brief and surfaces it as `latest_handoff`
-on `GET /conversations/{id}`, so the operator doesn't make the contact repeat
-themselves.
+**What parley owns:** the operational side of a conversation. It takes in messages, waits for a customer to finish typing, keeps the conversation's state, runs the model with the agent's instructions and tools, remembers facts about a contact, hands a conversation to a human, retries a failed turn and logs what happened.
 
-Sentiment escalation: on agents with `sentiment_escalation_enabled`, a cheap
-classifier scores each inbound batch for frustration before the agent runs, and
-a score at or above `SENTIMENT_THRESHOLD` (0.7) skips the AI answer entirely —
-the conversation warm-hands off with `requested_by=system` and the user gets
-the agent's `handoff_message`.
+**What your application owns:** the business logic, as HTTP tools parley calls; the channel (your own web chat, or WhatsApp through Evolution API); operator accounts and the operator screen; notifications; the customer's language and the texts parley sends.
 
-**Principle**: the customer implements the business tools; the harness
-manages the conversation and agent runtime.
+## What it does today
 
-Modular monolith: Python 3.12, FastAPI, PostgreSQL (SQLAlchemy 2 + Alembic),
-Redis (queue + locks + debounce), Docker Compose (`api`, `worker`, `postgres`,
-`redis`, plus a `mock-tools` service for the demo).
+- Tenants with their own API key; every query is scoped to the tenant.
+- Agents with instructions, a model, tools, long-term memory and a rolling summary.
+- Business tools: HTTP endpoints you describe with a JSON Schema, guarded against calls to private addresses.
+- Channels: web chat over REST, and WhatsApp through Evolution API, with images and voice notes (transcribed).
+- A debounce window turns a burst of messages into one agent turn; a message that arrives mid-reply supersedes the turn.
+- Human handoff: by the agent's tool, by a frustration score, or by an operator. A handoff carries a short AI-written brief.
+- Waiting lines per category, claim and release, so an app can build an operator screen on the API.
+- Per-agent boundaries with a reply check, and an optional deployment-wide floor.
+- Optional humanized replies: short bubbles with typing pauses.
+- At-least-once delivery with recovery from a dead worker, turn retries and a dead-letter list.
+- `GET /health`, `GET /ready`, JSON logs with request and conversation ids.
 
-See `PRODUCT.md` for the full product framing and `docs/ARCHITECTURE.md` for
-a module-by-module tour, the DB model, the debounce algorithm, the agent
-loop, memory, the tool model and extension points.
+Not included: client libraries, streaming (clients poll), operator accounts, a model other than OpenAI-compatible chat completions.
 
-## Architecture (at a glance)
+## Quick start
 
-```
-                 ┌──────────────┐        ┌───────────────┐
- Web Chat widget │              │        │               │
- (or /dev/msgs)  │  api (FastAPI) ──────▶│  PostgreSQL   │
-        ▼        │              │        │  (messages,   │
- POST /channels/  │  - ingest()  │        │   conversations,
-  webchat/messages│  - REST CRUD │        │   agent_runs,  │
-        │         │  - webhooks  │        │   tools, ...)  │
-        ▼         └──────┬───────┘        └───────▲───────┘
-   ┌─────────┐           │ enqueue Job             │
-   │ Evolution│           ▼                         │
-   │  (WA)   │      ┌──────────┐                   │
-   └────┬────┘      │  Redis   │                   │
-        │            │ jobs +   │                   │
-        ▼            │ debounce │                   │
- POST /webhooks/     │ + locks  │                   │
-  whatsapp/{id}      └────┬─────┘                   │
-                           ▼                         │
-                     ┌───────────┐   AgentRuntime    │
-                     │  worker   │───────────────────┘
-                     │           │   (context, LLM,
-                     │ job loop +│    tools, memory,
-                     │ scheduler │    handoff)
-                     └─────┬─────┘
-                           │
-                ┌──────────┼───────────┐
-                ▼          ▼            ▼
-          LLM provider  customer's   built-ins
-          (OpenAI-      HTTP tools   (remember,
-           compatible)  (SSRF-guarded) handoff_to_human)
-```
-
-Inbound messages (Web Chat REST, the `/dev/messages` simulator, or the
-WhatsApp/Evolution webhook) all funnel through the same `ingest()` — nothing
-bypasses the pipeline. A burst of messages on one conversation collapses into
-a single agent turn once the debounce window closes (see
-`docs/ARCHITECTURE.md`), and the turn's reply goes back out through the same
-`ChannelAdapter` the message came in on.
-
-**Humanizer**: replies feel human — not bot-instant. Enabled per channel via
-`config: {"humanize": true}`, the humanizer marks inbound messages as read
-(WhatsApp), sends "composing…" presence (WhatsApp), splits long replies into
-2–4 short bubbles, and paces each bubble's send with a delay proportional to
-its length (typing speed, min/max delay per bubble, and split count are
-configurable global Settings). Web Chat keeps legacy single-message delivery
-when humanize is off; all channels support split, paced bubbles when on. See
-`docs/ARCHITECTURE.md` for the full flow and adapter hooks.
-
-**Barge-in**: a message arriving mid-reply supersedes the turn at safe
-checkpoints; the conversation re-runs with the full batch.
-
-## Run it
+You need Docker with Compose, `curl` and `jq`.
 
 ```bash
 cp .env.example .env
-# then edit .env: set a real LLM_API_KEY (OpenAI or any OpenAI-compatible
-# endpoint — OpenRouter, Ollama, vLLM, ...) for the live demo. Everything
-# else in .env.example has a working default for local Docker Compose.
-
+# edit .env: set ADMIN_API_KEY, SECRETS_KEY (a Fernet key) and LLM_API_KEY
 docker compose up -d --build
-# starts postgres, redis, api (:8001 on the host, runs migrations on boot),
-# worker, and mock-tools (:9000 inside the compose network — the demo's
-# fake business endpoint).
-
-# operator page: http://localhost:8001/operator (paste the tenant API key;
-# the demo key is prefilled)
-
-# web chat page: http://localhost:8001/chat — besides typing, the composer
-# has a 📎 button (attach a photo or audio file) and a 🎤 button (record a
-# voice note in the browser via MediaRecorder, click again to send it).
-# Both pages (/chat and /operator) render image messages as thumbnails and
-# audio messages as a player plus the transcript text underneath.
-
-uv run scripts/demo.py
-# scripts the PRODUCT.md "success demo" against the running stack over
-# plain HTTP: creates a tenant/agent/tool/channel, sends "Oi" / "Queria
-# saber onde está" / "meu pedido 12345" in quick succession, prints the
-# transcript once the agent replies (expects it to mention order 12345,
-# having called the mocked get_order tool), then "Quero falar com uma
-# pessoa" -> handoff -> operator reply -> /resume -> one more message.
-#
-# Exits 0 on success, 2 if LLM_API_KEY in .env is still the placeholder
-# (the pipeline itself is still proven by `pytest`'s scripted-LLM e2e test,
-# no live key needed for that), 1 if an expectation wasn't met.
-
-uv run scripts/demo_media.py
-# scripts the PRODUCT.md media success demo: bootstraps the same /chat demo
-# tenant, uploads tests/fixtures/order_label.png (shows "PEDIDO 12345") with
-# a caption, then tests/fixtures/voice_note.mp3 (a real voice note asking
-# about the order) within the debounce window so both land in one turn,
-# waits for the agent's reply, and asserts it mentions the order after
-# reading the image and transcribing the audio. Same exit codes as demo.py.
+curl -s http://localhost:8001/ready
 ```
 
-Host ports: Postgres `5434`, Redis `6380`, API `8001` (overridable via
-`POSTGRES_PORT`/`REDIS_PORT`/`API_PORT` in `.env` — chosen to avoid clashing
-with other local services on the usual `5432`/`6379`/`8000`). Inside the
-Compose network, services address each other by service name
-(`postgres:5432`, `redis:6379`, `mock-tools:9000`) regardless of the
-host-side ports.
+Expected: `{"status":"ready","checks":{"database":"ok","redis":"ok"}}`. The API and the worker refuse to start while `ADMIN_API_KEY` or `SECRETS_KEY` is a placeholder, unless `DEMO_MODE=true`.
 
-## Test
+No model key? Run the stack with a stub model that answers `Stub reply to: <your message>` and hands off when the message asks for a person:
 
 ```bash
-uv run ruff check .
-uv run pytest -q
+docker compose -f docker-compose.yml -f docker-compose.stub.yml up -d --build
 ```
 
-Tests run against a real Postgres (`harness_test`, auto-created if missing —
-see `tests/conftest.py`) on the host-mapped port and `fakeredis`; the LLM is
-always `FakeLLMProvider` (scripted, in-process) and any customer HTTP tool
-call goes through `respx`, so `pytest` never makes a network call and never
-needs a real `LLM_API_KEY`. `tests/test_e2e_demo.py` is the automated
-equivalent of `scripts/demo.py` — the full success-demo flow (debounced
-turn, tool call, handoff, operator, resume) over the real pipeline.
+Two demo pages are served by the API:
 
-## API overview
+- `http://localhost:8001/chat`: a chat page. It needs `DEMO_MODE=true` and keeps the tenant key in the browser, so never use it for real customers.
+- `http://localhost:8001/operator`: an operator inbox. Paste a tenant key.
 
-Full interactive docs at `GET /docs` (Swagger UI) once the API is running.
-Auth: `X-Admin-Key` (one shared admin key, `/tenants` only) or `X-API-Key`
-(per-tenant, everything else). Highlights:
+The rest of the path (tenant, agent, tool, channel, first message, handoff) is in [docs/guides/quickstart.md](docs/guides/quickstart.md) and the guides below.
 
-| Route | Purpose |
-|---|---|
-| `POST /tenants` | admin-only; returns the tenant's `api_key` (shown once) |
-| `POST /agents`, `/channels`, `/tools` | configure an agent, a channel, a business tool |
-| `POST /channels/webchat/messages` | Web Chat ingestion (the only channel a customer's own widget talks to) |
-| `POST /channels/webchat/media` | Web Chat media upload (multipart: `channel_id`, `user_id`, `file`, optional `caption`/`message_id`) — a photo or voice note, same pipeline as text |
-| `GET /media/{message_id}` | tenant-scoped media download (`X-API-Key` required) — serves the file behind an image/audio message, used by `/chat` and `/operator` to render thumbnails/players |
-| `POST /dev/messages` | dev simulator — same pipeline as Web Chat, for scripting demos |
-| `POST /webhooks/whatsapp/{channel_id}` | Evolution API inbound webhook |
-| `GET /conversations/{id}/messages` | poll for replies (`?include_tools=false` by default; `?after=<timestamp>`) |
-| `POST /conversations/{id}/messages` | operator reply (typically while `HUMAN_HANDOFF`) |
-| `POST /conversations/{id}/handoff` / `/resume` / `/close` | conversation state transitions |
-| `GET/POST/DELETE /contacts/{id}/memories` | long-term memory CRUD |
-| `GET /operator` | self-contained operator inbox page (handoff triage, reply, resume/close) |
+## Integrating parley
 
-## Evolution API (WhatsApp) setup
+An agent asked to add parley to a project should start from [llms.txt](llms.txt). A running instance serves the same file at `GET /llms.txt`, and the guides it links to under `/docs/guides/`, without authentication. `GET /openapi.json` is the machine-readable API.
 
-1. Create a channel: `POST /channels` with `type: "whatsapp"`, `config:
-   {"base_url": "...", "instance": "..."}` and `secret` set to the Evolution
-   instance's `apikey` (encrypted at rest, never returned by the API).
-2. In Evolution, point that instance's webhook at:
-   `POST https://<your-harness-host>/webhooks/whatsapp/{channel_id}`
-3. Evolution must send the shared secret on every webhook call as the
-   `apikey` header — the harness compares it (constant-time) against the
-   channel's stored secret and returns `401` on a mismatch.
-4. Outbound replies go back out through Evolution's `sendText` REST endpoint
-   using that same `apikey`, `base_url` and `instance`.
+Follow the guides in order; each one ends with a check that its step worked.
 
-## Known MVP limitations
+- [Quickstart](docs/guides/quickstart.md): bring up the stack and confirm it is healthy.
+- [Configuration](docs/guides/configuration.md): every environment variable, and which are required.
+- [Setup](docs/guides/setup.md): create a tenant, an agent, a channel and tools.
+- [Manifest](docs/guides/manifest.md): describe a business in one file and apply it with one call; secrets, dry run, export of a tenant set up by hand, three example files.
+- [Messaging](docs/guides/messaging.md): send and receive messages on web chat and WhatsApp; what the customer sees when something fails.
+- [Operators](docs/guides/operators.md): hand a conversation to a human; lines, claim, reply, resume, categories; a polling loop for an operator screen.
+- [Project channel](docs/guides/project-channel.md): connect a project with its own inbox: forward messages, signed event pushes, the event feed, departments, PDFs.
+- [Agent behaviour](docs/guides/agent-behaviour.md): instructions, memory, boundaries, sentiment escalation, failure texts, context window.
+- [API conventions](docs/guides/api-conventions.md): authentication, errors, paging, polling, limits.
+- [Operations](docs/guides/operations.md): replicas, the image user, upgrading, retries, dead letters, shutdown.
 
-- **DNS-rebinding TOCTOU on the SSRF guard**: the allowed-IP check resolves
-  the tool endpoint's hostname once before the request; `httpx` re-resolves
-  it when it actually connects, so a DNS-rebinding attacker could in theory
-  return a private address on that second lookup. Redirects are disabled
-  (closing the much easier attack), but pinning the validated IP into the
-  connection is not implemented.
-- **No background memory extraction**: `remember` only fires when the model
-  explicitly decides to call it mid-conversation; nothing summarizes a
-  conversation into memories after the fact.
-- **Long-term memory retrieval is `ILIKE`, not semantic**: `MemoryService`'s
-  interface is ready for vector similarity, but today `search()` is a plain
-  substring match.
-- **Single retry path, no dedicated `max_iterations` status**: a capped
-  agent loop is recorded as `AgentRunStatus.ERROR` with `error=
-  "max_iterations"` rather than its own enum member, because the enum lives
-  in a migration this scope didn't touch.
-- **One agent per conversation, REST-poll only**: no multi-agent
-  orchestration, no WebSocket/SSE streaming — clients poll
-  `GET /conversations/{id}/messages`.
+## Development
 
-## Recommended next 3 improvements
+Python 3.12, FastAPI, PostgreSQL (SQLAlchemy 2 and Alembic), Redis, Docker Compose. See [AGENTS.md](AGENTS.md) for how to work in the repository.
 
-1. **Pin the resolved IP for the SSRF-guarded request** (custom `httpx`
-   transport/resolver) to close the DNS-rebinding TOCTOU gap noted above.
-2. **A real `max_iterations` `AgentRunStatus` member** (needs a migration)
-   instead of overloading `ERROR` with a string marker — cleaner querying
-   for "did this turn actually fail" vs "did it just run out of budget".
-3. **Vector-similarity long-term memory retrieval**, replacing `ILIKE`
-   `search()` behind the same `MemoryService` interface, likely via the
-   already-mentioned pgvector optional hook.
+```bash
+make check
+```
+
+`make check` runs `make lint` (`uv run ruff check .`), `make typecheck` (`uv run mypy`) and `make test` (starts Postgres when nothing listens on its port, then `uv run pytest -q`), in that order. `make help` lists every target. The same three run in CI on every push.
+
+## More
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how the system works inside.
+- [docs/FOLLOW_UPS.md](docs/FOLLOW_UPS.md): known limits and open items.
+- [LICENSE.md](LICENSE.md): the licence.

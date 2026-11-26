@@ -1,5 +1,5 @@
 [project]
-name = "conversational-harness"
+name = "parley"
 version = "0.1.0"
 description = "Headless, multi-tenant infrastructure for AI-powered conversational apps."
 requires-python = ">=3.12,<3.13"
@@ -16,6 +16,8 @@ dependencies = [
     "cryptography>=43",
     "jsonschema>=4.26.0",
     "python-multipart>=0.0.32",
+    "pypdf>=7.1.1",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]
@@ -25,6 +27,8 @@ dev = [
     "ruff>=0.7",
     "fakeredis>=2.24",
     "respx>=0.23.1",
+    "mypy>=2.4.1",
+    "types-pyyaml>=6.0.12.20261122",
 ]
 
 [tool.ruff]
@@ -43,6 +47,35 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["app"]
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = ["app.security.*", "app.queue.*", "app.conversations.*"]
+# `strict = true` in an override leaks to every module in mypy 2.x, so the
+# strict flags are spelled out; they are the per-module ones `--strict` enables.
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true
+
+[[tool.mypy.overrides]]
+# Third-party packages that ship no type information.
+module = ["jsonschema", "jsonschema.*"]
+ignore_missing_imports = true
 
 [build-system]
 requires = ["hatchling"]

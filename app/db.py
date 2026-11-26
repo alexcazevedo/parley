@@ -18,3 +18,16 @@ async_session_maker = async_sessionmaker(
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_maker() as session:
         yield session
+
+
+async def end_transaction(session: AsyncSession) -> None:
+    """Commit the session's open transaction, if it has one; otherwise do nothing.
+
+    Called right before slow work (a network call, a sleep) so the connection
+    goes back to the pool instead of sitting idle in a transaction. Sessions
+    use `expire_on_commit=False`, so loaded rows stay usable afterwards. What
+    was written before is committed here and no longer rolls back if the
+    caller fails later.
+    """
+    if session.in_transaction():
+        await session.commit()

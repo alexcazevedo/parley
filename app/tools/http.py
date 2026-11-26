@@ -9,7 +9,6 @@ or retry, and the turn keeps going.
 
 import json
 import time
-import uuid
 from typing import Any
 
 import httpx
@@ -17,20 +16,20 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
+from app.http_client import shared_client
+from app.http_retry import RETRY_STATUSES, wait_before_retry
 from app.llm.base import ToolSpec
 from app.models.agent import Agent
 from app.models.tool import Tool
-from app.models.tool_execution import ToolExecution, ToolExecutionStatus
 from app.security import secrets as secrets_crypto
+from app.tools import ledger
 from app.tools.base import UNKNOWN_TOOL_ERROR, ToolContext, ToolResult
 from app.tools.ssrf import SSRFError, assert_safe_url
 from app.tools.validation import validate_arguments
 
 logger = structlog.get_logger(__name__)
 
-# Non-JSON bodies are handed to the model as {"text": ...}; anything past this
-# is dead weight in the prompt.
-MAX_TEXT_BYTES = 8 * 1024
 # How much of an error body we quote back. Small on purpose: it goes into the
 # transcript and may contain the customer's internals.
 MAX_ERROR_BODY_CHARS = 500
@@ -61,6 +60,15 @@ class HttpToolExecutor:
             for tool in tools
         ]
 
+    async def repeat_safe(self, name: str, ctx: ToolContext) -> bool:
+        """May a call whose earlier attempt has an unknown outcome run again?
+
+        Only a GET: it reads, so repeating it cannot book, charge or notify
+        twice. Every other method, and a tool that no longer exists, is not.
+        """
+        tool = await self._load_tool(ctx, name)
+        return tool is not None and (tool.method or "POST").upper() == "GET"
+
     async def execute(
         self, name: str, arguments: dict[str, Any], ctx: ToolContext
     ) -> ToolResult:
@@ -71,65 +79,134 @@ class HttpToolExecutor:
             # names would otherwise flood the table.
             return ToolResult.failure(f"{UNKNOWN_TOOL_ERROR}: {name}")
 
+        # On record (committed, `STARTED`) before anything runs; this also
+        # leaves no transaction open across the HTTP call below.
+        execution = await ledger.begin(ctx, tool_name=name, arguments=arguments, tool_id=tool.id)
         started = time.perf_counter()
         invalid = validate_arguments(tool.input_schema, arguments)
         if invalid is not None:
-            return await self._record(ctx, tool, name, arguments, started, error=invalid)
+            result, outcome_unknown = ToolResult.failure(invalid), False
+        else:
+            result, outcome_unknown = await self._run(tool, name, arguments)
 
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        meta = {"latency_ms": latency_ms} | result.meta
+        if result.ok:
+            result = ToolResult.success(result.data, **meta)
+        else:
+            result = ToolResult.failure(result.error or "tool execution failed", **meta)
+        if outcome_unknown:
+            # The request may have reached the endpoint: the row stays
+            # `STARTED`, so a re-run treats the call as unknown outcome
+            # (repeated only for a GET) instead of reusing this error.
+            await ledger.mark_unknown(
+                ctx,
+                execution,
+                error=result.error or "tool execution failed",
+                latency_ms=latency_ms,
+            )
+        else:
+            await ledger.finish(ctx, execution, result, latency_ms=latency_ms)
+        logger.info(
+            "tools.http.executed",
+            tool=name,
+            ok=result.ok,
+            latency_ms=latency_ms,
+            status_code=result.meta.get("status_code"),
+            outcome_unknown=outcome_unknown,
+        )
+        return result
+
+    async def _run(
+        self, tool: Tool, name: str, arguments: dict[str, Any]
+    ) -> tuple[ToolResult, bool]:
+        """The HTTP call, every failure shaped into a `ToolResult`.
+
+        Also returns whether the outcome is unknown: True when the call failed
+        after its request may have reached the endpoint (a timeout other than
+        `ConnectTimeout`, an `httpx.HTTPError` other than `ConnectError`, an
+        unexpected exception). A blocked endpoint, a connect error or timeout
+        (the request never left) and any HTTP response are known outcomes.
+
+        Only `Exception`s are caught: a cancellation propagates and leaves the
+        ledger row `STARTED`.
+        """
         try:
-            result = await self._call(tool, arguments)
+            return await self._call(tool, arguments), False
         except SSRFError as exc:
-            result = ToolResult.failure(f"blocked endpoint: {exc}")
-        except httpx.TimeoutException:
-            result = ToolResult.failure(f"tool timed out after {tool.timeout_seconds}s")
+            return ToolResult.failure(f"blocked endpoint: {exc}"), False
+        except httpx.TimeoutException as exc:
+            failure = ToolResult.failure(f"tool timed out after {tool.timeout_seconds}s")
+            return failure, not isinstance(exc, httpx.ConnectTimeout)
         except httpx.HTTPError as exc:
-            result = ToolResult.failure(f"request failed: {type(exc).__name__}")
+            failure = ToolResult.failure(f"request failed: {type(exc).__name__}")
+            return failure, not isinstance(exc, httpx.ConnectError)
         except Exception:
             # Never let a customer endpoint break the turn; the detail goes to
             # the log, not to the model.
             logger.exception("tools.http.unexpected_error", tool=name)
-            result = ToolResult.failure("tool execution failed")
-
-        return await self._record(
-            ctx,
-            tool,
-            name,
-            arguments,
-            started,
-            error=result.error,
-            data=result.data,
-            meta=result.meta,
-        )
+            return ToolResult.failure("tool execution failed"), True
 
     async def _call(self, tool: Tool, arguments: dict[str, Any]) -> ToolResult:
-        await assert_safe_url(tool.endpoint)
+        settings = get_settings()
+        cap = settings.tool_max_response_bytes
         method = (tool.method or "POST").upper()
-        headers = {"Accept": "application/json"} | self._auth_headers(tool)
+        # Only a GET is repeated on 429/5xx; anything else is sent exactly once.
+        attempts = settings.http_retry_attempts if method == "GET" else 1
+        # `identity`: a compressed body could expand far past the cap in memory.
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+        } | self._auth_headers(tool)
         params = None if method in BODY_METHODS else arguments
         body = arguments if method in BODY_METHODS else None
 
-        async with httpx.AsyncClient(
-            timeout=tool.timeout_seconds,
-            # Redirects are the cheap way around the SSRF check (see ssrf.py).
-            follow_redirects=False,
-        ) as client:
-            response = await client.request(
-                method, tool.endpoint, params=params, json=body, headers=headers
-            )
+        attempt = 1
+        while True:
+            # Before every try, retries included.
+            await assert_safe_url(tool.endpoint)
+            # The shared client never follows redirects: they are the cheap way
+            # around the SSRF check (see ssrf.py).
+            async with shared_client().stream(
+                method,
+                tool.endpoint,
+                params=params,
+                json=body,
+                headers=headers,
+                timeout=tool.timeout_seconds,
+            ) as response:
+                status_code = response.status_code
+                retry_after = response.headers.get("retry-after")
+                if status_code not in RETRY_STATUSES or attempt >= attempts:
+                    encoding = response.headers.get("content-encoding", "identity")
+                    if encoding.strip().lower() not in ("", "identity"):
+                        return ToolResult.failure(
+                            "unsupported response encoding", status_code=status_code
+                        )
+                    raw, truncated = await _read_capped(response, cap)
+                    is_success = response.is_success
+                    break
+            # Body unread: leaving the stream releases the connection.
+            await wait_before_retry(status_code, attempt, retry_after, settings)
+            attempt += 1
 
-        payload = self._parse(response)
-        meta = {"status_code": response.status_code}
-        if response.is_success:
-            return ToolResult.success(payload, **meta)
-        detail = response.text[:MAX_ERROR_BODY_CHARS]
-        return ToolResult.failure(f"HTTP {response.status_code}: {detail}".strip(), **meta)
+        meta: dict[str, Any] = {"status_code": status_code}
+        if truncated:
+            meta["truncated"] = True
+            logger.warning("tools.http.response_truncated", tool=tool.name, cap=cap)
+        if is_success:
+            return ToolResult.success(self._parse(raw, truncated), **meta)
+        detail = raw.decode("utf-8", errors="replace")[:MAX_ERROR_BODY_CHARS]
+        return ToolResult.failure(f"HTTP {status_code}: {detail}".strip(), **meta)
 
-    def _parse(self, response: httpx.Response) -> Any:
+    def _parse(self, raw: bytes, truncated: bool) -> Any:
+        if truncated:
+            # Never parse cut JSON.
+            return {"text": raw.decode("utf-8", errors="replace"), "truncated": True}
         try:
-            return response.json()
+            return json.loads(raw)
         except ValueError:
-            text = response.content[:MAX_TEXT_BYTES].decode("utf-8", errors="replace")
-            return {"text": text}
+            return {"text": raw.decode("utf-8", errors="replace")}
 
     def _auth_headers(self, tool: Tool) -> dict[str, str]:
         """Decrypt `auth_config` at call time. The token is never logged."""
@@ -169,54 +246,16 @@ class HttpToolExecutor:
         )
         return list(result.scalars().all())
 
-    async def _record(
-        self,
-        ctx: ToolContext,
-        tool: Tool,
-        name: str,
-        arguments: dict[str, Any],
-        started: float,
-        *,
-        error: str | None = None,
-        data: Any = None,
-        meta: dict[str, Any] | None = None,
-    ) -> ToolResult:
-        """Persist the `ToolExecution` and return what the model will see."""
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        ok = error is None
-        ctx.session.add(
-            ToolExecution(
-                id=uuid.uuid4(),
-                tenant_id=ctx.tenant_id,
-                agent_run_id=ctx.agent_run_id,
-                tool_id=tool.id,
-                tool_name=name,
-                arguments=_jsonable(arguments) or {},
-                result=_jsonable(data) if ok else None,
-                status=ToolExecutionStatus.OK if ok else ToolExecutionStatus.ERROR,
-                latency_ms=latency_ms,
-                error=error,
-            )
-        )
-        await ctx.session.flush()
-        logger.info(
-            "tools.http.executed",
-            tool=name,
-            ok=ok,
-            latency_ms=latency_ms,
-            status_code=(meta or {}).get("status_code"),
-        )
-        if ok:
-            return ToolResult.success(data, latency_ms=latency_ms, **(meta or {}))
-        return ToolResult.failure(
-            error or "tool execution failed", latency_ms=latency_ms, **(meta or {})
-        )
 
+async def _read_capped(response: httpx.Response, cap: int) -> tuple[bytes, bool]:
+    """Read at most `cap` bytes; stop reading once more than `cap` arrived.
 
-def _jsonable(value: Any) -> dict[str, Any] | None:
-    """`ToolExecution.arguments/result` are JSONB objects; wrap non-objects."""
-    if value is None:
-        return None
-    if isinstance(value, dict):
-        return value
-    return {"data": value}
+    `aiter_raw` (not `aiter_bytes`): the cap applies to what is held in memory,
+    so nothing may be decompressed on the way.
+    """
+    buf = bytearray()
+    async for chunk in response.aiter_raw():
+        buf.extend(chunk)
+        if len(buf) > cap:
+            return bytes(buf[:cap]), True
+    return bytes(buf), False

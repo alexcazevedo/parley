@@ -92,13 +92,14 @@ async def test_memories_and_summary_are_folded_into_the_system_prompt():
     assert f"{SUMMARY_HEADER}\nO cliente perguntou sobre o pedido 12345." in prompt
 
 
-async def test_history_is_capped_at_the_agents_context_message_limit():
+async def test_builder_sends_the_history_it_is_given_without_cutting_again():
+    # The limit is applied by the runtime (tests/test_context_limit.py).
     history = [_message(MessageRole.USER, f"msg {i}") for i in range(10)]
 
     built = await ContextBuilder().build(_agent(context_message_limit=3), _conversation(), history)
 
-    assert len(built) == 4  # system + 3
-    assert [m.content for m in built[1:]] == ["msg 7", "msg 8", "msg 9"]
+    assert len(built) == 11  # system + 10
+    assert [m.content for m in built[1:]] == [f"msg {i}" for i in range(10)]
 
 
 async def test_operator_messages_speak_with_the_assistant_voice():

@@ -13,13 +13,14 @@ from contextlib import asynccontextmanager
 import httpx
 import pytest
 import respx
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.agents.runtime import AgentRuntime
 from app.llm.base import LLMResponse, ToolCall
 from app.llm.providers.fake import FakeLLMProvider
 from app.models.agent_run import AgentRun
 from app.models.message import Message, MessageRole
+from app.models.tool import Tool
 from app.models.tool_execution import ToolExecution, ToolExecutionStatus
 from app.queue.redis_queue import JOBS_KEY, RedisQueue
 from app.tools.http import HttpToolExecutor
@@ -152,7 +153,7 @@ async def _tool_result_message(db_session, conversation_id: uuid.UUID) -> Messag
     result = await db_session.execute(
         select(Message)
         .where(Message.conversation_id == conversation_id, Message.role == MessageRole.TOOL)
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     messages = list(result.scalars().all())
     assert messages, "the tool result never reached the transcript"
@@ -292,12 +293,22 @@ async def test_invalid_arguments_are_rejected_before_any_request(
 
 @pytest.mark.parametrize(
     "endpoint",
-    ["http://127.0.0.1:8000/orders", "http://169.254.169.254/latest/meta-data/", "file:///etc/passwd"],
+    [
+        "http://127.0.0.1:8000/orders",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://100.64.0.1/orders",
+        "file:///etc/passwd",
+    ],
 )
 async def test_unsafe_endpoints_are_blocked_before_the_request(
     client, fake_redis, db_session, endpoint
 ):
-    conversation_id = await _run(client, fake_redis, db_session, tool={"endpoint": endpoint})
+    conversation_id = await _run(client, fake_redis, db_session)
+    # The API refuses unsafe endpoints at create/update, so plant one directly
+    # (a row from before that check, or a host whose DNS changed) to prove the
+    # call-time guard still holds.
+    await db_session.execute(update(Tool).values(endpoint=endpoint))
+    await db_session.commit()
 
     async with respx.mock(assert_all_called=False) as router:
         catch_all = router.route().mock(return_value=httpx.Response(200, json={}))
@@ -353,3 +364,105 @@ async def test_the_tool_spec_reaches_the_model(client, fake_redis, db_session):
     assert [spec.name for spec in specs] == ["get_order"]
     assert specs[0].parameters == ORDER_SCHEMA
     assert specs[0].description == "Look up an order by id"
+
+
+# --- response cap (TOOL_MAX_RESPONSE_BYTES, default 32768) -------------------
+
+DEFAULT_CAP = 32768
+
+
+async def _result_for(client, fake_redis, db_session, response, *, tool=None):
+    conversation_id = await _run(client, fake_redis, db_session, tool=tool)
+    async with respx.mock(assert_all_called=False) as router:
+        router.get(ORDERS_URL).mock(return_value=response)
+        await _turn(fake_redis, db_session, _provider())
+    return (await _executions(db_session, conversation_id))[0]
+
+
+async def test_json_larger_than_the_cap_is_truncated_to_text(client, fake_redis, db_session):
+    body = json.dumps({"items": ["x" * 50] * 2000})
+    assert len(body) > DEFAULT_CAP
+    execution = await _result_for(
+        client, fake_redis, db_session, httpx.Response(200, content=body.encode())
+    )
+    assert execution.status == ToolExecutionStatus.OK
+    assert execution.result["truncated"] is True
+    assert set(execution.result) == {"text", "truncated"}
+    assert len(execution.result["text"].encode()) <= DEFAULT_CAP
+
+
+async def test_json_just_under_the_cap_is_parsed(client, fake_redis, db_session):
+    payload = {"blob": "y" * (DEFAULT_CAP - 100)}
+    body = json.dumps(payload)
+    assert len(body.encode()) < DEFAULT_CAP
+    execution = await _result_for(
+        client, fake_redis, db_session, httpx.Response(200, content=body.encode())
+    )
+    assert execution.result == payload
+
+
+async def test_large_non_json_body_is_capped(client, fake_redis, db_session):
+    execution = await _result_for(
+        client, fake_redis, db_session, httpx.Response(200, content=b"z" * (DEFAULT_CAP * 2))
+    )
+    assert execution.result["truncated"] is True
+    assert len(execution.result["text"].encode()) <= DEFAULT_CAP
+    assert len(execution.result["text"]) > 8 * 1024
+
+
+async def test_cap_is_overridable_by_env(client, fake_redis, db_session, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("TOOL_MAX_RESPONSE_BYTES", "100")
+    get_settings.cache_clear()
+    try:
+        execution = await _result_for(
+            client, fake_redis, db_session, httpx.Response(200, content=b"q" * 500)
+        )
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
+    assert execution.result == {"text": "q" * 100, "truncated": True}
+
+
+async def test_large_error_body_still_yields_a_short_error(client, fake_redis, db_session):
+    execution = await _result_for(
+        client, fake_redis, db_session, httpx.Response(500, content=b"e" * (DEFAULT_CAP * 2))
+    )
+    assert execution.status == ToolExecutionStatus.ERROR
+    assert execution.error.startswith("HTTP 500")
+    assert len(execution.error) <= 500 + len("HTTP 500: ")
+
+
+async def test_request_asks_for_identity_encoding(client, fake_redis, db_session):
+    conversation_id = await _run(client, fake_redis, db_session)
+    async with respx.mock(assert_all_called=False) as router:
+        route = router.get(ORDERS_URL).mock(return_value=httpx.Response(200, json={"ok": 1}))
+        await _turn(fake_redis, db_session, _provider())
+    assert route.called
+    assert route.calls.last.request.headers["accept-encoding"] == "identity"
+    assert (await _executions(db_session, conversation_id))[0].status == ToolExecutionStatus.OK
+
+
+async def test_compressed_response_is_refused(client, fake_redis, db_session):
+    import gzip
+
+    bomb = gzip.compress(b"0" * (DEFAULT_CAP * 100))
+    execution = await _result_for(
+        client,
+        fake_redis,
+        db_session,
+        httpx.Response(200, content=bomb, headers={"Content-Encoding": "gzip"}),
+    )
+    assert execution.status == ToolExecutionStatus.ERROR
+    assert execution.error.startswith("unsupported response encoding")
+
+
+async def test_identity_content_encoding_is_accepted(client, fake_redis, db_session):
+    execution = await _result_for(
+        client,
+        fake_redis,
+        db_session,
+        httpx.Response(200, json={"a": 1}, headers={"Content-Encoding": "identity"}),
+    )
+    assert execution.result == {"a": 1}

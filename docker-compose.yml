@@ -6,8 +6,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-harness}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-harness}
       POSTGRES_DB: ${POSTGRES_DB:-harness}
-    ports:
-      - "${POSTGRES_PORT:-5434}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -18,13 +16,25 @@ services:
 
   redis:
     image: redis:7
-    ports:
-      - "${REDIS_PORT:-6380}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # Runs the migrations once; api and worker start after it succeeded.
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-harness}:${POSTGRES_PASSWORD:-harness}@postgres:5432/${POSTGRES_DB:-harness}
+    command: uv run alembic upgrade head
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   api:
     build:
@@ -36,17 +46,16 @@ services:
       # name, not by the host-mapped ports used in .env for local `uv run`.
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-harness}:${POSTGRES_PASSWORD:-harness}@postgres:5432/${POSTGRES_DB:-harness}
       REDIS_URL: redis://redis:6379/0
-      # Allow tools to reach the demo's mocked business endpoint past the
-      # SSRF guard (see app/tools/ssrf.py) — scripts/demo.py registers
-      # `get_order` at http://mock-tools:9000/orders.
-      TOOL_ALLOWED_HOSTS: mock-tools
+      # Tool host allowlist, from `.env` (see app/tools/ssrf.py). Empty: public
+      # hosts only. To try the bundled mock (scripts/demo.py registers
+      # `get_order` at http://mock-tools:9000/orders) set it to `mock-tools`.
+      TOOL_ALLOWED_HOSTS: ${TOOL_ALLOWED_HOSTS:-}
       # Media ingest (ticket 26): both api (upload/serve) and worker (future
       # STT/vision) need the same files, hence the shared named volume below.
       MEDIA_ROOT: /srv/media
     volumes:
       - media_data:/srv/media
-    command: >
-      sh -c "uv run alembic upgrade head && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
       - "${API_PORT:-8001}:8000"
     depends_on:
@@ -54,6 +63,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       mock-tools:
         condition: service_started
 
@@ -65,16 +76,22 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-harness}:${POSTGRES_PASSWORD:-harness}@postgres:5432/${POSTGRES_DB:-harness}
       REDIS_URL: redis://redis:6379/0
-      TOOL_ALLOWED_HOSTS: mock-tools
+      TOOL_ALLOWED_HOSTS: ${TOOL_ALLOWED_HOSTS:-}
       MEDIA_ROOT: /srv/media
     volumes:
       - media_data:/srv/media
     command: uv run python -m app.workers.main
+    # Restart after a crash; give running turns the worker's 90 s shutdown
+    # grace (SHUTDOWN_GRACE_SECONDS) plus margin before Docker kills it.
+    restart: unless-stopped
+    stop_grace_period: 100s
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       mock-tools:
         condition: service_started
 

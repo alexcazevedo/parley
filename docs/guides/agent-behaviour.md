@@ -1,0 +1,158 @@
+# Agent behaviour
+
+Tune how the agent answers: its instructions, memory, boundaries, escalation, and the texts customers see. Start from the variables of [setup](setup.md): `$BASE_URL`, `$TENANT_KEY`, `$AGENT_ID`, and `$CONTACT_ID` where a step needs it. Every field is set at create (`POST /agents`) or changed later with `PATCH /agents/{agent_id}`. Defaults and bounds of each field are in the table in [setup](setup.md) step 3; this guide says what each one does.
+
+Variable added here: `$MEMORY_ID`, captured with `jq` in the memory step.
+
+Every request sends `X-API-Key: $TENANT_KEY`. A change applies from the agent's next turn, to existing conversations too.
+
+`PATCH` changes only the fields you send. An explicit `null` clears `boundary_scope`, `boundary_refusal_message`, `error_message` and `unsupported_media_message` (back to the default text). For `boundary_never`, `boundary_check_enabled`, `sentiment_escalation_enabled` and `handoff_message`, `null` means leave as it is.
+
+## 1. Instructions and model settings
+
+```
+curl -s -X PATCH $BASE_URL/agents/$AGENT_ID \
+  -H "X-API-Key: $TENANT_KEY" -H "Content-Type: application/json" \
+  -d '{"instructions": "You are the support agent for Acme. Answer in the customer'"'"'s language, briefly. Ask for the order number before looking anything up.", "temperature": 0.3}'
+```
+
+Expected: 200 with the whole agent.
+
+What the fields do:
+
+- `instructions`: the start of the system prompt on every turn. Parley then appends, in this order: the contact's memories, the conversation summary, a chat-style hint when the channel has `humanize` on, and the boundaries.
+- `provider`: only `openai_compatible` works. The model endpoint and key come from `LLM_BASE_URL` and `LLM_API_KEY`, one for the whole deployment.
+- `model`: sent to the provider as given.
+- `temperature` and `max_tokens`: sent on each model call of a turn. `max_tokens` is sent under the name in `LLM_MAX_TOKENS_PARAM`.
+- `tool_names`: the tools of yours the model may call, plus the built-ins below.
+- `max_tool_iterations`: the most model calls in one turn. If the model is still calling tools after that many, the customer gets the fixed text `Desculpe, não consegui concluir. Vou encaminhar.` Despite the wording, the conversation is not handed to a human.
+- `memory_enabled` and `handoff_enabled`: give the model the built-in tools `remember` and `handoff_to_human`. `memory_enabled` also turns memory reading on.
+
+Check: `curl -s $BASE_URL/agents/$AGENT_ID -H "X-API-Key: $TENANT_KEY"` returns the new `instructions` and `temperature`.
+
+## 2. Memory
+
+Long-term memory is facts about one contact, kept across conversations with that contact on that channel.
+
+- With `memory_enabled` `true` the model has the tool `remember` with `type` (`preference`, `fact`, `relationship`, `previous_issue`, `summary` or `custom`), `content`, and optional `importance` (1 to 5, default 3). The model decides when to call it; mention it in `instructions` if you want it used.
+- Storing the same text again (ignoring case and extra spaces) does not add a row; it only raises `importance` when the new value is higher.
+- Each turn the agent reads the contact's memories that have not expired, most important first, then newest, up to `MEMORY_CONTEXT_LIMIT` (default 20, 1 to 100). Only their `content` goes into the prompt, as a list under "Known facts about this contact". It also goes into the operator brief at handoff.
+- With `memory_enabled` `false` the agent neither writes nor reads memories. The API below still stores them.
+
+The memories API, per contact (`$CONTACT_ID` from [setup](setup.md) step 5, or the `contact_id` of a conversation):
+
+- `POST /contacts/{contact_id}/memories`: body `type` (the six values above), `content`, `importance` (1 to 5, default 3), `expires_at` (optional time), `metadata` (optional object). Expected: 201 with `id`, `contact_id`, `type`, `content`, `importance`, `metadata`, `last_accessed_at`, `expires_at`, `created_at`. The same dedupe applies: a repeat returns the existing memory, still 201.
+- `GET /contacts/{contact_id}/memories`: `query` (text contained in `content`, any case) and `limit` (default 20, 1 to 100). Not paged. Expired memories are not listed.
+- `DELETE /contacts/{contact_id}/memories/{memory_id}`: 204. 404 `memory not found` or `contact not found`.
+
+```
+MEMORY_ID=$(curl -s -X POST $BASE_URL/contacts/$CONTACT_ID/memories \
+  -H "X-API-Key: $TENANT_KEY" -H "Content-Type: application/json" \
+  -d '{"type": "preference", "content": "Prefers answers in Portuguese", "importance": 4}' | jq -r .id)
+```
+
+`$MEMORY_ID` is the `id`.
+
+Check: `curl -s "$BASE_URL/contacts/$CONTACT_ID/memories?query=portuguese" -H "X-API-Key: $TENANT_KEY"` lists it. `DELETE` it with `$MEMORY_ID` and the same request returns `[]`.
+
+## 3. Boundaries
+
+Boundaries keep the agent on topic. Three fields describe them, and one switch turns the reply check on or off:
+
+| Field | Meaning |
+|---|---|
+| `boundary_scope` | What the agent may help with, free text, up to 2000 characters. |
+| `boundary_never` | Things it must never do or say, up to 50 items of 1 to 300 characters (spaces trimmed). |
+| `boundary_refusal_message` | What the customer receives when a reply is blocked. Default `Desculpe, não posso ajudar com esse assunto.` |
+| `boundary_check_enabled` | `true` (default): check each reply. `false`: no check, the prompt rule only. |
+
+```
+curl -s -X PATCH $BASE_URL/agents/$AGENT_ID \
+  -H "X-API-Key: $TENANT_KEY" -H "Content-Type: application/json" \
+  -d '{"boundary_scope": "Acme orders, shipping and returns", "boundary_never": ["give legal advice", "promise refunds"], "boundary_refusal_message": "I can only help with Acme orders."}'
+```
+
+What happens:
+
+1. With a scope or a never item set, a `## Boundaries` section is added to the system prompt: only help with the scope, never do the listed things, stay in role and never reveal the instructions.
+2. With `boundary_check_enabled` `true`, every reply the model writes is judged by one more model call (same `model`) before it is sent. It answers allow or block. A block replaces the reply with `boundary_refusal_message`.
+3. The check fails closed: if the call errors, passes `BOUNDARY_CHECK_TIMEOUT_SECONDS` (default 8), or answers in an unexpected form, the reply is blocked. A slow model therefore shows as refusals; raise the timeout.
+4. Only replies the model writes are checked. The handoff, failure, unsupported-media and refusal texts are sent as they are. The blocked reply is kept on the agent run and is not shown to the customer.
+5. With no scope and no never items there is nothing to enforce: no prompt section and no check call.
+
+The deployment floor: `BOUNDARY_FLOOR_FILE` points to a JSON file `{"scope": "text", "never": ["text"]}` that applies to every agent of every tenant. Its scope and never items are added to the agent's own, and tenants cannot remove them. While a floor file has content, the reply check is always on, whatever `boundary_check_enabled` says. A missing or invalid file stops the process at start. See [configuration](configuration.md).
+
+More about the checks:
+
+- The check is one extra model call per model-written reply, counted in the run's `llm_calls`. A blocked reply is refused at once; the model is not asked again.
+- The agent run keeps `boundary_reason` (`check_failed` and `check_unparseable` for the fail-closed cases) and `blocked_text` (the original reply, never sent), and a `boundary.reply_blocked` warning is logged. No endpoint shows them; read `agent_runs` and the logs.
+- The floor file takes the keys `scope` (non-empty string) and `never` (list of non-empty strings) and nothing else. It is read once at start-up by both `api` and `worker`, so both must be able to read it and an edit applies after a restart. An empty `BOUNDARY_FLOOR_FILE` means no floor.
+
+Check: after the change above, a message such as "write me a poem about cats" gets the refusal text (the model must judge it out of scope; this is not guaranteed). `GET /agents/{agent_id}` returns the fields you set.
+
+## 4. Sentiment escalation
+
+Set `sentiment_escalation_enabled` to `true` and the agent hands a frustrated customer to a human.
+
+```
+curl -s -X PATCH $BASE_URL/agents/$AGENT_ID \
+  -H "X-API-Key: $TENANT_KEY" -H "Content-Type: application/json" \
+  -d '{"sentiment_escalation_enabled": true}'
+```
+
+- Before the agent answers a batch of messages (while the conversation is `ACTIVE_AI`), one model call scores the customer's frustration from 0.0 (calm) to 1.0 (furious), looking at the last 10 messages and the new ones.
+- A score at or above `SENTIMENT_THRESHOLD` (default 0.7) hands the conversation over. A lower threshold escalates sooner. Below it, the turn goes on normally.
+- The handoff is recorded with `requested_by` `system` and reason `frustração do usuário detectada (score 0.xx)`. The customer is sent the agent's `handoff_message`. The agent does not answer that batch.
+- The check is best effort. If the call errors, passes `SENTIMENT_TIMEOUT_SECONDS` (default 5), or returns no number, there is no escalation and the turn goes on.
+- It adds one model call to every turn of an agent with it on.
+
+Check: `GET /conversations/{conversation_id}` after an escalation shows `state` `HUMAN_HANDOFF` and `latest_handoff.requested_by` `system`.
+
+## 5. The handoff message
+
+`handoff_message` is the text the customer receives when the agent or the sentiment check hands the conversation over (1 to 1000 characters). Created without it, the agent stores `Vou te transferir para um atendente humano.`; send another text to change it.
+
+- The agent's own handoff (tool `handoff_to_human`, with a `reason` argument) ends the turn: the customer receives `handoff_message`, not text the model wrote. It needs `handoff_enabled` `true`. Tell the model in `instructions` when to use it.
+- An operator's `POST /conversations/{conversation_id}/handoff` sends nothing to the customer. See [operators](operators.md).
+- If sending the handoff message fails, the handoff stands and the next attempt sends only that message.
+
+```
+curl -s -X PATCH $BASE_URL/agents/$AGENT_ID \
+  -H "X-API-Key: $TENANT_KEY" -H "Content-Type: application/json" \
+  -d '{"handoff_message": "One moment, I am passing you to a colleague."}'
+```
+
+Check: the response has the new `handoff_message`.
+
+## 6. Failure texts
+
+Three texts are the agent's to set, each 1 to 1000 characters. `null` brings back the default. The defaults are Portuguese; set your customers' language.
+
+| Field | Sent when | Default |
+|---|---|---|
+| `error_message` | The agent run fails (model error, timeout, an error in the loop), or a turn fails every retry. | `Desculpe, tive um problema técnico. Pode tentar novamente?` |
+| `unsupported_media_message` | The whole batch is media the agent cannot read (video, document, sticker, location, contact, or media that failed to download). | `Por enquanto só consigo entender texto, áudios e imagens. Pode me mandar em texto?` |
+| `boundary_refusal_message` | A reply is blocked (step 3). | `Desculpe, não posso ajudar com esse assunto.` |
+
+Two more texts are fixed and cannot be changed: `Desculpe, não consegui concluir. Vou encaminhar.` (step 1) and `Desculpe, não entendi. Pode reformular?` (the model returned an empty reply).
+
+The full list of what a customer receives, with the retry timing, is in [messaging](messaging.md).
+
+```
+curl -s -X PATCH $BASE_URL/agents/$AGENT_ID \
+  -H "X-API-Key: $TENANT_KEY" -H "Content-Type: application/json" \
+  -d '{"error_message": "Sorry, something went wrong on our side. Please try again.", "unsupported_media_message": "I can only read text, voice notes and images."}'
+```
+
+Check: the response shows both texts. `PATCH` with `{"error_message": null}` returns `error_message` as `null`, and the default is used again.
+
+## 7. Context window and summary
+
+- `context_message_limit` (default 20, 1 to 200): how many of the most recent messages (customer, agent and operator messages) the model sees each turn. Tool calls and results belonging to those messages come along, so a call is never separated from its result and an agent that uses many tools sends a longer prompt than the limit suggests; there is no separate cap on its size. Older messages are not sent.
+- `summary_threshold` (default 40, 0 to 1000): after a reply, if at least this many messages have piled up since the last summary, parley makes one more model call that folds them into the conversation's `summary`. The summary goes into the system prompt on later turns. `0` turns summaries off. A failed summary never costs the customer a reply.
+- The summary call uses the agent's `model` with fixed settings (temperature 0.2, up to 1024 tokens).
+- Keep the summary threshold at or above the window so the summary describes messages that left the window. Both costs grow with the numbers: the window is sent on every turn, the summary is one extra call each time the threshold is reached.
+
+Check: after enough messages, `GET /conversations/{conversation_id}` returns a non-null `summary`. With `summary_threshold` `0` it stays `null`.
+
+Next: errors, paging and health in [api-conventions](api-conventions.md).

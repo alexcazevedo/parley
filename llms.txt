@@ -1,0 +1,24 @@
+# Parley
+
+> Parley is a headless, multi-tenant service that runs AI conversations over HTTP. An application talks to it through a REST API; it is not a library.
+
+For a first integration follow quickstart, configuration, setup (or manifest, which sets up a whole business from one file), messaging and operators in that order: each step ends with a check that it worked. A project that keeps its own inbox follows project-channel after setup. The other guides are for tuning and running. Links are relative to the base URL of a running instance.
+
+## Guides
+
+- [Quickstart](docs/guides/quickstart.md): read first, to bring up the stack, confirm health and readiness, and try demo mode or a stub model.
+- [Configuration](docs/guides/configuration.md): read when setting environment variables; says which are required and the default of each.
+- [Setup](docs/guides/setup.md): read to create a tenant, a tool, an agent, a channel and a contact.
+- [Manifest](docs/guides/manifest.md): read to describe agents, departments, tools and channels in one file and apply it with one call, set secrets, preview with a dry run, change the file and apply again, and take over a tenant set up by hand.
+- [Messaging](docs/guides/messaging.md): read to send messages, poll for replies and send images or voice notes on web chat, to connect WhatsApp through Evolution, and to see what the customer receives when something fails.
+- [Operators](docs/guides/operators.md): read to hand a conversation to a human, read the waiting lines, claim, reply, resume or close, define categories, and build an operator screen.
+- [Project channel](docs/guides/project-channel.md): read to connect a project that has its own inbox and staff: forward messages, receive signed event pushes, read the event feed, hand back to the agent, departments and PDFs.
+- [Agent behaviour](docs/guides/agent-behaviour.md): read to tune instructions, memory, boundaries, sentiment escalation, the handoff message, failure texts and the context window.
+- [API conventions](docs/guides/api-conventions.md): read for authentication headers, the error shape and status codes, request ids, paging and limits.
+- [Operations](docs/guides/operations.md): read to run more than one replica, upgrade, or understand retries, dead letters and shutdown.
+
+## Reference
+
+- [OpenAPI](/openapi.json): machine-readable API of a running instance.
+- [Architecture](docs/ARCHITECTURE.md): how the system works inside.
+- Example manifests, served without authentication at `GET /examples/manifests/{name}.yaml`: [store](examples/manifests/store.yaml) (an order status tool, an external channel), [clinic](examples/manifests/clinic.yaml) and [law-firm](examples/manifests/law-firm.yaml) (no tool).

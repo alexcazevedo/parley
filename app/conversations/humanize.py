@@ -1,7 +1,7 @@
-"""Reply splitting + typing-pace calculation for the humanizer (ticket 14).
+"""Reply splitting + typing-pace calculation for the humanizer.
 
 Pure, stdlib-only module: no I/O, no imports from `app.channels` or
-`app.conversations.turn`. Wired into the outbound send path by ticket 16.
+`app.conversations.turn`. Used by the outbound send path.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from app.config import Settings
 
 # Threshold (chars) both for triggering the sentence-split fallback and for
-# the target chunk size within that fallback — see ticket 14.
+# the target chunk size within that fallback.
 _SENTENCE_FALLBACK_CHARS = 280
 
 _FENCE_RE = re.compile(r"```.*?```", re.DOTALL)

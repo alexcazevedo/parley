@@ -4,15 +4,18 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant, get_db
+from app.api.pagination import DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, set_next_cursor
 from app.memory.service import MemoryService
 from app.models.memory import Memory, MemoryType
 from app.models.tenant import Tenant
+from app.repositories.base import parse_after
+from app.repositories.channels import ChannelsRepository
 from app.repositories.contacts import ContactsRepository
 
 router = APIRouter(prefix="/contacts", tags=["contacts"])
@@ -51,6 +54,10 @@ async def create_contact(
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> ContactOut:
+    if await ChannelsRepository(db).get(tenant.id, payload.channel_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="channel not found"
+        )
     try:
         contact = await _repo(db).create(tenant.id, **payload.model_dump())
         await db.commit()
@@ -66,11 +73,21 @@ async def create_contact(
 
 @router.get("", response_model=list[ContactOut])
 async def list_contacts(
+    response: Response,
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    cursor: str | None = Query(default=None),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> list[ContactOut]:
-    contacts = await _repo(db).list(tenant.id)
-    return [ContactOut.model_validate(c) for c in contacts]
+    after = parse_after(decode_cursor(cursor))
+    rows = await _repo(db).list_page(tenant.id, limit=limit + 1, after=after)
+    more = len(rows) > limit
+    rows = rows[:limit]
+    if more:
+        set_next_cursor(
+            response, {"created_at": rows[-1].created_at.isoformat(), "id": str(rows[-1].id)}
+        )
+    return [ContactOut.model_validate(c) for c in rows]
 
 
 @router.get("/{contact_id}", response_model=ContactOut)
@@ -113,7 +130,7 @@ async def delete_contact(
     await db.commit()
 
 
-# --- Long-term memory CRUD (ticket 07) --------------------------------------
+# --- Long-term memory CRUD --------------------------------------
 
 
 class MemoryCreate(BaseModel):
@@ -175,7 +192,6 @@ async def list_contact_memories(
         memories = await service.search(tenant.id, contact_id, query, limit=limit)
     else:
         memories = await service.get_contact_memories(tenant.id, contact_id, limit=limit)
-    await db.commit()  # persists the `last_accessed_at` bump from a plain listing
     return [MemoryOut.from_model(m) for m in memories]
 
 

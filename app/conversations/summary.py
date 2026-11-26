@@ -2,10 +2,17 @@
 losing older facts as a conversation grows past `agent.context_message_limit`.
 
 Only reads from `messages` and writes to `conversation.summary` /
-`conversation.summary_cursor` — raw messages are never edited or deleted.
-`summary_cursor` (migration 0003) is the *count* of messages already folded
-into `summary`, not a timestamp or id: messages are append-only, so "every
-row at index >= cursor" is always exactly the unsummarized tail.
+`conversation.summary_last_seq` — raw messages are never edited or deleted.
+`summary_last_seq` (migration 0013) is the `messages.seq` of the last message
+folded into `summary`: the unsummarized tail is every message with a higher
+`seq`, whatever clock stamped its `created_at`.
+
+A `seq` value is taken at insert, not at commit, so a message with a lower
+`seq` could become visible after the summary moved past it. Every insert of a
+message (`app.messages.ingest`, the operator message endpoint) and
+`_summarize` therefore lock the conversation row (`SELECT id ... FOR UPDATE`)
+first: once `_summarize` holds the lock, every message with a `seq` taken so
+far is committed and visible, and any later one gets a higher `seq`.
 """
 
 from collections.abc import Sequence
@@ -14,6 +21,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import end_transaction
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage, LLMProvider
 from app.models.agent import Agent
 from app.models.conversation import Conversation
@@ -42,6 +50,12 @@ async def maybe_summarize(
 
     Never raises: callers run this after a turn already produced its reply,
     so a broken summarizer must not cost the user their answer.
+
+    Reads first, then ends the session's transaction
+    (`app.db.end_transaction`) before the model call, then writes (flushed,
+    not committed — the caller commits). No transaction is held while the
+    model runs; rows written before this call are committed by it and no
+    longer roll back with a later failure.
     """
     threshold = agent.summary_threshold or 0
     if threshold <= 0:
@@ -59,30 +73,34 @@ async def _summarize(
     llm: LLMProvider,
     threshold: int,
 ) -> None:
-    total = await session.scalar(
-        select(func.count()).select_from(Message).where(Message.conversation_id == conversation.id)
+    # The lock waits for any insert of a message into this conversation that
+    # is still in flight (see the module docstring); it is released by
+    # `end_transaction` before the model call. The cursor is read under it.
+    last_seq = await session.scalar(
+        select(Conversation.summary_last_seq)
+        .where(Conversation.id == conversation.id)
+        .with_for_update()
     )
-    total = total or 0
-    cursor = conversation.summary_cursor or 0
-    if total - cursor < threshold:
+    after_cursor = Message.conversation_id == conversation.id
+    if last_seq is not None:
+        after_cursor = after_cursor & (Message.seq > last_seq)
+
+    pending = await session.scalar(select(func.count()).select_from(Message).where(after_cursor))
+    if (pending or 0) < threshold:
         return
 
-    result = await session.execute(
-        select(Message)
-        .where(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at, Message.id)
-        .offset(cursor)
-    )
+    result = await session.execute(select(Message).where(after_cursor).order_by(Message.seq))
     new_messages = list(result.scalars().all())
     if not new_messages:
         return
+    covered_seq = new_messages[-1].seq
 
     transcript = _render(new_messages)
     if not transcript:
         # Nothing summarizable in this batch (e.g. all tool-call plumbing):
         # advance the cursor anyway so it does not get stuck re-checking the
         # same non-content messages every turn.
-        conversation.summary_cursor = cursor + len(new_messages)
+        conversation.summary_last_seq = covered_seq
         await session.flush()
         return
 
@@ -95,16 +113,18 @@ async def _summarize(
     # Fixed temperature/max_tokens rather than reusing `agent.temperature`:
     # summarization wants a low-variance, deterministic-ish output regardless
     # of how the agent is tuned for conversation. Shortcut noted per mvp mode.
+    # Reads done, writes not started: no transaction while the model runs.
+    await end_transaction(session)
     response = await llm.complete(prompt, model=agent.model, temperature=0.2, max_tokens=1024)
     summary = (response.content or "").strip()
     if not summary:
         return
 
     conversation.summary = summary
-    conversation.summary_cursor = cursor + len(new_messages)
+    conversation.summary_last_seq = covered_seq
     await session.flush()
     logger.info(
-        "summary.updated", conversation_id=str(conversation.id), cursor=conversation.summary_cursor
+        "summary.updated", conversation_id=str(conversation.id), last_seq=covered_seq
     )
 
 

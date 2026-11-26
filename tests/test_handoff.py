@@ -81,7 +81,7 @@ async def _messages(db_session, conversation_id: uuid.UUID) -> list[Message]:
     result = await db_session.execute(
         select(Message)
         .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at)
+        .order_by(Message.seq)
     )
     return list(result.scalars().all())
 
@@ -96,7 +96,7 @@ class MustNotBeCalledProvider:
 
 
 async def test_handoff_tool_flips_state_sends_message_and_silences_ai(
-    client, fake_redis, db_session
+    client, fake_redis, db_session, fake_handoff_brief
 ):
     headers, channel_id, _ = await _setup(client)
     conversation_id = await _send(client, headers, channel_id, "quero falar com uma pessoa")
@@ -157,7 +157,9 @@ async def test_handoff_tool_flips_state_sends_message_and_silences_ai(
     assert messages_final[-1].content == "alguém aí?"
 
 
-async def test_operator_message_then_resume_brings_ai_back(client, fake_redis, db_session):
+async def test_operator_message_then_resume_brings_ai_back(
+    client, fake_redis, db_session, fake_handoff_brief
+):
     headers, channel_id, _ = await _setup(client)
     conversation_id = await _send(client, headers, channel_id, "oi")
     await _drain_jobs(fake_redis)
@@ -234,7 +236,9 @@ async def test_illegal_transitions_return_409(client, fake_redis, db_session):
     assert resp.status_code == 409
 
 
-async def test_list_conversations_filters_by_state(client, fake_redis, db_session):
+async def test_list_conversations_filters_by_state(
+    client, fake_redis, db_session, fake_handoff_brief
+):
     headers, channel_id, _ = await _setup(client)
     active_id = await _send(client, headers, channel_id, "oi")
     await _drain_jobs(fake_redis)
