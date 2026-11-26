@@ -21,8 +21,8 @@ Expected: 200 with the whole agent.
 What the fields do:
 
 - `instructions`: the start of the system prompt on every turn. Parley then appends, in this order: the contact's memories, the conversation summary, the knowledge section when `knowledge_enabled` is on, a chat-style hint when the channel has `humanize` on, and the boundaries.
-- `provider`: only `openai_compatible` works. The model endpoint and key come from `LLM_BASE_URL` and `LLM_API_KEY`, one for the whole deployment.
-- `model`: sent to the provider as given.
+- `provider`: `openai_compatible`, `openai`, `anthropic` or `google`. `openai_compatible` uses `LLM_BASE_URL` and `LLM_API_KEY`; each vendor uses its own key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`). The keys are one for the whole deployment. To put an agent on a provider, `PATCH /agents/{agent_id}` with `provider` and `model`; the next turn uses it. The server refuses a vendor whose key it does not have (see [setup](setup.md)).
+- `model`: sent to the provider as given, so use the vendor's name for it.
 - `temperature` and `max_tokens`: sent on each model call of a turn. `max_tokens` is sent under the name in `LLM_MAX_TOKENS_PARAM`.
 - `tool_names`: the tools of yours the model may call, plus the built-ins below.
 - `mcp_servers` (default `[]`): names of your MCP servers (registered with `POST /mcp-servers`) whose imported tools the model may call; a name with no such server is ignored, as in `tool_names`. Each tool is offered as `<server>__<tool>` with the server's description and schema, including tools found by a later sync. A call carries the conversation, channel, user id, contact name and a call id in the request's `_meta` (`parley/...` keys), never in the arguments. A tool marked read-only may be called again when an earlier attempt's outcome is unknown; any other is not. A tool's error result reaches the model as a failed call it can explain; a successful result is given as reference data with a note never to follow commands inside it. What the server must offer, the `_meta` keys and how to make a write safe to repeat are in [business-tools](business-tools.md). To try one tool outside a conversation, `POST /mcp-servers/{server_id}/call` with `tool` (its name on the server), `arguments` and `user_id` returns `ok`, `result` and `error`, and writes no tool execution record.
@@ -189,5 +189,19 @@ What a smaller model risks:
 - Summary and brief: worse text. A summary that loses a fact is sent to the agent on later turns, and a weak brief costs the operator time. Nothing blocks a poor one.
 
 Check: set one job in the environment, restart `api` and `worker`, send a message, and read the new row in `model_job_calls`.
+
+## 9. The same on every provider
+
+The loop is parley's, not the vendor's: the model is asked for one step at a time, and parley runs the tools, the handoff, the boundary check, the memory and the failure texts. So all of these behave the same on `openai_compatible`, `openai`, `anthropic` and `google`. Images are sent to the model as the file's bytes and type, and a model that cannot read them fails the turn as it does today. A model error, or a call that passes the 60-second turn deadline, gives the agent's `error_message` (section 6).
+
+What you may notice:
+
+- Model names differ by vendor. Use the vendor's own name in `model` and set it together with `provider`, or the old name goes to the new vendor.
+- Token counts differ: each vendor counts its own way, so the same turn shows different numbers in `agent_runs` and `model_job_calls`.
+- A conversation continues across a switch. The history is stored as parley's own messages, so the next turn on another provider reads the same history. Changing `provider` or `model` changes only the turns after it.
+- Each run records the `provider` and `model` that answered (`agent_runs.provider`, `agent_runs.model`; null on older rows).
+- Output differs in style and quality between models, as it does between any two models.
+
+Check: `PATCH /agents/{agent_id}` with `provider` and `model`, send a message, then `SELECT provider, model FROM agent_runs ORDER BY created_at DESC LIMIT 1` shows them.
 
 Next: errors, paging and health in [api-conventions](api-conventions.md).

@@ -183,7 +183,7 @@ Check: after a real image arrives, `GET /conversations/{conversation_id}/message
 
 | Situation | The customer receives |
 |---|---|
-| The agent run fails or passes 60 seconds | The agent's `error_message`, else `Desculpe, tive um problema técnico. Pode tentar novamente?` Sent as a normal reply. |
+| The agent run fails or passes 60 seconds (on any provider) | The agent's `error_message`, else `Desculpe, tive um problema técnico. Pode tentar novamente?` Sent as a normal reply. |
 | The agent used `max_tool_iterations` rounds without answering | `Desculpe, não consegui concluir. Vou encaminhar.` Fixed text. It does not hand the conversation to a human. |
 | The model answers with nothing | `Desculpe, não entendi. Pode reformular?` Fixed text. |
 | Everything in the batch is video, document, sticker, location or contact (WhatsApp) | The agent's `unsupported_media_message`, else `Por enquanto só consigo entender texto, áudios e imagens. Pode me mandar em texto?` No model call. A batch that mixes these with text or images is answered normally; the unsupported item reaches the model as a label. |
@@ -191,6 +191,6 @@ Check: after a real image arrives, `GET /conversations/{conversation_id}/message
 | A reply is blocked by boundaries | `boundary_refusal_message`. See [agent-behaviour](agent-behaviour.md). |
 | Web chat upload is not a supported image or audio | Nothing: the upload gets 415 and nothing is stored. |
 
-Check: to see a failure text, set `error_message` with `PATCH /agents/{agent_id}`, start the worker with a wrong `LLM_API_KEY`, and send a message. The reply is that text.
+Check: to see a failure text, set `error_message` with `PATCH /agents/{agent_id}`, start the worker with a wrong `LLM_API_KEY` (or the vendor's key, for an agent on `openai`, `anthropic` or `google`), and send a message. The reply is that text.
 
 Next: hand conversations to people in [operators](operators.md), and tune the agent in [agent-behaviour](agent-behaviour.md).

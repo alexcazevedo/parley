@@ -1,7 +1,9 @@
 """Picks the provider for an agent.
 
-Only `openai_compatible` exists (PRODUCT.md: no native Anthropic/Gemini), so
-this is a one-branch dispatch — its job is to be the single place that knows
+`openai_compatible` (the default) is the hand-written provider on
+`LLM_BASE_URL`; `openai`, `anthropic` and `google` go through Pydantic AI
+(`app.llm.providers.native`, imported only for those, so an
+`openai_compatible` agent never loads it). This is the single place that knows
 how `Settings` credentials turn into a live provider.
 """
 
@@ -11,6 +13,9 @@ from app.llm.providers.openai_compatible import OpenAICompatibleProvider
 from app.models.agent import Agent
 
 PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
+# Mirrors `app.llm.providers.native.NATIVE_PROVIDERS`, kept here so the
+# dispatch needs no import of that module for the default path.
+_NATIVE = ("openai", "anthropic", "google")
 
 
 def resolve_model(agent: Agent, settings: Settings | None = None) -> str:
@@ -22,6 +27,12 @@ def resolve_model(agent: Agent, settings: Settings | None = None) -> str:
 def get_provider(agent: Agent, settings: Settings | None = None) -> LLMProvider:
     settings = settings or get_settings()
     provider = agent.provider or PROVIDER_OPENAI_COMPATIBLE
+    if provider in _NATIVE:
+        from app.llm.providers.native import NativeProvider, has_credentials, key_setting
+
+        if not has_credentials(provider, settings):
+            raise ValueError(f"LLM provider {provider!r} needs {key_setting(provider)}")
+        return NativeProvider(provider, settings)
     if provider != PROVIDER_OPENAI_COMPATIBLE:
         raise ValueError(f"unsupported LLM provider {provider!r}")
     return OpenAICompatibleProvider(

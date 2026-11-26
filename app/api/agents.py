@@ -17,6 +17,8 @@ from app.repositories.base import parse_after
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
+UNKNOWN_PROVIDER = "unknown provider: use openai_compatible, openai, anthropic or google"
+
 
 def _strip_never_item(value: str) -> str:
     value = value.strip()
@@ -122,6 +124,29 @@ def _repo(db: AsyncSession) -> AgentsRepository:
     return AgentsRepository(db)
 
 
+def provider_problem(provider: str) -> str | None:
+    """Why this server cannot serve `provider`, or None (shared with the manifest).
+
+    The text names a setting, never its value.
+    """
+    from app.llm.providers.native import NATIVE_PROVIDERS, has_credentials, key_setting
+
+    if provider == "openai_compatible":
+        return None
+    if provider not in NATIVE_PROVIDERS:
+        return UNKNOWN_PROVIDER
+    if not has_credentials(provider):
+        setting = key_setting(provider)
+        return f"provider '{provider}' is not configured on this server: {setting} is not set"
+    return None
+
+
+def _check_provider(provider: str | None) -> None:
+    problem = provider_problem(provider) if provider is not None else None
+    if problem:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=problem)
+
+
 def agent_values(payload: AgentCreate) -> dict[str, Any]:
     """The column values of a new agent (shared with `app/manifest/apply.py`).
 
@@ -139,6 +164,7 @@ async def create_agent(
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> AgentOut:
+    _check_provider(payload.provider)
     agent = await _repo(db).create(tenant.id, **agent_values(payload))
     await db.commit()
     await db.refresh(agent)
@@ -184,6 +210,7 @@ async def update_agent(
     db: AsyncSession = Depends(get_db),
 ) -> AgentOut:
     changes = payload.model_dump(exclude_unset=True)
+    _check_provider(changes.get("provider"))
     # Non-nullable columns: an explicit null means "leave as is".
     for key in (
         "boundary_never",

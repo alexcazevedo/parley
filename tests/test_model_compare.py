@@ -1,5 +1,9 @@
 """The compare command (`app/llm/compare.py`): stored replies replayed through the
-boundary check on a candidate model. Providers and the decision model are fakes."""
+boundary check on a candidate model. The chat model and the decision model are fakes.
+
+An `llm:` candidate gets the typed check (`app.llm.decisions`), as the boundary
+job does; these tests were updated from the text form (`ALLOW` / `BLOCK: ...`)
+when `llm:` decisions became typed."""
 
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -7,13 +11,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 
-import app.llm.compare as compare_module
-from app.llm.base import LLMResponse
+import app.llm.decisions as decisions_module
 from app.llm.compare import CompareError, compare_boundary, parse_target, run
 from app.llm.jobs import JobTarget
-from app.llm.providers.fake import FakeLLMProvider
 from app.models.agent_run import AgentRun, AgentRunStatus
 from app.models.model_job_call import ModelJobCall
+from tests import native_fakes
 from tests.decision_fakes import decision_model  # noqa: F401
 from tests.test_model_jobs import BOUNDED, _conversation, _setup, job_env  # noqa: F401
 
@@ -45,10 +48,41 @@ async def _add_run(db_session, conversation, age, *, reply="resposta", blocked=N
     return run
 
 
+# The typed answers for what the text form answered: `ALLOW`, `BLOCK: <rule>`
+# (BOUNDED's one never item is `never_1`), and an answer that never validates.
+ALLOW = {"allowed": True, "broken": "none"}
+BLOCK = {"allowed": False, "broken": "never_1"}
+INVALID = "invalid"
+
+
+class _Scripted:
+    """The candidate chat model's script, read back like the old provider fake."""
+
+    def __init__(self, script: native_fakes.NativeScript) -> None:
+        self._script = script
+
+    @property
+    def calls(self) -> list[dict]:
+        return [{"model": r.model, "messages": r.messages} for r in self._script.requests]
+
+    @property
+    def call_count(self) -> int:
+        return len(self._script.requests)
+
+
 def _scripted(monkeypatch, *answers):
-    provider = FakeLLMProvider([LLMResponse(content=a) for a in answers])
-    monkeypatch.setattr(compare_module, "get_provider", lambda agent, settings=None: provider)
-    return provider
+    script = native_fakes.NativeScript()
+    for answer in answers:
+        if answer == INVALID:
+            script.reply("talvez").reply("talvez")  # the first try and its one retry
+        else:
+            script.call("final_result", answer)
+    monkeypatch.setattr(
+        decisions_module,
+        "build_chat_model",
+        lambda target, settings=None: script.build(target.kind, target.model),
+    )
+    return _Scripted(script)
 
 
 async def test_only_disagreements_are_printed(client, db_session, test_engine, monkeypatch):
@@ -60,7 +94,7 @@ async def test_only_disagreements_are_printed(client, db_session, test_engine, m
     allowed_now_blocked = await _add_run(db_session, conversation, 3, reply="Tome dipirona.")
     blocked_agree = await _add_run(db_session, conversation, 4, blocked="y", reason="r")
     # Newest first: 1, 2, 3, 4.
-    provider = _scripted(monkeypatch, "ALLOW", "ALLOW", "BLOCK: dar conselho médico", "BLOCK: r")
+    provider = _scripted(monkeypatch, ALLOW, ALLOW, BLOCK, BLOCK)
 
     result = await compare_boundary(test_engine, conversation.tenant_id, LLM)
 
@@ -85,7 +119,7 @@ async def test_failure_runs_and_other_statuses_are_not_judged(
     await _add_run(db_session, conversation, 2, blocked="b", reason="check_unparseable")
     await _add_run(db_session, conversation, 3, status=AgentRunStatus.ERROR)
     await _add_run(db_session, conversation, 4)
-    provider = _scripted(monkeypatch, "ALLOW")
+    provider = _scripted(monkeypatch, ALLOW)
 
     result = await compare_boundary(test_engine, conversation.tenant_id, LLM)
 
@@ -98,7 +132,7 @@ async def test_candidate_failure_is_skipped_not_a_disagreement(
 ):
     conversation = await _tenant(client, db_session, **BOUNDED)
     await _add_run(db_session, conversation, 1)
-    _scripted(monkeypatch, "talvez")
+    _scripted(monkeypatch, INVALID)
 
     result = await compare_boundary(test_engine, conversation.tenant_id, LLM)
 
@@ -111,7 +145,7 @@ async def test_limit_and_agents_without_boundaries(client, db_session, test_engi
     for age in (1, 2, 3):
         await _add_run(db_session, bounded, age)
     await _add_run(db_session, plain, 4)
-    provider = _scripted(monkeypatch, "ALLOW", "ALLOW")
+    provider = _scripted(monkeypatch, ALLOW, ALLOW)
 
     result = await compare_boundary(test_engine, bounded.tenant_id, LLM, limit=2)
     assert result.compared == 2 and provider.call_count == 2
@@ -125,7 +159,7 @@ async def test_another_tenants_runs_are_never_read(client, db_session, test_engi
     theirs = await _tenant(client, db_session, name="Theirs", **BOUNDED)
     await _add_run(db_session, mine, 1, reply="minha resposta")
     await _add_run(db_session, theirs, 2, reply="resposta alheia")
-    provider = _scripted(monkeypatch, "ALLOW")
+    provider = _scripted(monkeypatch, ALLOW)
 
     result = await compare_boundary(test_engine, mine.tenant_id, LLM)
 
@@ -136,7 +170,7 @@ async def test_another_tenants_runs_are_never_read(client, db_session, test_engi
 async def test_nothing_is_written(client, db_session, test_engine, monkeypatch):
     conversation = await _tenant(client, db_session, **BOUNDED)
     run_row = await _add_run(db_session, conversation, 1, blocked="x", reason="r")
-    _scripted(monkeypatch, "ALLOW")
+    _scripted(monkeypatch, ALLOW)
 
     async def counts():
         runs = await db_session.scalar(select(func.count()).select_from(AgentRun))
@@ -190,7 +224,7 @@ async def test_run_prints_header_lines_and_summary(
     conversation = await _tenant(client, db_session, **BOUNDED)
     await _add_run(db_session, conversation, 1, blocked="x", reason="r")
     await _add_run(db_session, conversation, 2)
-    _scripted(monkeypatch, "ALLOW", "ALLOW")
+    _scripted(monkeypatch, ALLOW, ALLOW)
 
     code = await run(
         ["--tenant", str(conversation.tenant_id), "--model", "llm:cand-model"], test_engine

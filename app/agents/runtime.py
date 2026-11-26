@@ -53,8 +53,9 @@ from app.config import Settings, get_settings
 from app.db import end_transaction
 from app.llm.base import ROLE_ASSISTANT, ROLE_TOOL, ROLE_USER, LLMMessage, LLMProvider, ToolCall
 from app.llm.decisions import HandOver, decide_boundary, target_label
-from app.llm.factory import get_provider, resolve_model
+from app.llm.factory import PROVIDER_OPENAI_COMPATIBLE, get_provider, resolve_model
 from app.llm.jobs import (
+    TYPED_KINDS,
     CallTimer,
     Job,
     JobTarget,
@@ -226,6 +227,8 @@ class AgentRuntime:
     ) -> str:
         provider = self._provider or get_provider(agent, self._settings)
         model = resolve_model(agent, self._settings)
+        run.provider = agent.provider or PROVIDER_OPENAI_COMPATIBLE
+        run.model = model
         tool_specs = await self._registry.specs(agent, session)
         memories = await self._load_memories(session, agent, conversation)
         history = await self._recent_messages(session, agent, conversation)
@@ -373,7 +376,7 @@ class AgentRuntime:
         check_model = job_model(Job.BOUNDARY_CHECK, agent, self._settings)
         called = CallTimer()
         try:
-            if target.kind == "typesafe":
+            if target.kind in TYPED_KINDS:
                 check = self._decide_check(
                     provider, target, check_model, boundaries, input_text, reply
                 )
@@ -388,7 +391,7 @@ class AgentRuntime:
             verdict = await asyncio.wait_for(check, timeout=_time_left(deadline))
         except Exception as exc:
             # The turn's deadline cut the check off: recorded, then the turn fails.
-            recorded = target_label(target) if target.kind == "typesafe" else check_model
+            recorded = target_label(target) if target.kind in TYPED_KINDS else check_model
             await self._record_check(
                 session, conversation, run, recorded, failure_outcome(exc), called.elapsed_ms()
             )
@@ -428,9 +431,10 @@ class AgentRuntime:
         user_text: str,
         reply: str,
     ) -> Verdict:
-        """The check on the decision model; what it cannot take goes to `check_model`
-        through today's text path. One timeout covers both. Never raises: an error
-        or a timeout blocks with `check_failed`, and is not handed over."""
+        """The typed check (a decision model or a chat model); what a decision model
+        cannot take goes to `check_model` through today's text path (a chat model
+        hands nothing over). One timeout covers both. Never raises: an error or a
+        timeout blocks with `check_failed`, and is not handed over."""
         label = target_label(target)
         called = CallTimer()
         try:

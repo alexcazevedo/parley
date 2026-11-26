@@ -35,22 +35,25 @@ You must also set `LLM_API_KEY` for any real model call. It is not checked at st
 
 ## Model
 
-Parley calls any OpenAI-compatible chat-completions endpoint.
+An agent's `provider` picks the path. `openai_compatible` (the default) calls any OpenAI-compatible chat-completions endpoint, and uses the first four settings below, which belong to it alone. `openai`, `anthropic` and `google` call that vendor's own API and use the vendor's key setting. Every agent already stored keeps working on `openai_compatible` with nothing changed.
 
 - `LLM_BASE_URL`: base URL of the provider. Default: `https://api.openai.com/v1`. Change it for another provider or a local server.
 - `LLM_API_KEY`: key for the provider. Default: the placeholder `changeme-llm-key`. Set your real key.
 - `LLM_MODEL`: default model name. Default: `gpt-4o-mini`. Change it to the model you use.
 - `LLM_MAX_TOKENS_PARAM`: name of the token-limit field sent to the model. Default: `max_tokens`. Set `max_completion_tokens` for models that reject `max_tokens`. It applies to the whole deployment.
-- `HTTP_RETRY_ATTEMPTS`: tries for a model call, a speech-to-text call or a GET tool call that gets 429 or 5xx. The first try counts. Default: `3`. Minimum 1. Set `1` to turn retries off.
+- `OPENAI_API_KEY`: key for an agent whose `provider` is `openai` (OpenAI's own API; `LLM_BASE_URL` does not apply). Default: empty, so that provider is unavailable.
+- `ANTHROPIC_API_KEY`: key for an agent whose `provider` is `anthropic`. Default: empty.
+- `GOOGLE_API_KEY`: key for an agent whose `provider` is `google` (the Gemini API). Default: empty.
+- `HTTP_RETRY_ATTEMPTS`: tries for a model call, a speech-to-text call or a GET tool call that gets 429 or 5xx. The first try counts. Default: `3`. Minimum 1. Set `1` to turn retries off. On `openai`, `anthropic` and `google` the vendor's own client does the retrying, with the same count.
 - `HTTP_RETRY_BASE_SECONDS`: first wait between tries. It doubles each time. A numeric `Retry-After` header replaces it. Default: `0.5`.
 - `HTTP_RETRY_MAX_WAIT_SECONDS`: longest single wait. Default: `10.0`.
 
 ### A model per job
 
-Besides the reply, a turn can make five more model calls ("jobs"). Each has a setting, the same for every tenant. Empty (the default) runs the job on the agent's own model, as before. `llm:<model>` runs it on that chat model at `LLM_BASE_URL` with `LLM_API_KEY`, with the same prompt. `typesafe:<model>` runs a decision job on TypeSafe's decision model and needs `TYPESAFE_API_KEY`. Any other value, `typesafe:` without the key, or `typesafe:` on a job that writes text stops the API and the worker at start, with a message naming the setting. Every job call is recorded in `model_job_calls` with the model that served it, its token use, latency and outcome.
+Besides the reply, a turn can make five more model calls ("jobs"). Each has a setting, the same for every tenant. Empty (the default) runs the job on the agent's own model with its text prompt, as before, whatever the agent's `provider`. `llm:<model>` runs it on that chat model at `LLM_BASE_URL` with `LLM_API_KEY`. `openai:<model>`, `anthropic:<model>` and `google:<model>` run it on that vendor's own API and need `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GOOGLE_API_KEY`. `typesafe:<model>` runs a decision job on TypeSafe's decision model and needs `TYPESAFE_API_KEY`. On any of these a decision job gets a typed answer (a yes or no, a level, a pick); on a chat model an answer that does not fit is asked for once more, then counts as unusable: the reply is blocked with `check_unparseable`, the sentiment has no score, the department does not change. A writing job on a chat model writes text with its usual prompt. Any other value, a vendor form or `typesafe:` without its key, or `typesafe:` on a job that writes text stops the API and the worker at start, with a message naming the setting. Every job call is recorded in `model_job_calls` with the model that served it (as written in the setting, such as `openai:gpt-4o-mini`; a writing job on `llm:` records the bare model name), its token use, latency and outcome.
 
 - `BOUNDARY_CHECK_MODEL`: the reply check against boundaries (a decision). Default: empty.
-- `BOUNDARY_CHECK_ALLOW_THRESHOLD`: on a decision model, how likely "allowed" must be for a reply to go out, from 0 to 1. Higher is stricter: more replies are blocked. Default: `0.5`. It applies only to the boundary check on `typesafe:`; a chat model answers `ALLOW` or `BLOCK` and ignores it. A value outside 0 to 1 stops the API and the worker at start. A blocked reply records the rule the model picked, or `no_rule_identified` when it picked none.
+- `BOUNDARY_CHECK_ALLOW_THRESHOLD`: on a decision model, how likely "allowed" must be for a reply to go out, from 0 to 1. Higher is stricter: more replies are blocked. Default: `0.5`. It applies only to the boundary check on `typesafe:`; a chat model answers yes or no and ignores it. A value outside 0 to 1 stops the API and the worker at start. A blocked reply records the rule the model picked, or `no_rule_identified` when it picked none.
 - `SENTIMENT_MODEL`: the frustration score (a decision). Default: empty.
 - `CATEGORY_MODEL`: the category classifier (a decision). Default: empty.
 - `SUMMARY_MODEL`: the rolling summary (writes text; `typesafe:` is refused). Default: empty.
@@ -63,7 +66,7 @@ What a job sends to TypeSafe, when it is set to `typesafe:<model>` (the key is s
 - `SENTIMENT_MODEL`: the conversation text the sentiment check reads, both the customer's and the agent's side: the last 10 messages and the new ones (see [agent behaviour](agent-behaviour.md) section 4).
 - `CATEGORY_MODEL`: the same kind of conversation text, and the name and description of each of the tenant's departments (categories).
 
-Nothing is sent to TypeSafe unless `TYPESAFE_API_KEY` is set and a job is set to `typesafe:`. `llm:` values and the two writing jobs go only to your `LLM_BASE_URL` endpoint. A call the decision model cannot take is handed to the agent's model, so conversation text goes there as it does today; see [agent behaviour](agent-behaviour.md) section 8.
+Nothing is sent to TypeSafe unless `TYPESAFE_API_KEY` is set and a job is set to `typesafe:`. `llm:` values go only to your `LLM_BASE_URL` endpoint, and `openai:`, `anthropic:` and `google:` values only to that vendor, with the same text. A call the decision model cannot take is handed to the agent's model, so conversation text goes there as it does today; see [agent behaviour](agent-behaviour.md) section 8.
 
 ## Speech-to-text and vision
 

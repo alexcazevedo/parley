@@ -1080,6 +1080,10 @@ def test_the_manifest_guide_names_every_problem_the_code_can_give():
     ):
         assert template in text, template
     assert "secret 'orders_token' is not set" in text
+    from app.api.agents import UNKNOWN_PROVIDER
+
+    assert UNKNOWN_PROVIDER in text
+    assert "provider 'openai' is not configured on this server: OPENAI_API_KEY is not set" in text
     assert "is the agent of channel 'Project inbox'; delete the channel or bind it" in text
 
 

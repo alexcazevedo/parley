@@ -32,10 +32,11 @@ app/
                    tool-call loop, one AgentRun per turn), boundaries.py,
                    sentiment.py, categorize.py, loading.py (tenant-scoped lookup).
   llm/            base.py (provider-agnostic types), factory.py (Settings ->
-                   provider), providers/ (openai_compatible.py is the only wire
-                   format; fake.py is a scripted provider for tests and demos),
-                   jobs.py (a model per job), decisions.py (TypeSafe; the only
-                   pydantic_ai import), compare.py (boundary replay command).
+                   provider), providers/ (openai_compatible.py: hand-written
+                   wire; native.py: openai, anthropic, google via Pydantic AI;
+                   fake.py: scripted, for tests), jobs.py (a model per job),
+                   decisions.py (typed answers; with native.py the only
+                   pydantic_ai imports), compare.py (boundary replay command).
   tools/          base.py (ToolExecutor, ToolResult, ToolContext), registry.py,
                    builtin.py (remember, handoff_to_human, search_knowledge), http.py (the tenant's
                    HTTP tools), mcp.py (imported MCP tools), context.py (who a call
@@ -343,6 +344,11 @@ are never cancelled halfway (HTTP tools carry their own timeout), so a timed-out
 turn leaves the session usable. The runtime exposes `llm_provider(agent)` so the
 rolling summary uses the same, possibly scripted, provider as the turn.
 
+Two provider paths, picked by `agent.provider` in `get_provider`: `openai_compatible`
+(default; hand-written, `LLM_BASE_URL`, `send_with_retry`) and `NativeProvider` for
+`openai`, `anthropic`, `google`: one `pydantic_ai.direct.model_request` per `complete`,
+retries left to the vendor client; a missing key is refused when the agent is saved.
+
 ### A turn is a series of short transactions
 
 A turn does not hold a database transaction across slow work. Before every model
@@ -396,14 +402,13 @@ a finished row (the newest) wins over a `STARTED` one.
 ### The shared HTTP client
 
 `app/http_client.py` holds one `httpx.AsyncClient` per process, created on first
-use (`shared_client()`). The model provider, speech-to-text, the Evolution
-adapter and the HTTP tools use it, each passing its own timeout per request;
-redirects stay off. The API lifespan and the worker's `_close_connections` close
-it through `close_shared_client()`; the provider's own `aclose` does not.
-`app/http_retry.py` adds the short retry on 429/5xx for model calls,
-speech-to-text and GET tools (`send_with_retry`); a GET tool repeats its SSRF
-check before every try. Timeouts and connection errors are not retried at this
-level.
+use (`shared_client()`). The `openai_compatible` provider, speech-to-text, the
+Evolution adapter and the HTTP tools use it with their own timeouts; redirects stay
+off. The API lifespan and the worker's `_close_connections` close it through
+`close_shared_client()`. `app/http_retry.py` adds the short retry on 429/5xx for
+those model calls, speech-to-text and GET tools (`send_with_retry`); a GET tool
+repeats its SSRF check before every try. Timeouts and connection errors are not
+retried.
 
 ### Tenant-scoped agent loading
 
@@ -858,8 +863,8 @@ app would use; usage of those endpoints is in `docs/guides/operators.md`.
   release button (`/release`); one claimed by someone else shows who has it, and an
   unclaimed one an **Atender** button. Every handoff has a category selector
   (`PUT .../category`). An active conversation has **Assumir**, which calls
-  `POST .../handoff` and then claims it. That only the claimant can reply is the
-  page's rule; the API does not require a claim.
+  `POST .../handoff` and then claims it. Only the claimant can reply is the page's
+  rule; the API does not require a claim.
 - **Not there**: operator accounts, notifications, unread counters, category
   administration, and run, tool or sentiment views.
 
@@ -884,25 +889,22 @@ The binding functions return tokens and the `finally` blocks restore by token
 (`reset_contextvars`), never `clear_contextvars`: a key already bound before the turn
 comes back with its old value, one that was not is removed. The reset never raises,
 so it cannot hide the turn's outcome. The scheduler runs each turn as its own
-asyncio task, which works on a copy of the context made when it is created, so a key
-bound inside one turn is invisible to the scheduler loop and to other turns; the
-`finally` blocks cover a turn run directly in the caller's context, as tests do.
+asyncio task on a copy of the context, so a key bound in one turn is invisible to
+the loop and to other turns; the `finally` blocks cover a turn run directly in the
+caller's context, as tests do.
 
-`X-Request-ID` is kept only when the whole value matches `^[A-Za-z0-9._-]{1,64}$`;
-otherwise the middleware generates a UUID. The rejected value is neither logged nor
-echoed.
+`X-Request-ID` is kept only when it matches `^[A-Za-z0-9._-]{1,64}$`; otherwise a
+UUID is generated, and the rejected value is neither logged nor echoed.
 
 ## Start order
 
 `docker-compose.yml` starts `postgres` and `redis` (health-checked), then `migrate`
-(the same image, `uv run alembic upgrade head`, `restart: "no"`), then `api` and
-`worker`, each waiting for `postgres` and `redis` (healthy), `migrate`
-(`service_completed_successfully`) and `mock-tools` (started). If `migrate` fails
-neither starts. The API does not migrate at start, so any number of replicas can
-start without racing on the schema. `docker-compose.dev.yml` only adds the host
-ports of `postgres` and `redis`; `docker-compose.stub.yml` adds a stub model
-server. Stack notes (replicas, the non-root image user and media volume) are in
-`docs/guides/operations.md`.
+(`uv run alembic upgrade head`, `restart: "no"`), then `api` and `worker`, each
+waiting for `postgres` and `redis` (healthy), `migrate` (completed) and `mock-tools`
+(started). If `migrate` fails neither starts. The API does not migrate at start, so replicas can start without
+racing on the schema. `docker-compose.dev.yml` only adds the host ports of
+`postgres` and `redis`; `docker-compose.stub.yml` adds a stub model server. Stack
+notes are in `docs/guides/operations.md`.
 
 ## Checks
 
@@ -910,20 +912,18 @@ server. Stack notes (replicas, the non-root image user and media volume) are in
 that order; `make test` starts the Postgres container first when nothing listens on
 its port. `.github/workflows/ci.yml` runs the same three on every push against a
 Postgres 16 service, with no Redis service: the tests use `fakeredis`. `/ready`
-(database and Redis only) is tested with fakes that fail on purpose
-(`tests/test_ready.py`).
+is tested with fakes that fail on purpose (`tests/test_ready.py`).
 
 mypy checks `app/` only. `app.security`, `app.queue` and `app.conversations` are
-strict because a type mistake costs most there: secrets, the job queue, and the
-debounce, lock and turn logic. The flags are spelled out per module in
-`pyproject.toml` because `strict = true` in an override applied to every module.
+strict because a type mistake costs most there. The flags are spelled out per module
+in `pyproject.toml` because `strict = true` in an override applied to every module.
 
 ## Extension points
 
 - **New channel**: implement `ChannelAdapter` (`app/channels/base.py`), register it in
   `app/channels/registry.py` and add a webhook route if it is push-based.
-- **New LLM provider**: a new branch in `app/llm/factory.py::get_provider` (the one
-  dispatch point) and a class implementing `LLMProvider.complete`.
+- **New LLM provider**: a branch in `app/llm/factory.py::get_provider` and a class
+  implementing `LLMProvider.complete`; a Pydantic AI vendor is an entry in `native.py`.
 - **New built-in tool**: add a `(ToolSpec, agent-flag)` pair to `BUILTIN_TOOLS` and a
   handler to `_HANDLERS` in `app/tools/builtin.py`; no registry or runtime change.
 - **Semantic memory**: `MemoryService.search` is the seam: swap the `ILIKE` for a

@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -49,6 +49,9 @@ class AgentRun(Base, TenantScoped):
     # `output_text` then holds the refusal that went out instead.
     boundary_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     blocked_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The provider and model that answered (null on rows before they were recorded).
+    provider: Mapped[str | None] = mapped_column(String, nullable=True)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
     # Ids (strings) of the inbound messages this run answers.
     input_message_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

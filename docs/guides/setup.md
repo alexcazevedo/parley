@@ -90,8 +90,8 @@ Check: `curl -s $BASE_URL/tools -H "X-API-Key: $TENANT_KEY"` lists it, and the r
 |---|---|---|---|
 | `name` | required | 1 to 255 characters | Label for the agent. |
 | `instructions` | required | none | System prompt. |
-| `provider` | `openai_compatible` | up to 50 characters | The only provider that works is `openai_compatible`; any other value fails when a turn runs, not at creation. |
-| `model` | required | 1 to 255 characters | Model name sent to the provider, for example `gpt-4o-mini`. |
+| `provider` | `openai_compatible` | up to 50 characters | One of `openai_compatible` (the server at `LLM_BASE_URL`, with `LLM_API_KEY`), `openai` (needs `OPENAI_API_KEY`), `anthropic` (needs `ANTHROPIC_API_KEY`) or `google` (needs `GOOGLE_API_KEY`). Any other value, or a native provider whose key is not set on the server, is refused with 422 naming the problem: `unknown provider: use openai_compatible, openai, anthropic or google`, or `provider 'anthropic' is not configured on this server: ANTHROPIC_API_KEY is not set`. An agent already stored with a provider the server no longer serves is left as it is until a turn runs. |
+| `model` | required | 1 to 255 characters | Model name sent to the provider, in that vendor's own naming, for example `gpt-4o-mini`. |
 | `temperature` | `0.7` | 0 to 2 | Sampling temperature. |
 | `max_tokens` | `1024` | 1 to 32768 | Longest model reply. |
 | `max_tool_iterations` | `5` | 1 to 20 | Most model calls in one turn; each may call tools. |
