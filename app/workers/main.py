@@ -54,6 +54,7 @@ from app.db import async_session_maker
 from app.events.delivery import SessionFactory, deliver_due
 from app.http_client import close_shared_client, shared_client
 from app.knowledge.ingest import process_due
+from app.llm.jobs import validate_job_settings
 from app.mcp.sync import sync_due
 from app.observability.logging import configure_logging
 from app.queue.base import Job, Queue
@@ -288,6 +289,7 @@ async def main() -> None:
     settings = get_settings()
     assert_secure_settings(settings)
     load_floor(settings.boundary_floor_file)
+    validate_job_settings(settings)
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     queue = RedisQueue(redis)
 

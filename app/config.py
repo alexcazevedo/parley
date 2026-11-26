@@ -123,6 +123,20 @@ class Settings(BaseSettings):
     # MCP servers (see app/mcp/sync.py): the worker discovers a server's tools
     # again once its last discovery is this old.
     mcp_sync_interval_seconds: float = Field(default=300.0, gt=0)
+    # A model per auxiliary job (see app/llm/jobs.py): empty = the agent's own
+    # model; `llm:<model>` = that model on LLM_BASE_URL; `typesafe:<model>` =
+    # TypeSafe's decision model (decision jobs only, needs TYPESAFE_API_KEY).
+    # Checked at start by `validate_job_settings`.
+    boundary_check_model: str = ""
+    # The probability of "allowed" a reply needs to go out when the boundary
+    # check runs on a decision model; higher is stricter. Passed as Pydantic
+    # AI's `decision_boolean_threshold` (see app/llm/decisions.py).
+    boundary_check_allow_threshold: float = Field(default=0.5, ge=0, le=1)
+    sentiment_model: str = ""
+    category_model: str = ""
+    summary_model: str = ""
+    handoff_brief_model: str = ""
+    typesafe_api_key: str = ""
 
 
 class InsecureSettingsError(RuntimeError):

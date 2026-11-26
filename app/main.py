@@ -32,6 +32,7 @@ from app.api import (
 from app.api.errors import add_exception_handlers
 from app.config import Settings, assert_secure_settings, get_settings
 from app.http_client import close_shared_client
+from app.llm.jobs import validate_job_settings
 from app.observability.logging import configure_logging, request_id_middleware
 
 configure_logging()
@@ -52,6 +53,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings if settings is not None else get_settings()
     assert_secure_settings(settings)
     load_floor(settings.boundary_floor_file)
+    validate_job_settings(settings)
 
     app = FastAPI(title="Parley", lifespan=_lifespan)
 

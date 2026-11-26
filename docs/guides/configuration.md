@@ -45,6 +45,26 @@ Parley calls any OpenAI-compatible chat-completions endpoint.
 - `HTTP_RETRY_BASE_SECONDS`: first wait between tries. It doubles each time. A numeric `Retry-After` header replaces it. Default: `0.5`.
 - `HTTP_RETRY_MAX_WAIT_SECONDS`: longest single wait. Default: `10.0`.
 
+### A model per job
+
+Besides the reply, a turn can make five more model calls ("jobs"). Each has a setting, the same for every tenant. Empty (the default) runs the job on the agent's own model, as before. `llm:<model>` runs it on that chat model at `LLM_BASE_URL` with `LLM_API_KEY`, with the same prompt. `typesafe:<model>` runs a decision job on TypeSafe's decision model and needs `TYPESAFE_API_KEY`. Any other value, `typesafe:` without the key, or `typesafe:` on a job that writes text stops the API and the worker at start, with a message naming the setting. Every job call is recorded in `model_job_calls` with the model that served it, its token use, latency and outcome.
+
+- `BOUNDARY_CHECK_MODEL`: the reply check against boundaries (a decision). Default: empty.
+- `BOUNDARY_CHECK_ALLOW_THRESHOLD`: on a decision model, how likely "allowed" must be for a reply to go out, from 0 to 1. Higher is stricter: more replies are blocked. Default: `0.5`. It applies only to the boundary check on `typesafe:`; a chat model answers `ALLOW` or `BLOCK` and ignores it. A value outside 0 to 1 stops the API and the worker at start. A blocked reply records the rule the model picked, or `no_rule_identified` when it picked none.
+- `SENTIMENT_MODEL`: the frustration score (a decision). Default: empty.
+- `CATEGORY_MODEL`: the category classifier (a decision). Default: empty.
+- `SUMMARY_MODEL`: the rolling summary (writes text; `typesafe:` is refused). Default: empty.
+- `HANDOFF_BRIEF_MODEL`: the brief for the operator at handoff (writes text; `typesafe:` is refused). Default: empty.
+- `TYPESAFE_API_KEY`: key for TypeSafe's decision model. Required when any job is set to `typesafe:`. Default: empty.
+
+What a job sends to TypeSafe, when it is set to `typesafe:<model>` (the key is sent to TypeSafe too). TypeSafe is a second vendor, besides your `LLM_BASE_URL` endpoint, and it receives conversation text:
+
+- `BOUNDARY_CHECK_MODEL`: the customer's message and the agent's reply, and the agent's rules: its `boundary_scope` and `boundary_never` items, with the deployment floor's added.
+- `SENTIMENT_MODEL`: the conversation text the sentiment check reads, both the customer's and the agent's side: the last 10 messages and the new ones (see [agent behaviour](agent-behaviour.md) section 4).
+- `CATEGORY_MODEL`: the same kind of conversation text, and the name and description of each of the tenant's departments (categories).
+
+Nothing is sent to TypeSafe unless `TYPESAFE_API_KEY` is set and a job is set to `typesafe:`. `llm:` values and the two writing jobs go only to your `LLM_BASE_URL` endpoint. A call the decision model cannot take is handed to the agent's model, so conversation text goes there as it does today; see [agent behaviour](agent-behaviour.md) section 8.
+
 ## Speech-to-text and vision
 
 - `STT_BASE_URL`: base URL for voice-note transcription. Default: unset, so `LLM_BASE_URL` is used. Set it to use a different transcription backend.

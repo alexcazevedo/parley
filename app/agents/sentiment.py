@@ -17,13 +17,25 @@ import uuid
 from collections.abc import Sequence
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import end_transaction
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage
-from app.llm.factory import get_provider, resolve_model
+from app.llm.decisions import DecisionUsage, HandOver, decide_sentiment, target_label
+from app.llm.factory import get_provider
+from app.llm.jobs import (
+    OUTCOME_OK,
+    OUTCOME_UNUSABLE,
+    CallTimer,
+    Job,
+    failure_outcome,
+    job_model,
+    job_target,
+    record_job_call,
+    usage_of,
+)
 from app.models.agent import Agent
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole
@@ -71,21 +83,105 @@ async def score_frustration(
     the history, because `input_text` already carries them (rendered) once.
     """
     settings = get_settings()
+    tenant_id, conversation_id = conversation.tenant_id, conversation.id
+    called: CallTimer | None = None
+    handed_over = False
     try:
         messages = await _recent_messages(session, conversation, message_ids)
         prompt = _build_prompt(messages, input_text)
         provider = get_provider(agent)
-        model = resolve_model(agent)
-        # No transaction open during the model call; the timeout wraps only it.
+        model = job_model(Job.SENTIMENT, agent, settings)
+        target = job_target(Job.SENTIMENT, settings)
+        recorded = model
+        images = 0
+        if target.kind == "typesafe":
+            recorded = target_label(target)
+            images = await evidence_images(session, conversation, messages, message_ids)
+        # No transaction open during the model call; the timeout wraps only it
+        # (on the decision path, the decision and any hand-over together).
         await end_transaction(session)
-        response = await asyncio.wait_for(
-            provider.complete(prompt, model=model, temperature=0.0, max_tokens=16),
-            timeout=settings.sentiment_timeout_seconds,
-        )
-        return _parse_score(response.content)
-    except Exception:
-        logger.warning("sentiment.classify_failed", conversation_id=str(conversation.id))
+        called = CallTimer()
+        if target.kind == "typesafe":
+            usage = DecisionUsage()
+            async with asyncio.timeout(settings.sentiment_timeout_seconds):
+                try:
+                    score = await decide_sentiment(
+                        target, evidence=_transcript_text(prompt), images=images, usage=usage
+                    )
+                    prompt_tokens, completion_tokens = usage.prompt_tokens, usage.completion_tokens
+                except HandOver as handed:
+                    logger.info("sentiment.handed_over", why=handed.why)
+                    handed_over, recorded = True, model
+                    response = await provider.complete(
+                        prompt, model=model, temperature=0.0, max_tokens=16
+                    )
+                    score = _parse_score(response.content)
+                    prompt_tokens, completion_tokens = usage_of(response)
+        else:
+            response = await asyncio.wait_for(
+                provider.complete(prompt, model=model, temperature=0.0, max_tokens=16),
+                timeout=settings.sentiment_timeout_seconds,
+            )
+            score = _parse_score(response.content)
+            prompt_tokens, completion_tokens = usage_of(response)
+    except Exception as exc:
+        logger.warning("sentiment.classify_failed", conversation_id=str(conversation_id))
+        if called is not None:
+            await record_job_call(
+                session,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                agent_run_id=None,
+                job=Job.SENTIMENT,
+                model=recorded,
+                outcome=failure_outcome(exc),
+                latency_ms=called.elapsed_ms(),
+                handed_over=handed_over,
+            )
         return None
+    await record_job_call(
+        session,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        agent_run_id=None,
+        job=Job.SENTIMENT,
+        model=recorded,
+        outcome=OUTCOME_OK if score is not None else OUTCOME_UNUSABLE,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        latency_ms=called.elapsed_ms(),
+        handed_over=handed_over,
+    )
+    return score
+
+
+async def evidence_images(
+    session: AsyncSession,
+    conversation: Conversation,
+    history: Sequence[Message],
+    message_ids: Sequence[uuid.UUID] = (),
+) -> int:
+    """How many images the evidence holds: in the history and in the batch.
+
+    Only the decision path asks; a decision model takes no images, so any
+    image hands the call over to the agent's model.
+    """
+    count = sum(1 for message in history if _is_image(message.media_mime))
+    if message_ids:
+        batch = await session.execute(
+            select(func.count(Message.id)).where(
+                Message.tenant_id == conversation.tenant_id,
+                Message.conversation_id == conversation.id,
+                Message.id.in_(list(message_ids)),
+                Message.media_mime.like("image/%"),
+            )
+        )
+        count += int(batch.scalar_one())
+    return count
+
+
+def _is_image(mime: str | None) -> bool:
+    return bool(mime) and str(mime).startswith("image/")
 
 
 async def _recent_messages(
@@ -119,6 +215,12 @@ def _build_prompt(messages: list[Message], input_text: str) -> list[LLMMessage]:
         LLMMessage(role=ROLE_SYSTEM, content=SENTIMENT_SYSTEM_PROMPT),
         LLMMessage(role=ROLE_USER, content=f"Conversation transcript:\n{transcript}"),
     ]
+
+
+def _transcript_text(prompt: list[LLMMessage]) -> str:
+    """The evidence a decision model judges: the prompt's transcript message."""
+    content = prompt[-1].content
+    return content if isinstance(content, str) else ""
 
 
 def _parse_score(content: str | None) -> float | None:

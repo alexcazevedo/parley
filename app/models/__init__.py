@@ -13,6 +13,7 @@ from app.models.mcp_server import McpServer, McpServerStatus
 from app.models.mcp_tool import McpTool
 from app.models.memory import Memory, MemoryType
 from app.models.message import Message, MessageDirection, MessageRole
+from app.models.model_job_call import ModelJobCall
 from app.models.tenant import Tenant
 from app.models.tenant_secret import TenantSecret
 from app.models.tool import Tool
@@ -47,6 +48,7 @@ __all__ = [
     "Message",
     "MessageDirection",
     "MessageRole",
+    "ModelJobCall",
     "Tool",
     "ToolExecution",
     "ToolExecutionStatus",

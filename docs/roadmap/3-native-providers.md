@@ -2,6 +2,8 @@
 
 Mode: `mvp`. Routing profile `cloud`, sequential. Needs brief 2 done: the model layer it adopted is what this milestone extends to the reply.
 
+Moved here from brief 2: typed answers for the auxiliary jobs on chat models. Brief 2 gave them only on TypeSafe's decision model; a job set to `llm:<model>` still answers in text.
+
 ## The problem
 
 The reply can only run on an endpoint that speaks the OpenAI chat-completions format (`app/llm/factory.py`: "Only `openai_compatible` exists"). Models from Anthropic, Google and others are reachable only through a compatibility layer, which loses what their own APIs offer and breaks on small differences (the name of the token-limit field already needs a setting, `LLM_MAX_TOKENS_PARAM`). There is one endpoint and one key for the whole deployment, so two agents cannot use two vendors.

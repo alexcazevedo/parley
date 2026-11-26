@@ -5,7 +5,7 @@ Four milestones, in the order to build them. Each file is a brief for one `/comb
 | Order | Brief | What it gives | Depends on |
 |---|---|---|---|
 | 1 | [Business tools over MCP](1-business-tools-mcp.md) | An app runs an MCP server; the agent calls its tools for the customer who is writing. **Done**: [guide](../guides/business-tools.md). The signature was left as a follow-up ([FOLLOW_UPS](../FOLLOW_UPS.md)) | nothing |
-| 2 | [A model per job](2-model-per-job.md) | Each auxiliary decision (boundary check, sentiment, department) can run on a small, cheap model, with typed answers | nothing; easier after 1 |
+| 2 | [A model per job](2-model-per-job.md) | Each auxiliary decision (boundary check, sentiment, department) can run on a small, cheap model, with typed answers. **Done** for the decision model (TypeSafe); typed answers on chat models moved to brief 3: [configuration](../guides/configuration.md), [agent behaviour](../guides/agent-behaviour.md), [operations](../guides/operations.md) | nothing; easier after 1 |
 | 3 | [Native providers](3-native-providers.md) | The agent turn can run on Anthropic, Google and others through their own APIs | 2 |
 | 4 | [Streaming](4-streaming.md) | Web chat shows the reply as it is written | 3 |
 

@@ -22,7 +22,18 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import end_transaction
-from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage, LLMProvider
+from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage, LLMProvider, LLMResponse
+from app.llm.jobs import (
+    OUTCOME_OK,
+    OUTCOME_UNUSABLE,
+    CallTimer,
+    Job,
+    failure_outcome,
+    job_model,
+    job_target,
+    record_job_call,
+    usage_of,
+)
 from app.models.agent import Agent
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole
@@ -114,9 +125,26 @@ async def _summarize(
     # summarization wants a low-variance, deterministic-ish output regardless
     # of how the agent is tuned for conversation. Shortcut noted per mvp mode.
     # Reads done, writes not started: no transaction while the model runs.
+    # No setting: `agent.model`, exactly as before; `llm:<model>`: that model.
+    model = agent.model
+    if job_target(Job.SUMMARY).kind == "llm":
+        model = job_model(Job.SUMMARY, agent)
     await end_transaction(session)
-    response = await llm.complete(prompt, model=agent.model, temperature=0.2, max_tokens=1024)
+    called = CallTimer()
+    try:
+        response = await llm.complete(prompt, model=model, temperature=0.2, max_tokens=1024)
+    except Exception as exc:
+        await _record(session, conversation, model, failure_outcome(exc), called)
+        raise
     summary = (response.content or "").strip()
+    await _record(
+        session,
+        conversation,
+        model,
+        OUTCOME_OK if summary else OUTCOME_UNUSABLE,
+        called,
+        response,
+    )
     if not summary:
         return
 
@@ -125,6 +153,29 @@ async def _summarize(
     await session.flush()
     logger.info(
         "summary.updated", conversation_id=str(conversation.id), last_seq=covered_seq
+    )
+
+
+async def _record(
+    session: AsyncSession,
+    conversation: Conversation,
+    model: str,
+    outcome: str,
+    called: CallTimer,
+    response: LLMResponse | None = None,
+) -> None:
+    prompt_tokens, completion_tokens = usage_of(response)
+    await record_job_call(
+        session,
+        tenant_id=conversation.tenant_id,
+        conversation_id=conversation.id,
+        agent_run_id=None,
+        job=Job.SUMMARY,
+        model=model,
+        outcome=outcome,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        latency_ms=called.elapsed_ms(),
     )
 
 

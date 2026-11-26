@@ -34,12 +34,24 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
-from app.agents.sentiment import _ROLE_LABELS, _recent_messages
+from app.agents.sentiment import _ROLE_LABELS, _recent_messages, _transcript_text, evidence_images
 from app.config import get_settings
 from app.db import end_transaction
 from app.events.outbox import CONVERSATION_CATEGORY, record_event
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage
-from app.llm.factory import get_provider, resolve_model
+from app.llm.decisions import DecisionUsage, HandOver, decide_category, target_label
+from app.llm.factory import get_provider
+from app.llm.jobs import (
+    OUTCOME_OK,
+    OUTCOME_UNUSABLE,
+    CallTimer,
+    Job,
+    failure_outcome,
+    job_model,
+    job_target,
+    record_job_call,
+    usage_of,
+)
 from app.models.agent import Agent
 from app.models.category import Category
 from app.models.conversation import Conversation
@@ -78,29 +90,91 @@ async def categorize_conversation(
     """
     conversation_id = conversation.id
     tenant_id = conversation.tenant_id
+    called: CallTimer | None = None
+    handed_over = False
     try:
         if conversation.category_locked:
             return
+        settings = get_settings()
+        target = job_target(Job.CATEGORY, settings)
+        images = 0
         async with session.begin_nested():
             categories = await CategoriesRepository(session).list(tenant_id)
             if not categories:
                 return
             history = await _recent_messages(session, conversation, message_ids)
+            if target.kind == "typesafe":
+                images = await evidence_images(session, conversation, history, message_ids)
         prompt = _build_prompt(categories, history, input_text)
         current = conversation.category_id
         provider = get_provider(agent)
-        model = resolve_model(agent)
-        # No transaction open during the model call; the timeout wraps only it.
+        model = job_model(Job.CATEGORY, agent, settings)
+        recorded = target_label(target) if target.kind == "typesafe" else model
+        # No transaction open during the model call; the timeout wraps only it
+        # (on the decision path, the decision and any hand-over together).
         await end_transaction(session)
-        response = await asyncio.wait_for(
-            provider.complete(prompt, model=model, temperature=0.0, max_tokens=8),
-            timeout=get_settings().category_timeout_seconds,
-        )
-    except Exception:
+        called = CallTimer()
+        if target.kind == "typesafe":
+            usage = DecisionUsage()
+            async with asyncio.timeout(settings.category_timeout_seconds):
+                try:
+                    chosen = await decide_category(
+                        target,
+                        categories=categories,
+                        evidence=_transcript_text(prompt),
+                        images=images,
+                        usage=usage,
+                    )
+                    usable = True
+                    prompt_tokens, completion_tokens = usage.prompt_tokens, usage.completion_tokens
+                except HandOver as handed:
+                    logger.info("category.handed_over", why=handed.why)
+                    handed_over, recorded = True, model
+                    response = await provider.complete(
+                        prompt, model=model, temperature=0.0, max_tokens=8
+                    )
+                    chosen = _parse_choice(response.content, categories)
+                    usable = _usable(response.content, categories)
+                    prompt_tokens, completion_tokens = usage_of(response)
+        else:
+            response = await asyncio.wait_for(
+                provider.complete(prompt, model=model, temperature=0.0, max_tokens=8),
+                timeout=settings.category_timeout_seconds,
+            )
+            chosen = _parse_choice(response.content, categories)
+            usable = _usable(response.content, categories)
+            prompt_tokens, completion_tokens = usage_of(response)
+    except Exception as exc:
         logger.warning("category.classify_failed", conversation_id=str(conversation_id))
+        if called is not None:
+            await record_job_call(
+                session,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                agent_run_id=None,
+                job=Job.CATEGORY,
+                model=recorded,
+                outcome=failure_outcome(exc),
+                latency_ms=called.elapsed_ms(),
+                handed_over=handed_over,
+            )
         return
 
-    chosen = _parse_choice(response.content, categories)
+    latency_ms = called.elapsed_ms()
+    await record_job_call(
+        session,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        agent_run_id=None,
+        job=Job.CATEGORY,
+        model=recorded,
+        outcome=OUTCOME_OK if usable else OUTCOME_UNUSABLE,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        latency_ms=latency_ms,
+        handed_over=handed_over,
+    )
+
     if chosen is None or chosen.id == current:
         return
     category_id = chosen.id
@@ -169,6 +243,12 @@ def _build_prompt(
 def _one_line(text: str) -> str:
     """Collapse whitespace so a multi-line description cannot break the list."""
     return " ".join(text.split())
+
+
+def _usable(content: str | None, categories: list[Category]) -> bool:
+    """An answer the job can use: `0` (none fits) or a listed number."""
+    match = _INT_RE.search(content or "")
+    return match is not None and 0 <= int(match.group()) <= len(categories)
 
 
 def _parse_choice(content: str | None, categories: list[Category]) -> Category | None:

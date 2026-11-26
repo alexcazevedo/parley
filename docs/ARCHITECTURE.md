@@ -33,7 +33,9 @@ app/
                    sentiment.py, categorize.py, loading.py (tenant-scoped lookup).
   llm/            base.py (provider-agnostic types), factory.py (Settings ->
                    provider), providers/ (openai_compatible.py is the only wire
-                   format; fake.py is a scripted provider for tests and demos).
+                   format; fake.py is a scripted provider for tests and demos),
+                   jobs.py (a model per job), decisions.py (TypeSafe; the only
+                   pydantic_ai import), compare.py (boundary replay command).
   tools/          base.py (ToolExecutor, ToolResult, ToolContext), registry.py,
                    builtin.py (remember, handoff_to_human, search_knowledge), http.py (the tenant's
                    HTTP tools), mcp.py (imported MCP tools), context.py (who a call
@@ -167,8 +169,8 @@ rolling summary and the reason, and is bounded by the constant
 `SUMMARY_TIMEOUT_SECONDS` (10) in that module. A model failure or timeout is
 logged and swallowed: the handoff stands and `summary` stays null.
 `GET /conversations/{id}` always attaches the newest handoff as `latest_handoff`;
-the list endpoint and `GET /lines` do so only with `include_handoff=true`. The
-brief never enters the message transcript, so the customer's poll never sees it.
+the list and `GET /lines` only with `include_handoff=true`. The brief never enters
+the transcript, so the customer's poll never sees it.
 
 ## Queue / debounce algorithm
 
@@ -433,6 +435,13 @@ Boundaries (what an agent may talk about; set up in
    `agent_runs.blocked_text`. Canned messages and a tool's terminal text are not
    checked. Only the checked text, or the refusal, reaches the send path, so the
    humanizer and barge-in never see a blocked reply.
+
+**A model per job.** Five calls besides the reply (boundary check, sentiment,
+category, summary, handoff brief) each read `<JOB>_MODEL` through `job_target`
+(`app/llm/jobs.py`): empty is the agent's model, `llm:` another chat model,
+`typesafe:` a decision job on `app/llm/decisions.py`. A call the decision model
+cannot take raises `HandOver` and runs on the agent's model; an error never does.
+Each call writes one `model_job_calls` row in its own transaction, never failing the job.
 
 ## Memory
 
@@ -905,20 +914,17 @@ Postgres 16 service, with no Redis service: the tests use `fakeredis`. `/ready`
 (`tests/test_ready.py`).
 
 mypy checks `app/` only. `app.security`, `app.queue` and `app.conversations` are
-strict because a type mistake costs most there: API key and secret handling, the
-job queue, and the debounce, lock and turn logic that decide who answers a customer
-and when. The strict flags are spelled out per module in `pyproject.toml` because
-`strict = true` inside an override applied to every module in this mypy version.
+strict because a type mistake costs most there: secrets, the job queue, and the
+debounce, lock and turn logic. The flags are spelled out per module in
+`pyproject.toml` because `strict = true` in an override applied to every module.
 
 ## Extension points
 
 - **New channel**: implement `ChannelAdapter` (`app/channels/base.py`), register it in
   `app/channels/registry.py` and add a webhook route if it is push-based.
-- **New LLM provider**: `app/llm/factory.py::get_provider` is the one dispatch point;
-  a new branch there and a class implementing `LLMProvider.complete` is the whole
-  change.
+- **New LLM provider**: a new branch in `app/llm/factory.py::get_provider` (the one
+  dispatch point) and a class implementing `LLMProvider.complete`.
 - **New built-in tool**: add a `(ToolSpec, agent-flag)` pair to `BUILTIN_TOOLS` and a
   handler to `_HANDLERS` in `app/tools/builtin.py`; no registry or runtime change.
 - **Semantic memory**: `MemoryService.search` is the seam: swap the `ILIKE` for a
-  vector-similarity query without touching `app/tools/builtin.py` or
-  `app/agents/runtime.py`.
+  vector-similarity query; nothing else changes.

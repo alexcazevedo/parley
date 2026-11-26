@@ -114,3 +114,57 @@ On `SIGTERM` or `SIGINT` the worker takes no new job and no new turn, and waits 
 - The reliability behaviour is tested with fakeredis and `respx` only, not against a real Redis, model or channel.
 
 Check: stop the worker with `docker compose stop worker`; the log shows `worker.stopping` and the container exits within the grace period.
+
+## A model per job
+
+Settings and values are in [configuration](configuration.md), what each job does in [agent behaviour](agent-behaviour.md) section 8. Every call of the five jobs writes one row to `model_job_calls`, after the call and in its own transaction; a failure to write it is logged (`model_job.record_failed`) and never fails the job. Columns: `tenant_id`, `conversation_id`, `agent_run_id` (set only for the boundary check, and not a foreign key), `job` (`boundary_check`, `sentiment`, `category`, `summary`, `handoff_brief`), `model` (`typesafe:<model>` for a decision model, otherwise the chat model's name), `outcome` (`ok`, `error`, `timeout`, `unusable`), `handed_over`, `prompt_tokens`, `completion_tokens`, `latency_ms`, `created_at`. Tokens are empty when the service reported none. The table holds token counts, not a price: TypeSafe reports input and output tokens and no cost, so work the cost out from its price list. In a live check against TypeSafe (model `jev-1.14.0`, 8 calls on made-up examples) each call took about 220 to 450 ms and none failed; that is a sample, not a promise.
+
+Per job, over the last 7 days:
+
+```
+docker compose exec postgres psql -U harness -d harness -c "
+SELECT job, model,
+       count(*) AS calls,
+       count(*) FILTER (WHERE handed_over) AS handed_over,
+       count(*) FILTER (WHERE outcome <> 'ok') AS not_ok,
+       sum(prompt_tokens) AS prompt_tokens,
+       sum(completion_tokens) AS completion_tokens,
+       round(avg(latency_ms)) AS avg_ms,
+       percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95_ms
+FROM model_job_calls
+WHERE created_at > now() - interval '7 days'
+GROUP BY job, model ORDER BY job, calls DESC;"
+```
+
+Add `AND job = 'boundary_check'` for one job. A `handed_over` count that keeps rising means the decision model cannot take that job's calls (too many departments or rules, or images): the job is on the agent's model anyway. `not_ok` is every call that errored, timed out or gave an answer the job could not use; on the boundary check each of those blocked a reply, because it fails closed.
+
+### Compare before you switch
+
+A decision model's answers are not the same as the agent model's, and three examples are not a measurement. In the live check, the first version of the `allowed` question did not state the agent's rules, and an out-of-scope reply scored 0.48 and then 0.52, so it was allowed. That was fixed, and it is why you compare on your own replies before you trust a model.
+
+```
+uv run python -m app.llm.compare --tenant <tenant_id> --model typesafe:<model> [--limit 200]
+docker compose run --rm api python -m app.llm.compare --tenant <tenant_id> --model llm:<model>
+```
+
+It takes the tenant's newest successful agent runs (up to `--limit`, default 200) of agents with boundaries and the reply check on, judges each stored reply again on the candidate, and prints each run where the candidate disagrees with the recorded result (blocked or allowed), then a line `compared N replies: A agree, D disagree, S skipped`. Limits:
+
+- Boundary check only. Sentiment and category cannot be compared yet.
+- It uses the agents' current rules, not the ones in force when the reply was written, so a rule you changed since changes the answer.
+- It prints customer text: a preview of each disagreeing reply, 120 characters. Run it where that is allowed.
+- It sends the stored replies and user messages of those runs to the candidate model. A `typesafe:` candidate needs `TYPESAFE_API_KEY`. It writes nothing, and records nothing in `model_job_calls`.
+- Skipped: runs with no reply, runs recorded as `check_failed` or `check_unparseable`, and calls the candidate failed, timed out, handed over or could not read. A candidate block with no rule named (`no_rule_identified`) counts as a real block.
+- Exit 0 when it ran; 1 for a bad argument or an unknown tenant.
+
+The recorded results come from the check that ran then, so a disagreement is not always the candidate's fault: read the replies it prints. Look at both kinds: a reply the candidate allows that was blocked (a cheaper model that lets more through), and a reply it blocks that was allowed (more refusals for good replies).
+
+### Recommended order
+
+1. Run the comparison on the job's candidate model and read every disagreement.
+2. Set one job (for example `BOUNDARY_CHECK_MODEL`), restart `api` and `worker`. Only the decision jobs can use `typesafe:`; set `TYPESAFE_API_KEY` first or both refuse to start.
+3. Watch `model_job_calls` for a few days: `not_ok`, `handed_over`, latency, tokens. Watch `agent_runs.boundary_reason` for `check_failed` and `no_rule_identified`, and the refusals customers get.
+4. Set the next job. To go back, empty the setting and restart; rows stay.
+
+`scripts/demo_decision_model.py` is a live check of the decision model, not part of the test suite: `uv run python scripts/demo_decision_model.py` with `TYPESAFE_API_KEY` set sends a few made-up examples (no real customer text) and prints what it decided; for the boundary examples it also prints the probability of "allowed". It exits 0 with `decision model demo: ok` when every example is decided as expected, 1 on an unexpected answer or a service error, 2 when there is no key. A few examples are a smoke test, not a measure of quality.
+
+Check: after one message on an agent with `BOUNDARY_CHECK_MODEL` set, the query above shows a `boundary_check` row with that model.

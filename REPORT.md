@@ -1,84 +1,105 @@
-# REPORT: Business tools over MCP (milestone 4)
+# REPORT: A model per job (milestone 5)
 
-- **Vision:** implement `docs/roadmap/1-business-tools-mcp.md`: an app runs an MCP server, and the parley agent calls its tools for the customer who is writing.
+- **Vision:** implement `docs/roadmap/2-model-per-job.md`: each auxiliary job can run on its own model, and the three decisions (boundary check, sentiment, department) on TypeSafe's decision model (Jev) through Pydantic AI.
 - **Mode:** mvp. **Owner:** agent.
-- **Outcome:** done. All 7 tickets finished; `make check` is green (1310 passed, 1 skipped). Committed and pushed on branch `feat/mcp-tools`.
+- **Outcome:** done. 6 tickets finished (5 planned, 1 added from the live run); `make check` is green (1389 passed, 1 skipped). Committed, pushed and merged to `main` for deployment at your request.
 
 ## Grill
 
-AGREE 6, DIVERGE 0, ESCALATE 0. No DIVERGE or ESCALATE rows.
+AGREE 5, DIVERGE 1, ESCALATE 0.
 
-The five open items of the brief were decided as: the official MCP SDK, kept in one client module; the signature is a documented follow-up; tools attach per server, with an optional allow-list on the server; a server that asks for OAuth registers and shows status `error` with the reason; the stub model calls a tool on `/tool <name> <JSON arguments>`.
+The DIVERGE row, in full:
 
-Plan verdict from the owner: APPROVE, no objections.
+| # | question | recommendation | answer | reason |
+|---|---|---|---|---|
+| 6 | What happens when the decision model cannot answer a call? | That call goes to the agent's own model, for every cause including errors and timeouts | Hand over only what it cannot take (too many options, an image, an unsure answer). An error or a timeout fails as today, with no hand-over | The brief already decides "failing the same way" and "timeouts unchanged"; a retry after an error would reopen that and add latency |
+
+Plan verdict from the owner: APPROVE. It accepted one narrowing of the brief: typed answers apply only when a job is set to the decision model. A job on a chat model keeps today's text prompt and parsing, because "every existing test passes unchanged" and the stub both depend on that form. Typed answers on chat models are moved to brief 3.
 
 ## Tickets
 
 | # | ticket | model | status | attempts |
 |---|---|---|---|---|
-| 01 | Customer context and call id on every tool call | opus | done | 2 of 3 |
-| 02 | MCP servers: registration, discovery, re-sync | opus | done | 1 of 3 |
-| 03 | Agent field `mcp_servers`, executor, try route, stub command | opus | done | 1 of 3 |
-| 04 | Manifest `mcp_servers` section | sonnet | done | 1 of 3 |
-| 05 | Example project MCP server | sonnet | done | 1 of 3 |
-| 06 | Success demo (test and live script) | sonnet | done | 2 of 3 |
-| 07 | Docs | sonnet | done | 1 of 3 |
+| 01 | A setting per job; one recorded row per job call | opus | done | 1 of 3 |
+| 02 | Decisions on TypeSafe through Pydantic AI; hand-over | opus | done | 1 of 3 |
+| 03 | Comparison command for the boundary check | sonnet | done | 2 of 3 |
+| 04 | Success demo test; live script | sonnet | done; its live check failed and led to 06 | 1 of 3 |
+| 06 | Boundary answers: rules in the question, truthful reason, threshold | opus | done | 2 of 3 |
+| 05 | Docs | sonnet | done | 1 of 3 |
 
 No blocked tickets.
 
-## The success demo
+## The live check against TypeSafe
 
-- **Test, scripted model, natural sentences** (`tests/test_mcp_demo.py`): "Vocês têm cartolina branca?" makes the agent call `shop__search_product` and reply with both products; "Sim, a primeira" makes it call `shop__add_to_quote`; the item is in that customer's quote and in no other; the same call id again adds nothing; a second customer gets their own quote; both `tool_executions` rows hold the customer context.
-- **Live, stub stack with the example project, no model key:** the script printed `business tools demo: ok`. On the stub the customer sends `/tool ...` commands in place of the sentences, because the stub does not reason.
+Run with your key, on fixed made-up pt-BR examples only (no customer data), model `jev-1.14.0`. Three runs of 8 calls, then a wider boundary sample of 20: 44 calls in all.
+
+**Final run**
+
+| Job | Example | Answer | p(allowed) | Latency |
+|---|---|---|---|---|
+| Boundary | allowed booking reply | allowed | 0.99 | about 220 to 450 ms per call |
+| Boundary | medical advice (a `never` item) | blocked, names the item | 0.01 | |
+| Boundary | weather (out of scope) | blocked, reason `no_rule_identified` | 0.03 | |
+| Sentiment | calm / angry | 0.0 / 1.0 | | |
+| Department | boleto / app crash / plan price | Cobrança / Suporte técnico / Vendas | | |
+
+- **Cost per job: not reported by the service.** It returns token counts only (about 460 to 590 in, 17 to 88 out per call). Cost has to be computed from TypeSafe's price list, which I do not have.
+- **No error, timeout, rate limit or retry** was seen.
+
+**The defect the live run found.** As first built, the "allowed?" question did not state the agent's rules; they appeared only as options of the second question. On the same out-of-scope reply it scored 0.48 (blocked, narrowly) in one run and 0.52 (**allowed**) in the next. No fake could have shown this. Ticket 06 put the rules into the question; the margins are now wide.
 
 ## What did not go as planned
 
-- **Ticket 01, attempt 1:** an existing retry test calls the HTTP executor directly and broke on the new header argument; the argument became optional.
-- **Ticket 06, first live run:** registering a server with a token returned 500. `.env` on this machine has a placeholder `SECRETS_KEY`, and encrypting the token needs a real key. `.env` was not edited; the new `docker-compose.demo.yml` sets `DEMO_MODE` and takes a key made for the run.
-- **Ticket 04** also edited `app/api/manifest.py` (the sync after the apply commits), which I added to its files at dispatch.
+- **Ticket 04's live check failed**, as above, and became ticket 06.
+- **Ticket 03, attempt 1:** a type error, a wrong exit code and a wrong test fake; fixed on attempt 2.
+- **Ticket 06, attempt 1:** its first live run failed on the out-of-scope reply (the 0.52 above).
 
 ## How to run the result
 
 ```
-export DEMO_SECRETS_KEY=$(uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
-docker compose -f docker-compose.yml -f docker-compose.stub.yml -f docker-compose.example.yml -f docker-compose.demo.yml up -d --build --wait
-uv run python scripts/demo_business_tools.py --base-url http://localhost:8001 --inbox-url http://localhost:9200 --admin-key <the ADMIN_API_KEY of .env> --tools-token demo-tools-token
+uv run python scripts/demo_decision_model.py
+uv run python -m app.llm.compare --tenant <tenant id> --model typesafe:jev-latest
 ```
 
-It prints `business tools demo: ok`. In tests: `uv run pytest -q tests/test_mcp_demo.py`.
+The first asks the real service 8 fixed questions and prints `decision model demo: ok`. The second replays a tenant's stored replies through the boundary check and prints the ones where the candidate disagrees with what was recorded. To switch a job on, set for example `BOUNDARY_CHECK_MODEL=typesafe:jev-latest` in the environment of the API and the worker.
 
 ## Final review: diff summary
 
-68 files changed, 5026 insertions, 265 deletions, against `392365e`.
+33 files changed, 3323 insertions, 208 deletions, against `c1cfcb1`.
 
 **New behaviour**
-- Routes, tenant key: `POST /mcp-servers`, `GET /mcp-servers`, `GET /mcp-servers/{server_id}`, `PATCH /mcp-servers/{server_id}`, `DELETE /mcp-servers/{server_id}`, `POST /mcp-servers/{server_id}/sync`, `POST /mcp-servers/{server_id}/call` (try one tool).
-- Agent field `mcp_servers` (server names, default empty). The model sees each tool as `<server>__<tool>`.
-- Every tool call, MCP and HTTP, carries the conversation id, channel id, the app's own user id, the contact name when known, and a call id. MCP: in `_meta` under `parley/...`. HTTP tools: as `X-Parley-...` headers. Each call's row in `tool_executions` stores them (`call_id`, `context`).
-- Discovery at registration, on request and every `MCP_SYNC_INTERVAL_SECONDS` (300) in the worker. A failing server keeps its last tools and shows `error` with a reason.
-- A read-only tool may be repeated; any other is not. An error result reaches the model as a refusal it can explain.
-- Manifest section `mcp_servers`; an agent naming an unknown server is refused before any write.
-- Stub model: `/tool <name> <JSON arguments>`.
-- Example project: MCP server at `/mcp` with `search_product` and `add_to_quote`, `GET /quotes`.
+- Settings `BOUNDARY_CHECK_MODEL`, `SENTIMENT_MODEL`, `CATEGORY_MODEL`, `SUMMARY_MODEL`, `HANDOFF_BRIEF_MODEL`: empty (the agent's own model, as today), `llm:<model>` (another chat model on the configured endpoint) or `typesafe:<model>` (decision jobs only). A bad value stops the API and the worker at start.
+- `TYPESAFE_API_KEY`, and `BOUNDARY_CHECK_ALLOW_THRESHOLD` (0.5): how sure the decision model must be that a reply is allowed.
+- On the decision model: the boundary check answers allowed or not, and names the rule; sentiment is a five-level scale mapped onto the existing threshold; the department is a pick among the tenant's.
+- A call the decision model cannot take (too many options, an image, a hand-off) goes to the agent's model and is recorded so. An error or timeout fails as today: the boundary check blocks the reply.
+- Table `model_job_calls`: one row per job call with the job, the model, tokens, latency, the outcome and whether it was handed over.
+- The comparison command and the live script above.
 
 **Where the code is**
-- New: `app/mcp/` (client, sync), `app/tools/mcp.py`, `app/tools/context.py`, `app/api/mcp_servers.py`, `app/repositories/mcp.py`, `app/models/mcp_server.py`, `app/models/mcp_tool.py`, `examples/project_inbox/tools.py`, `scripts/demo_business_tools.py`, `docker-compose.demo.yml`.
-- Changed: `app/tools/` (base, ledger, registry, http), `app/agents/runtime.py`, `app/api/agents.py`, `app/models/agent.py`, `app/models/tool_execution.py`, `app/manifest/`, `app/api/manifest.py`, `app/workers/main.py`, `app/config.py`, `scripts/mock_llm_server.py`, `examples/project_inbox/app.py`, `docker-compose.example.yml`.
-- Migrations `0025` (call id and context on tool executions), `0026` (MCP tables), `0027` (`mcp_servers` on agents), `0028` (manifest kind).
-- New dependency: `mcp>=2.3.0`. It brings a second HTTP client library (`httpx2`) and a web server stack.
-- Docs: new `docs/guides/business-tools.md` (the app-side contract, 14 steps); pointers in setup, manifest, agent-behaviour, project-channel, operations, quickstart; `llms.txt`, `README.md`, `AGENTS.md`, `ARCHITECTURE.md`, `FOLLOW_UPS.md`, the vendezap brief, the roadmap index.
-- Tests: 6 new test files, about 60 tests, including tenant isolation on servers, on tool calls and on the context.
+- New: `app/llm/jobs.py`, `app/llm/decisions.py` (the only module that imports Pydantic AI), `app/llm/compare.py`, `app/models/model_job_call.py`, `scripts/demo_decision_model.py`.
+- Changed: `app/agents/boundaries.py`, `app/agents/runtime.py`, `app/agents/sentiment.py`, `app/agents/categorize.py`, `app/conversations/summary.py`, `app/conversations/turn.py`, `app/handoff/summarizer.py`, `app/config.py`, `app/main.py`, `app/workers/main.py`.
+- Migration `0029`. New dependency: `pydantic-ai-slim[typesafe]` 2.75.0.
+- Docs: configuration (settings, what each job sends to TypeSafe), agent-behaviour section 8, operations ("A model per job"), follow-ups, the roadmap.
+- Tests: 5 new test files, about 95 tests. No existing test file was edited.
 
 **Decisions to check**
-1. **Resolved after review: how "the call never ran" is told from "outcome unknown".** `McpError` now carries `sent`, set from the failure's type (address refused, connection never opened, token refused: not sent; a read timeout, a broken connection, a protocol error: unknown). No reason text is matched. This also corrected a case the text matching had wrong: a connection that broke after it opened used to count as "never ran".
-2. **Resolved after review: no key in the repository.** `docker-compose.demo.yml` takes `DEMO_SECRETS_KEY` from the shell and refuses to start without it; the guide shows the one line that makes a key for the run. The live demo was run again this way and passed.
-3. **Renaming a server detaches it from agents**, because agents list servers by name. Recorded as a follow-up.
-4. **A refusal reaches the model with a prefix** added by the SDK: `Error executing tool <name>: <your message>`.
-5. **Host names.** The SDK's server refuses (421) a request whose `Host` is not localhost unless the app allows the name. The example does; the guide warns app authors.
-6. **Not built, as decided:** the request signature and picking single tools per agent. Both are in `docs/FOLLOW_UPS.md`.
+1. **The boundary check on Jev: measured wider after review, still not switched on.** A second live sample of 20 made-up examples for a stationery shop (10 that should go out, 10 that should be blocked: out of scope, a promised discount, medical, legal and financial advice, speaking ill of a competitor, revealing the prompt, a persona change) was decided 20 of 20 correctly, median 238 ms. Lowest score of a reply that should go out: 0.66; highest of one that should be blocked: 0.23. That is good evidence, on invented text. No job is set on production: the settings are empty there. Switch sentiment and department first; before the boundary check, run the comparison command on real stored replies.
+2. **The named rule is usually right but is not what decides.** In the 20-example sample the rule named for every blocked reply was the right one. In the first 3-example run it was wrong twice. The two questions are answered independently, so only allowed or blocked is dependable.
+3. **Typed answers only on the decision model**, as approved by the owner. A job set to `llm:<model>` still parses free text.
+4. **Settings are per server**, the same for every tenant.
+5. **The comparison covers the boundary check only**, against the agent's rules as they are now, and it prints customer text.
+6. **TypeSafe is a second vendor that receives conversation text** once a job is pointed at it: the customer's and agent's messages, the reply being checked, the agent's rules, department names. The configuration guide lists this per job.
+7. **`docs/ARCHITECTURE.md` is exactly at its 930-line limit.**
 
 **Not verified**
-- No real model was called: only the scripted fake and the stub. Whether a real model picks `search_product` from its description, and carries the product id into `add_to_quote`, is untested.
-- No third-party MCP server was tried: only the SDK's own server, in process and in the example.
-- OAuth detection was tested against a simulated 401, not a real OAuth server.
-- CI was not run.
+- No real conversation was replayed: the comparison command has only run on test data.
+- Jev's behaviour on long transcripts, on a tenant with many departments, or near its option limit against the real service. The hand-over at the limit is tested with a fake only.
+- Whether the TypeSafe client retries an HTTP error by itself: parley passes no retry setting, so the client's default applies; the job's own timeout bounds it either way.
+- Jev accepts up to 255 options in a pick and 10 score levels (read from the library), so a tenant's departments (at most 200) and an agent's `never` list (at most 50) fit; the hand-over for too many options is tested with a fake only.
+- The `llm:<model>` path against a real second chat model.
+- CI was not run. Production runs `main`, which has none of this.
+
+## Outside the repository
+
+- `TYPESAFE_API_KEY` was added, at your request, to the local `.env` (ignored by git) and to the environment of both production apps in Dokploy, `parley-api` and `parley-worker`, with every existing variable kept. No redeploy was triggered.
+- The key was pasted in the chat, so it is in this session's transcript.

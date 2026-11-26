@@ -26,6 +26,10 @@ longer apply; check the code before relying on it.
 - Tenant-wide boundaries (From the boundaries run).
 - Operator page screens for boundaries (From the boundaries run).
 - Measure block and false-block rates on a real model (From the boundaries run).
+- A pre-check job: judge the customer's message before the agent answers (From the model per job run).
+- Comparing sentiment and department on a candidate model, as the boundary check can be (From the model per job run).
+- Typed answers on a chat model: a `llm:` job answers in text form; typed answers wait for native providers (From the model per job run).
+- Settings per agent or per tenant for a job's model; today one setting for the server (From the model per job run).
 
 **Turns, delivery and recovery**
 - Resend only the missing bubbles (From the reliability run).
@@ -451,3 +455,20 @@ PRD epics E1 to E7 are now done. What is left over:
 - **Renaming a server detaches it.** An agent lists server names, so `PATCH
   /mcp-servers/{server_id}` with a new `name` leaves the agents that list the old
   one with no tools of that server, with no warning.
+
+## From the model per job run
+
+- **Typed answers on a chat model.** A job set to `llm:<model>` asks in text and parses
+  the text, as before. Only `typesafe:` jobs get typed answers. They come to chat
+  models with native providers (`docs/roadmap/3-native-providers.md`).
+- **Settings per agent or per tenant.** `BOUNDARY_CHECK_MODEL`, `SENTIMENT_MODEL`,
+  `CATEGORY_MODEL`, `SUMMARY_MODEL` and `HANDOFF_BRIEF_MODEL` are environment
+  settings, the same for every tenant and agent. A tenant that must not have its
+  text sent to TypeSafe cannot opt out alone.
+- **A pre-check job.** Judging the customer's message before the agent answers (a
+  cheap decision to skip an expensive reply) is not built.
+- **Comparing sentiment and department.** `python -m app.llm.compare` replays the
+  boundary check only; the other two decisions have no stored result to compare
+  against and no command.
+- **The recorded boundary reason on a decision model is a hint.** `allowed` decides
+  and `broken` names the rule; they are separate answers and can disagree.
