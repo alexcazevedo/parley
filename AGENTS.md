@@ -16,7 +16,7 @@ For an agent changing parley's code. Product docs for integrators are in `docs/g
 - `app/api/`: thin routers (parse, repository or service, commit, response). `chat` and `dev` mount only with `DEMO_MODE=true`.
 - `app/agents/`: context builder, agent runtime (tool loop), boundaries, categorizer, sentiment.
 - `app/channels/`: `ChannelAdapter` and its webchat and Evolution implementations.
-- `app/conversations/`: resolver, debounce, lock, retry, `process_turn`, humanizer, rolling summary.
+- `app/conversations/`: resolver, debounce, lock, retry, `process_turn`, humanizer, rolling summary; `sessions.py` (a conversation split by silence, `begin_turn`) and `session_end.py` (the worker's `session_end_loop`: ends silent sessions, writes each ended session's recap and facts).
 - `app/handoff/`: `HandoffService` and the handoff brief.
 - `app/knowledge/`: the knowledge base: text splitting, ingest of items into passages, keyword and semantic search, embeddings, the re-index command.
 - `app/llm/`: provider protocol, the OpenAI-compatible provider and `providers/native.py` (`openai`, `anthropic`, `google` through Pydantic AI), plus a scripted fake for tests; `jobs.py` (a model per auxiliary job: the `<JOB>_MODEL` settings and the `model_job_calls` record), `decisions.py` (TypeSafe's decision model through Pydantic AI; with `providers/native.py` the only modules that import `pydantic_ai`), `compare.py` (replay of stored replies on a candidate model).
@@ -45,6 +45,7 @@ For an agent changing parley's code. Product docs for integrators are in `docs/g
 - API data reaches the demo pages' DOM only through `textContent` or `createTextNode`, never `innerHTML`.
 - Migrations are numbered (`migrations/versions/00NN_name.py`). Tests build the schema from the models (`Base.metadata.create_all`), so a model must declare every index its migration creates.
 - A job's model is read only through `job_target` / `job_model` (`app/llm/jobs.py`); a decision job on `typesafe:` hands what it cannot take to the agent's model (`HandOver`), and an error never hands over. Tests replace `build_decision_model` (`tests/decision_fakes.py`) and `build_native_model` (`tests/native_fakes.py`).
+- A session ends only through `end_open_session` (`app/conversations/sessions.py`) or `begin_turn`, each one conditional `UPDATE ... WHERE status = 'open'`; the recap is written only by the worker, never in a turn. With `session_memory_enabled` false no session row is read or written.
 - Log with structlog; only `app/observability/logging.py` imports stdlib `logging`.
 - Tests never use the network: an autouse guard in `tests/conftest.py` refuses any host but loopback. Script the model with `FakeLLMProvider`, mock tools with `respx`, reach an MCP server only through the `mcp_connect` fixture of `tests/mcp_fakes.py`, and use the `fake_handoff_brief` fixture where a test hands off.
 - Docs follow `tests/docs_drift.py`: an endpoint is written in backticks as METHOD, a space and the path, an environment variable as its upper-case name in backticks, and both must exist in the code. Every `AgentCreate` field must appear in backticks in `docs/guides/`. A new shell variable in a guide goes in the non-settings set in that file.

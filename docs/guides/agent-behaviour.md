@@ -20,7 +20,7 @@ Expected: 200 with the whole agent.
 
 What the fields do:
 
-- `instructions`: the start of the system prompt on every turn. Parley then appends, in this order: the contact's memories, the conversation summary, the knowledge section when `knowledge_enabled` is on, a chat-style hint when the channel has `humanize` on, and the boundaries.
+- `instructions`: the start of the system prompt on every turn. Parley then appends, in this order: the contact's facts, the recaps of earlier sessions (section 2), the conversation summary, the knowledge section when `knowledge_enabled` is on, a chat-style hint when the channel has `humanize` on, and the boundaries.
 - `provider`: `openai_compatible`, `openai`, `anthropic` or `google`. `openai_compatible` uses `LLM_BASE_URL` and `LLM_API_KEY`; each vendor uses its own key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`). The keys are one for the whole deployment. To put an agent on a provider, `PATCH /agents/{agent_id}` with `provider` and `model`; the next turn uses it. The server refuses a vendor whose key it does not have (see [setup](setup.md)).
 - `model`: sent to the provider as given, so use the vendor's name for it.
 - `temperature` and `max_tokens`: sent on each model call of a turn. `max_tokens` is sent under the name in `LLM_MAX_TOKENS_PARAM`.
@@ -34,18 +34,63 @@ Check: `curl -s $BASE_URL/agents/$AGENT_ID -H "X-API-Key: $TENANT_KEY"` returns 
 
 ## 2. Memory
 
-Long-term memory is facts about one contact, kept across conversations with that contact on that channel.
+The agent remembers a contact in three layers. A contact is one customer on one channel, so the layers 2 and 3 carry over to a new conversation of the same customer, and not to another channel.
 
-- With `memory_enabled` `true` the model has the tool `remember` with `type` (`preference`, `fact`, `relationship`, `previous_issue`, `summary` or `custom`), `content`, and optional `importance` (1 to 5, default 3). The model decides when to call it; mention it in `instructions` if you want it used.
+1. **This session.** The messages of the current session (the last `context_message_limit` of them) and the conversation's running summary (section 7). A session is a run of messages with no silence longer than `session_gap_hours` between them.
+2. **Recaps of earlier sessions.** One short dated note per session that ended.
+3. **Lasting facts.** Preferences and facts about the customer that hold across sessions.
+
+### What ends a session
+
+- Silence: no message of either side (customer, agent or operator; tool rows do not count) for more than `session_gap_hours` (default 48). Two things notice it: the customer's next message, and the worker, which looks every `SESSION_END_INTERVAL_SECONDS` (default 60). So the recap of a quiet conversation is written about `session_gap_hours` after its last message, without waiting for the customer.
+- `POST /conversations/{conversation_id}/close` ends the open session at once ([project-channel](project-channel.md) step 7). A closed conversation is never reopened; the customer's next message opens a new conversation, and that is a new session too.
+
+A new session starts with an empty running summary and sees none of the earlier session's messages. Nothing stored is deleted: the old messages stay in the conversation and in the API.
+
+### What is written when one ends
+
+The session is marked `pending` in the table `conversation_sessions` and the worker handles it on a later pass. Handling it is one model call, made by the worker, not by a turn. It reads up to the last 60 messages of the session (with more, the running summary comes first) and the contact's current facts, and answers with:
+
+- a recap of at most 60 words, in the language of the conversation, stored as a memory of type `session_recap` with the content `DD/MM/YYYY: text` (the session's end date, UTC), importance 1, and `metadata` with `session_id`, `started_at` and `ended_at`;
+- new facts, which are stored as `fact` memories (with the same dedupe as `remember`), and changed facts, which rewrite the existing fact in place. Facts are written only when the agent has `memory_enabled`; the recap is written either way.
+
+A session with no customer message makes no call and leaves no recap. A failed call (model error, 30 second timeout, an answer with no recap) is tried again a minute or more later, three tries in all; then the session is `failed` and has no recap. The model for this call is `SESSION_RECAP_MODEL` (section 8). The cost is one call per ended session, not one per turn.
+
+### What a new session reads
+
+Each turn the system prompt gets, in this order: the instructions, then the facts under "Known facts about this contact", then the recaps under "Earlier conversations with this contact" (oldest first, introduced as notes that may be out of date), then the running summary. The handoff brief for an operator gets the same facts and recaps.
+
+- Facts: up to `MEMORY_CONTEXT_LIMIT` (default 20), most important first, then newest. Recaps never count against it.
+- Recaps: the contact's most recent ones by session end, at most `session_recap_limit` (default 3, 0 to 10) and none older than `session_recap_max_age_days` (default 90). Only their text goes in. An older recap is not deleted; it only stops being read.
+- Recaps are read only when the agent has both `session_memory_enabled` and `memory_enabled`.
+- The first reply after a long gap can come before the worker has written the recap. Until it does, the ended session's own running summary stands in for it as one of the recaps.
+
+### Tune it
+
+| Field | Default | Effect |
+|---|---|---|
+| `session_gap_hours` | 48 | Longer: sessions run longer and the agent keeps the whole history for more days. Shorter: it forgets the thread sooner and leans on the recap. 1 to 720. |
+| `session_recap_limit` | 3 | How many earlier sessions the agent reads. `0` reads none (recaps are still written). 0 to 10. |
+| `session_recap_max_age_days` | 90 | How far back a recap is read. 1 to 3650. |
+| `session_memory_enabled` | `true` | `false` switches the behaviour off for that agent. |
+
+With `session_memory_enabled` `false` no session rows are written, no recap is written or read, and the history window and the running summary span the whole conversation, as before sessions existed. Sessions already ended stay as they are; a `pending` one waits and is handled if you switch the agent on again. Facts still work through `memory_enabled` and `remember`, but nothing extracts them when a session ends. On the demo test, one returning customer with the same history costs a prompt of 289 characters with the behaviour on and 3521 with it off.
+
+A conversation that existed before this feature has no session until its first message after it, so the silence pass does not end it before that. At that message, if the gap since its previous one is longer than `session_gap_hours`, the old part ends as a session and is recapped, and the reply starts a new one.
+
+### remember, and the memories API
+
+- With `memory_enabled` `true` the model has the tool `remember` with `type` (`preference`, `fact`, `relationship`, `previous_issue`, `summary` or `custom`; it cannot write a recap), `content`, and optional `importance` (1 to 5, default 3). The model decides when to call it; mention it in `instructions` if you want it used. Facts it stores last until you delete them or set `expires_at`; nothing makes a fact expire by itself.
 - Storing the same text again (ignoring case and extra spaces) does not add a row; it only raises `importance` when the new value is higher.
-- Each turn the agent reads the contact's memories that have not expired, most important first, then newest, up to `MEMORY_CONTEXT_LIMIT` (default 20, 1 to 100). Only their `content` goes into the prompt, as a list under "Known facts about this contact". It also goes into the operator brief at handoff.
-- With `memory_enabled` `false` the agent neither writes nor reads memories. The API below still stores them.
+- With `memory_enabled` `false` the agent neither writes nor reads facts. The API below still stores them.
+
+What is not remembered here: business state, such as an order, a quote or a payment. A fact the agent remembers can be out of date; what is true now comes from the app's tools ([business-tools](business-tools.md)).
 
 The memories API, per contact (`$CONTACT_ID` from [setup](setup.md) step 5, or the `contact_id` of a conversation):
 
-- `POST /contacts/{contact_id}/memories`: body `type` (the six values above), `content`, `importance` (1 to 5, default 3), `expires_at` (optional time), `metadata` (optional object). Expected: 201 with `id`, `contact_id`, `type`, `content`, `importance`, `metadata`, `last_accessed_at`, `expires_at`, `created_at`. The same dedupe applies: a repeat returns the existing memory, still 201.
-- `GET /contacts/{contact_id}/memories`: `query` (text contained in `content`, any case) and `limit` (default 20, 1 to 100). Not paged. Expired memories are not listed.
-- `DELETE /contacts/{contact_id}/memories/{memory_id}`: 204. 404 `memory not found` or `contact not found`.
+- `POST /contacts/{contact_id}/memories`: body `type` (the six values above, or `session_recap`), `content`, `importance` (1 to 5, default 3), `expires_at` (optional time), `metadata` (optional object). Expected: 201 with `id`, `contact_id`, `type`, `content`, `importance`, `metadata`, `last_accessed_at`, `expires_at`, `created_at`. The same dedupe applies: a repeat returns the existing memory, still 201.
+- `GET /contacts/{contact_id}/memories`: `query` (text contained in `content`, any case) and `limit` (default 20, 1 to 100). Not paged. Expired memories are not listed. Recaps are listed with the facts, with `type` `session_recap`; they have importance 1, so they come last and a small `limit` can cut them.
+- `DELETE /contacts/{contact_id}/memories/{memory_id}`: 204. 404 `memory not found` or `contact not found`. Delete a recap or a fact to make the agent forget it.
 
 ```
 MEMORY_ID=$(curl -s -X POST $BASE_URL/contacts/$CONTACT_ID/memories \
@@ -150,8 +195,8 @@ Check: the response shows both texts. `PATCH` with `{"error_message": null}` ret
 
 ## 7. Context window and summary
 
-- `context_message_limit` (default 20, 1 to 200): how many of the most recent messages (customer, agent and operator messages) the model sees each turn. Tool calls and results belonging to those messages come along, so a call is never separated from its result and an agent that uses many tools sends a longer prompt than the limit suggests; there is no separate cap on its size. Older messages are not sent.
-- `summary_threshold` (default 40, 0 to 1000): after a reply, if at least this many messages have piled up since the last summary, parley makes one more model call that folds them into the conversation's `summary`. The summary goes into the system prompt on later turns. `0` turns summaries off. A failed summary never costs the customer a reply.
+- `context_message_limit` (default 20, 1 to 200): how many of the most recent messages (customer, agent and operator messages) of the current session (section 2) the model sees each turn. Tool calls and results belonging to those messages come along, so a call is never separated from its result and an agent that uses many tools sends a longer prompt than the limit suggests; there is no separate cap on its size. Older messages are not sent.
+- `summary_threshold` (default 40, 0 to 1000): after a reply, if at least this many messages have piled up since the last summary, parley makes one more model call that folds them into the conversation's `summary`. The summary covers the current session only and starts empty with a new one. It goes into the system prompt on later turns. `0` turns summaries off. A failed summary never costs the customer a reply.
 - The summary call uses the agent's `model` with fixed settings (temperature 0.2, up to 1024 tokens), unless `SUMMARY_MODEL` names another chat model (section 8).
 - Keep the summary threshold at or above the window so the summary describes messages that left the window. Both costs grow with the numbers: the window is sent on every turn, the summary is one extra call each time the threshold is reached.
 
@@ -159,7 +204,7 @@ Check: after enough messages, `GET /conversations/{conversation_id}` returns a n
 
 ## 8. A model for each job
 
-A turn can make five calls besides the reply. Each runs on the agent's own `model` unless the server owner sets it to another (settings and values in [configuration](configuration.md); the owner sets them in the environment, for every tenant, not per agent). The five:
+A turn can make five calls besides the reply, and the worker makes a sixth when a session ends. Each runs on the agent's own `model` unless the server owner sets it to another (settings and values in [configuration](configuration.md); the owner sets them in the environment, for every tenant, not per agent). The six:
 
 | Job | Setting | What it does |
 |---|---|---|
@@ -168,8 +213,9 @@ A turn can make five calls besides the reply. Each runs on the agent's own `mode
 | Category | `CATEGORY_MODEL` | Files the conversation under one of the tenant's departments, or none. |
 | Summary | `SUMMARY_MODEL` | Writes the rolling summary (section 7). |
 | Handoff brief | `HANDOFF_BRIEF_MODEL` | Writes the brief the operator reads at a handoff ([operators](operators.md)). |
+| Session recap | `SESSION_RECAP_MODEL` | Writes the recap and the facts when a session ends (section 2). Made by the worker. |
 
-The first three decide, so they can run on `typesafe:<model>`, TypeSafe's decision model, which answers typed questions instead of writing text. The summary and the brief write text and take only `llm:<model>` or nothing. Each job call is recorded in `model_job_calls` ([operations](operations.md)). The reply itself always runs on the agent's model.
+The first three decide, so they can run on `typesafe:<model>`, TypeSafe's decision model, which answers typed questions instead of writing text. The summary, the brief and the recap write text and take only `llm:<model>` or nothing. Each job call is recorded in `model_job_calls` ([operations](operations.md)). The reply itself always runs on the agent's model.
 
 How a decision model's typed answer becomes the job's result:
 

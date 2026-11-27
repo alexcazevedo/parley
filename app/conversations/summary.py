@@ -21,6 +21,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.conversations.sessions import current_session, session_first_seq
 from app.db import end_transaction
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage, LLMProvider, LLMResponse
 from app.llm.jobs import (
@@ -96,6 +97,11 @@ async def _summarize(
         .with_for_update()
     )
     after_cursor = Message.conversation_id == conversation.id
+    # With sessions on, the summary covers the current session only.
+    if agent.session_memory_enabled:
+        first_seq = session_first_seq(await current_session(session, conversation))
+        if first_seq is not None:
+            after_cursor = after_cursor & (Message.seq >= first_seq)
     if last_seq is not None:
         after_cursor = after_cursor & (Message.seq > last_seq)
 

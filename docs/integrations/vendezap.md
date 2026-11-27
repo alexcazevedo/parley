@@ -67,6 +67,8 @@ Decided from the code, with the reason:
 
 Parley's agent can call tools that vendezap serves as an MCP server; how to build one is in parley's guide `docs/guides/business-tools.md` ([the guide](../guides/business-tools.md)). Vendezap serves one with `search_product` and `add_to_quote` first. It is keyed by the conversa id vendezap already sends as `user_id`: parley passes it to every call as `parley/user_id`, so a search and a quote are for that conversa. Write the guide's checklist into the follow-up: `readOnlyHint` on the search, the call id remembered for the add, a refusal as an error result in pt-BR ("sem estoque"). Pedido and kit tools can follow the same way. This is a separate brief for the vendezap repository, run after the integration above; it changes nothing in that one.
 
+Memory needs nothing from vendezap: parley keeps what it remembers per customer by itself, and ends a conversation's memory session after 48 hours of silence (the agent's `session_gap_hours`). Closing the parley conversation when a pedido is finished (`POST /conversations/{conversation_id}/close`) is an optional follow-up there, so the recap is written at that point instead of after the silence.
+
 ## Out of scope
 
 A knowledge base: parley has one (entries, question-and-answer pairs and documents, searched by the agent), and vendezap builds its own screen on that API when it wants one; see `docs/guides/knowledge.md`. Replies with files or images. Closing conversations: vendezap has no closed state. Changes to the Evolution setup. Any change in the parley repository: ask for it instead.

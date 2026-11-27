@@ -5,6 +5,7 @@ from app.models.category import Category
 from app.models.channel import Channel, ChannelType
 from app.models.contact import Contact
 from app.models.conversation import Conversation, ConversationState
+from app.models.conversation_session import ConversationSession, SessionEndedBy, SessionStatus
 from app.models.handoff import Handoff, HandoffRequestedBy
 from app.models.knowledge_item import KnowledgeItem, KnowledgeItemKind, KnowledgeItemStatus
 from app.models.knowledge_passage import KnowledgePassage
@@ -33,6 +34,9 @@ __all__ = [
     "Contact",
     "Conversation",
     "ConversationState",
+    "ConversationSession",
+    "SessionEndedBy",
+    "SessionStatus",
     "Handoff",
     "HandoffRequestedBy",
     "KnowledgeItem",

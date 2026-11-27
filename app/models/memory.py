@@ -18,6 +18,9 @@ class MemoryType(enum.StrEnum):
     PREVIOUS_ISSUE = "previous_issue"
     SUMMARY = "summary"
     CUSTOM = "custom"
+    # A dated recap of one ended session (app/conversations/session_end.py,
+    # migration 0032). Written by parley only: `remember` does not offer it.
+    SESSION_RECAP = "session_recap"
 
 
 class Memory(Base, TenantScoped):

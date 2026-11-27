@@ -27,7 +27,8 @@ app/
                    debounce (pending list, due ZSET, claim, in-flight list),
                    lock, retry (failed-turn counter, turn dead-letter list),
                    turn (process_turn: one batch -> one reply), summary (rolling
-                   summary), humanize (reply splitting and pacing).
+                   summary), humanize (reply splitting and pacing), sessions and
+                   session_end (session boundaries; recaps written by the worker).
   agents/         context.py (ContextBuilder), runtime.py (AgentRuntime: the
                    tool-call loop, one AgentRun per turn), boundaries.py,
                    sentiment.py, categorize.py, loading.py (tenant-scoped lookup).
@@ -78,7 +79,7 @@ explicitly; the column is the shape row-level security would key off.
 tenants (admin-created; api_key_hash)
   └─ agents (instructions, model, provider, tool_names[], mcp_servers[], memory_enabled,
              knowledge_enabled, handoff_enabled, handoff_message, max_tool_iterations,
-             context_message_limit, summary_threshold,
+             context_message_limit, summary_threshold, session_*,
              sentiment_escalation_enabled, boundary_*, error_message,
              unsupported_media_message, ...)
   └─ channels (type, agent_id, config, secret_encrypted)
@@ -98,7 +99,9 @@ tenants (admin-created; api_key_hash)
                  │                        result, status, model_content,
                  │                        terminal_text, latency_ms, error,
                  │                        call_id?, context?)
-                 └─ handoffs (reason, requested_by, summary, resolved_at)
+                 ├─ handoffs (reason, requested_by, summary, resolved_at)
+                 └─ conversation_sessions (first_seq, last_seq, status, ended_by,
+                                           summary_snapshot, recap_memory_id, error)
   └─ categories (name, description; unique per tenant)
   └─ tools (name, description, input_schema, endpoint, method,
             auth_config_encrypted, timeout_seconds; unique name per tenant)
@@ -128,19 +131,14 @@ produced. The two exceptions (a handoff message still owed, and categorizing a
 `(tenant_id, contact_id, channel_id)` where `state != 'CLOSED'`.
 `app/conversations/resolver.py` creates contacts and conversations with select,
 `INSERT ... ON CONFLICT DO NOTHING`, select again (up to 3 tries), so two
-simultaneous first messages share one contact and one conversation. The `0012`
-migration closed existing duplicates first (keeping the one in `HUMAN_HANDOFF`,
-else the most recently active) under `SHARE ROW EXCLUSIVE` on `conversations`.
+simultaneous first messages share one contact and one conversation.
 
 **Message order.** A conversation is read in `Message.seq` order: a value from
 the database sequence `messages_seq`, taken at insert (migration `0013`). History,
 the rolling summary, the sentiment and category history, the handoff brief, the
 scheduler's batch and `GET /conversations/{id}/messages` all order by it.
-`created_at` is for display: inbound rows get it from the database, assistant,
-tool and operator rows from the app, so machines with different clocks can stamp
-a reply earlier than the message it answers while `seq` stays in insertion order.
-The only comparison on `created_at` is the `after=` filter of the messages
-endpoint.
+`created_at` is for display only (clocks differ); the `after=` filter of the messages
+endpoint is the one comparison on it.
 
 **Summary cursor and the row lock.** `conversation.summary_last_seq` is the
 `seq` of the last message the rolling summary covered; the next summary takes
@@ -165,7 +163,7 @@ transaction open, then makes the transition and sets the summary; the caller
 commits. `POST /conversations/{id}/handoff` instead transitions and commits
 first, so the AI is silenced whatever a running turn does, then generates the
 brief and stores it with a second commit. The call reads the newest 30 messages
-(tool results included), the contact's memories (when `memory_enabled`), the
+(tool results included), the contact's facts and recaps (when `memory_enabled`), the
 rolling summary and the reason, and is bounded by the constant
 `SUMMARY_TIMEOUT_SECONDS` (10) in that module. A model failure or timeout is
 logged and swallowed: the handoff stands and `summary` stays null.
@@ -441,8 +439,8 @@ Boundaries (what an agent may talk about; set up in
    checked. Only the checked text, or the refusal, reaches the send path, so the
    humanizer and barge-in never see a blocked reply.
 
-**A model per job.** Five calls besides the reply (boundary check, sentiment,
-category, summary, handoff brief) each read `<JOB>_MODEL` through `job_target`
+**A model per job.** Six calls besides the reply (boundary check, sentiment,
+category, summary, handoff brief, session recap) each read `<JOB>_MODEL` through `job_target`
 (`app/llm/jobs.py`): empty is the agent's model, `llm:` another chat model,
 `typesafe:` a decision job on `app/llm/decisions.py`. A call the decision model
 cannot take raises `HandOver` and runs on the agent's model; an error never does.
@@ -450,30 +448,37 @@ Each call writes one `model_job_calls` row in its own transaction, never failing
 
 ## Memory
 
-Two kinds, deliberately different:
+Three layers:
 
-- **Short-term**: the tail of the persisted `messages` (see step 1 of "Agent
-  loop") plus a rolling `conversation.summary`. `app/conversations/summary.py`
-  advances it once the messages after `summary_last_seq` number at least
-  `agent.summary_threshold` (every row counts, tool rows included; a threshold of
-  0 or less turns it off). It is a model call that folds the new customer,
-  assistant and operator messages into the prior summary. It never runs in the
-  reply path: it happens after the reply is committed and never raises out of
-  `process_turn`. A batch with nothing summarizable only advances the cursor.
-- **Long-term**: `Memory` rows per contact, written by the agent through the
-  `remember` built-in or through `POST /contacts/{id}/memories`.
-  `MemoryService.get_contact_memories` returns non-expired rows ordered by
-  `importance DESC, created_at DESC, id`, the first `MEMORY_CONTEXT_LIMIT` go into
-  the system prompt each turn (when `agent.memory_enabled`), and reading writes
-  nothing. `search()` is an `ILIKE` substring match. `MemoryService.store` is the
-  one write path: it trims, collapses whitespace and lower-cases the content, and
-  if a non-expired memory of the same contact has the same text it returns that
-  row and raises its importance to the higher value instead of inserting.
-  `last_accessed_at` is a column and a field of `MemoryOut`, but nothing writes
-  it.
-
-Memory is written only when the model calls `remember` or the API is called; no
-background job extracts it.
+- **Current session**: the persisted `messages` since the open session's
+  `first_seq` (step 1 of "Agent loop") plus a rolling `conversation.summary`.
+  `app/conversations/summary.py` advances it once the messages after
+  `summary_last_seq` number at least `agent.summary_threshold` (tool rows count; 0
+  or less turns it off), after the reply is committed; it never raises out of
+  `process_turn`.
+- **Sessions**: `conversation_sessions` (`open`, `pending`, `done`, `failed`).
+  `begin_turn` (`app/conversations/sessions.py`), under the conversation row lock,
+  ends the open session when the batch follows a silence longer than
+  `agent.session_gap_hours`: one conditional `UPDATE ... WHERE status = 'open'`
+  sets `pending`, copies the summary to `summary_snapshot` and clears
+  `conversation.summary`. `HandoffService.close` ends it too (`ended_by` `closed`).
+  The worker's `session_end_loop` (`app/conversations/session_end.py`, every
+  `SESSION_END_INTERVAL_SECONDS`) ends silent sessions that have a row, then claims
+  `pending` rows (`SKIP LOCKED`, lease) and makes one `session_recap` job call each,
+  outside any transaction: a `session_recap` memory (`DD/MM/YYYY: text`, importance
+  1, `ended_at` in `metadata`) and, with `memory_enabled`, `ADD` / `REPLACE` facts.
+  A failure counts in `error` (`n/3: reason`); the third makes the row `failed`. A
+  conversation with no row is one open session until its next batch. With
+  `session_memory_enabled` false none of this runs.
+- **Long-term**: `Memory` rows per contact, written by `remember`, the API or the
+  session end. `get_contact_facts` returns non-expired facts, `importance DESC,
+  created_at DESC, id`; the first `MEMORY_CONTEXT_LIMIT` go into the prompt (when
+  `memory_enabled`); reading writes nothing. `get_recap_lines` adds up to
+  `session_recap_limit` recaps newer than `session_recap_max_age_days`, oldest
+  first, after the facts; a pending session's snapshot stands in. `store` is the
+  one write path: it trims, collapses whitespace and lower-cases the content, and a
+  non-expired memory with the same text is returned with its importance raised.
+  `search()` is an `ILIKE` match; `last_accessed_at` is never written.
 
 ## Tool model
 
@@ -911,12 +916,7 @@ notes are in `docs/guides/operations.md`.
 `make check` runs `uv run ruff check .`, `uv run mypy` and `uv run pytest -q`, in
 that order; `make test` starts the Postgres container first when nothing listens on
 its port. `.github/workflows/ci.yml` runs the same three on every push against a
-Postgres 16 service, with no Redis service: the tests use `fakeredis`. `/ready`
-is tested with fakes that fail on purpose (`tests/test_ready.py`).
-
-mypy checks `app/` only. `app.security`, `app.queue` and `app.conversations` are
-strict because a type mistake costs most there. The flags are spelled out per module
-in `pyproject.toml` because `strict = true` in an override applied to every module.
+Postgres 16 service, with no Redis service: the tests use `fakeredis`.
 
 ## Extension points
 

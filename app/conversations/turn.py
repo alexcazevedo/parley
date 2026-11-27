@@ -137,6 +137,7 @@ from app.channels.base import ChannelAdapter, OutgoingMessage
 from app.channels.registry import get_adapter
 from app.config import get_settings
 from app.conversations.humanize import split_reply, typing_delay_seconds
+from app.conversations.sessions import begin_turn
 from app.conversations.summary import maybe_summarize
 from app.db import end_transaction
 from app.events.outbox import MESSAGE_REPLY, external_channel, record_event
@@ -553,6 +554,11 @@ async def _run_turn(
     # touches the batch, so the read receipt, sentiment scoring and the joined
     # `input_text` all see the transcript rather than an empty audio message.
     await prepare_media_messages(session, messages)
+
+    # Sessions (app/conversations/sessions.py): after a long silence the open
+    # session ends here, before anything reads the history or the running
+    # summary. Nothing happens with the agent's `session_memory_enabled` off.
+    await begin_turn(session, agent, conversation, messages)
 
     if humanized:
         if await _lock_lost(ownership_check):

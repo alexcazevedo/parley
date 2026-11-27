@@ -50,6 +50,7 @@ from app.agents.boundaries import (
 from app.agents.context import KNOWLEDGE_PROMPT_TITLES, ContextBuilder
 from app.agents.loading import load_conversation_agent
 from app.config import Settings, get_settings
+from app.conversations.sessions import current_session, session_first_seq
 from app.db import end_transaction
 from app.llm.base import ROLE_ASSISTANT, ROLE_TOOL, ROLE_USER, LLMMessage, LLMProvider, ToolCall
 from app.llm.decisions import HandOver, decide_boundary, target_label
@@ -235,6 +236,12 @@ class AgentRuntime:
         builder = self._context_builder or self._default_context_builder()
         # Passed only with the flag on, so a flag-off prompt is built exactly as before.
         knowledge: dict[str, Any] = {}
+        if agent.session_memory_enabled and agent.memory_enabled:
+            knowledge["recaps"] = await MemoryService(session).get_recap_lines(
+                conversation,
+                limit=agent.session_recap_limit,
+                max_age_days=agent.session_recap_max_age_days,
+            )
         if agent.knowledge_enabled:
             knowledge["knowledge_titles"] = await KnowledgeItemsRepository(session).titles(
                 conversation.tenant_id, KNOWLEDGE_PROMPT_TITLES
@@ -511,21 +518,30 @@ class AgentRuntime:
         Counted: USER, HUMAN_OPERATOR and ASSISTANT that is not a `tool_call`.
         Tool rows between counted ones come along, so the history starts with a
         counted message and a tool call never loses its results.
+
+        With sessions on, only the current session's messages
+        (`app.conversations.sessions`); no session row means the whole
+        conversation, as before.
         """
         limit = agent.context_message_limit or 20
         counted = Message.role.in_([MessageRole.USER, MessageRole.HUMAN_OPERATOR]) | (
             (Message.role == MessageRole.ASSISTANT) & (Message.type != "tool_call")
         )
+        in_scope = Message.conversation_id == conversation.id
+        if agent.session_memory_enabled:
+            first_seq = session_first_seq(await current_session(session, conversation))
+            if first_seq is not None:
+                in_scope = in_scope & (Message.seq >= first_seq)
         start_seq = (
             await session.execute(
                 select(Message.seq)
-                .where(Message.conversation_id == conversation.id, counted)
+                .where(in_scope, counted)
                 .order_by(Message.seq.desc())
                 .offset(limit - 1)
                 .limit(1)
             )
         ).scalar_one_or_none()
-        query = select(Message).where(Message.conversation_id == conversation.id)
+        query = select(Message).where(in_scope)
         if start_seq is not None:
             query = query.where(Message.seq >= start_seq)
         result = await session.execute(query.order_by(Message.seq))
@@ -542,7 +558,7 @@ class AgentRuntime:
         """
         if not agent.memory_enabled:
             return []
-        return await MemoryService(session).get_contact_memories(
+        return await MemoryService(session).get_contact_facts(
             conversation.tenant_id,
             conversation.contact_id,
             limit=get_settings().memory_context_limit,

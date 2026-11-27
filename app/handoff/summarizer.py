@@ -171,6 +171,17 @@ async def _build_prompt(
     facts = [m.content.strip() for m in memories if m.content and m.content.strip()]
     if facts:
         parts.append("Known facts about the contact:\n" + "\n".join(f"- {f}" for f in facts))
+    if agent.session_memory_enabled and agent.memory_enabled:
+        recaps = await MemoryService(session).get_recap_lines(
+            conversation,
+            limit=agent.session_recap_limit,
+            max_age_days=agent.session_recap_max_age_days,
+        )
+        if recaps:
+            parts.append(
+                "Earlier conversations with the contact (notes, may be out of date):\n"
+                + "\n".join(f"- {r}" for r in recaps)
+            )
     prior_summary = (conversation.summary or "").strip()
     if prior_summary:
         parts.append("Prior conversation summary:\n" + prior_summary)
@@ -198,7 +209,7 @@ async def _recent_messages(session: AsyncSession, conversation: Conversation) ->
 async def _contact_memories(session: AsyncSession, agent: Agent, conversation: Conversation):
     if not agent.memory_enabled:
         return []
-    return await MemoryService(session).get_contact_memories(
+    return await MemoryService(session).get_contact_facts(
         conversation.tenant_id, conversation.contact_id
     )
 

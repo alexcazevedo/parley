@@ -6,7 +6,10 @@ Three transitions, each a state check plus a `Handoff` row:
   * `handoff`  — `ACTIVE_AI`/`WAITING` -> `HUMAN_HANDOFF`, inserts a `Handoff`.
   * `resume`   — `HUMAN_HANDOFF` -> `ACTIVE_AI`, closes the open `Handoff`
                  (sets `resolved_at`).
-  * `close`    — any state -> `CLOSED`.
+  * `close`    — any state -> `CLOSED`; also ends the open session
+                 (`ended_by` `closed`, app/conversations/sessions.py) when
+                 the agent has `session_memory_enabled`; its recap is
+                 written later by the worker (app/conversations/session_end.py).
 
 Anything else raises `IllegalTransitionError`; callers (the built-in tool in
 `app/tools/builtin.py`, the REST endpoints in `app/api/conversations.py`) map
@@ -35,6 +38,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.conversations.sessions import end_open_session
 from app.events.outbox import (
     CAUSE_AGENT_HANDOFF,
     CAUSE_CLOSED,
@@ -45,7 +49,9 @@ from app.events.outbox import (
     CONVERSATION_HANDOFF,
     record_event,
 )
+from app.models.agent import Agent
 from app.models.conversation import Conversation, ConversationState
+from app.models.conversation_session import SessionEndedBy
 from app.models.handoff import Handoff, HandoffRequestedBy
 
 # `conversation.agent` cause by who asked for the handoff, when the caller gives none.
@@ -142,6 +148,7 @@ class HandoffService:
             open_handoff.resolved_at = datetime.now(UTC)
         await self._session.flush()
         await self._write_line_columns(conversation, entering=False)
+        await self._end_session(conversation)
         await record_event(
             self._session,
             conversation,
@@ -149,6 +156,19 @@ class HandoffService:
             {"active": False, "cause": CAUSE_CLOSED},
         )
         return conversation
+
+    async def _end_session(self, conversation: Conversation) -> None:
+        """End the open session (flushed, committed by the caller); off agents are skipped."""
+        # The agent's switch, read here rather than through `load_conversation_agent`
+        # (app.agents imports this module); same tenant check.
+        enabled = await self._session.scalar(
+            select(Agent.session_memory_enabled).where(
+                Agent.id == conversation.agent_id, Agent.tenant_id == conversation.tenant_id
+            )
+        )
+        if not enabled:
+            return
+        await end_open_session(self._session, conversation, ended_by=SessionEndedBy.CLOSED)
 
     async def _write_line_columns(self, conversation: Conversation, *, entering: bool) -> None:
         """`waiting_since` and the claim, in one core UPDATE on the row.
