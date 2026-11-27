@@ -14,7 +14,7 @@ Read parley's own guide before planning anything: `docs/guides/project-channel.m
 - A staff message pauses the agent for that conversation. So does a handoff by the agent. Only an explicit "hand back" resumes it. There is no automatic resume.
 - Parley picks the department (a category defined in parley) and tells the project its id and name. When the project changes it, the project tells parley, and the agent stops choosing for that conversation.
 - Agent replies are text only. Customer media in: image, voice note, PDF.
-- One tenant per installation, as vendezap is one company per installation.
+- One tenant per business. Vendezap is one company per installation today, so that is one tenant per installation and the steps below keep its key in the settings. For several businesses on one installation, see the follow-up brief below.
 
 ## Do not use `forward_url`
 
@@ -69,9 +69,36 @@ Parley's agent can call tools that vendezap serves as an MCP server; how to buil
 
 Memory needs nothing from vendezap: parley keeps what it remembers per customer by itself, and ends a conversation's memory session after 48 hours of silence (the agent's `session_gap_hours`). Closing the parley conversation when a pedido is finished (`POST /conversations/{conversation_id}/close`) is an optional follow-up there, so the recap is written at that point instead of after the silence.
 
+## Knowledge screen: a follow-up brief
+
+Parley has a knowledge base for each tenant: question-and-answer pairs, texts and documents (PDF, `.txt`, `.md`) that the agent searches before it answers about the business. Vendezap builds its own screen on that API. Parley's guide owns every request, status and error: `docs/guides/knowledge.md` ([the guide](../guides/knowledge.md)), step 11 for a screen like this one.
+
+- **Where.** A new page for the store's staff, suggested "Base de conhecimento", with three lists: "Perguntas e respostas", "Textos" and "Documentos". It is shown only when `PARLEY_URL` is set.
+- **Backend.** New routes under `/api/`, behind the login, that call parley through `backend/app/parley/client.py` with the store's key. The browser never sees the key and never calls parley. The upload of a document passes through vendezap's backend as multipart.
+- **Perguntas e respostas.** Add, edit, remove: `POST /knowledge/qa`, `PATCH /knowledge/{item_id}`, `DELETE /knowledge/{item_id}`. This is the kind to put first on the page.
+- **Textos.** The same with `POST /knowledge/entries`: hours, delivery, payment, exchange policy.
+- **Documentos.** Upload with `POST /knowledge/documents`; show the file name and the status, suggested "Processando", "Pronto", "Falhou" with parley's reason in pt-BR, and "Lido em parte" when `truncated` is true. Replacing a document is upload, wait for ready, delete the old one, done by the backend.
+- **Testar.** A box, suggested "Testar uma pergunta", on `POST /knowledge/search`: it shows the passages the agent would read.
+- **Switch.** Suggested "O agente usa a base de conhecimento", on `PATCH /agents/{agent_id}` with `knowledge_enabled`, next to the agent settings vendezap already has (`backend/app/parley/agent_settings.py`).
+- **Not here.** Price, stock and the state of a pedido stay in the tools (`search_product` and the others): a document would go stale. Say so on the page.
+- **Persona.** While the knowledge is on, the agent's instructions must let it answer what the knowledge covers instead of always calling a person. The store edits them on vendezap's own agent settings screen (`backend/app/settings/agent_routes.py`), which saves to parley. Do not apply `deploy/vendezap.yaml` of the parley repository again for this: an apply puts back the persona and the rules of the file, over what the store saved.
+
+Success demo: a pair added on the page turns "Pronto", the test box finds it, and with the switch on a customer who asks that question on WhatsApp gets that answer. Use the fake parley of the e2e run for the specs.
+
+## Several businesses on one installation: a follow-up brief
+
+When vendezap gains accounts (several stores on one installation), each store is one parley tenant. Parley changes nothing: a tenant already separates agents, channels, departments, tools, memory and knowledge.
+
+- **Per store, not per installation.** `PARLEY_API_KEY`, `PARLEY_CHANNEL_ID`, `PARLEY_EVENTS_SECRET` and the agent id move from the settings to a row per store, the key and the secret encrypted. `PARLEY_URL` stays a setting. Vendezap also gets the parley admin key as a new setting, on the server only.
+- **Provisioning.** When a store turns the agent on for the first time: `POST /tenants` with the admin key, then `POST /manifest/apply` with that tenant's key and a per-store copy of `deploy/vendezap.yaml`. Keep the `api_key` and the channel's `events_secret` from the answers: each is shown once. Apply the file only at this first setup: after it the store's own screens own the agent, and a later apply would undo their changes.
+- **Pushes.** One push URL per store: the store's id is in the path of `events_url`, and the route verifies the signature with that store's secret. The feed position and the applied event ids are kept per store.
+- **Every call.** `backend/app/parley/client.py` takes the store and uses its key; the store comes from the login or from the conversa, never from the request body.
+- **Tools.** The MCP server must answer for the right store: register it per tenant with a token per store, or a path per store.
+- **Limits.** Parley's knowledge and rate limits are the same for every tenant. Limits that depend on a store's plan are counted by vendezap.
+
 ## Out of scope
 
-A knowledge base: parley has one (entries, question-and-answer pairs and documents, searched by the agent), and vendezap builds its own screen on that API when it wants one; see `docs/guides/knowledge.md`. Replies with files or images. Closing conversations: vendezap has no closed state. Changes to the Evolution setup. Any change in the parley repository: ask for it instead.
+The knowledge screen and several businesses on one installation: each has a follow-up brief above. Replies with files or images. Closing conversations: vendezap has no closed state. Changes to the Evolution setup. Any change in the parley repository: ask for it instead.
 
 ## Success demo
 

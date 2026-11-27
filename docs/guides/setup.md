@@ -27,6 +27,8 @@ Expected: 201 with `id`, `name` and `api_key` (in `$TENANT`). The `api_key` is s
 
 Every request below sends `X-API-Key: $TENANT_KEY`. Each tenant sees only its own data.
 
+A tenant is one business. An application that serves several businesses (a platform with many accounts) creates one tenant for each, when the account is created or when it first turns the agent on, and keeps that tenant's key with the account, encrypted. Agents, channels, tools, memory and the [knowledge base](knowledge.md) are then separate for each business. Nothing is shared between tenants. The admin key stays on the application's server.
+
 Check: `curl -s $BASE_URL/tenants/me -H "X-API-Key: $TENANT_KEY"` returns 200 with the same `id` and `name`. A wrong admin key gives 401 `invalid admin key`.
 
 ## 2. Create a tool (optional)

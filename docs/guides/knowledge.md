@@ -217,3 +217,53 @@ Check: send a message the knowledge answers on a channel of this agent ([messagi
 ## 10. In the manifest
 
 Entries and pairs can be kept in the file of [manifest](manifest.md) under `knowledge`, with `entries` (`title`, `text`) and `qa` (`question`, `answer`). A file without the section touches no knowledge; `knowledge: {}` removes every managed entry and pair. Documents are never in the manifest: upload them with step 4.
+
+## 11. Build your own knowledge screen
+
+An application that has its own interface (a shop platform, a help desk) gives each business a screen to manage its knowledge, built on the endpoints above. Parley has no such screen of its own.
+
+**One tenant per business.** The knowledge base belongs to the tenant, so each business that uses the application is one tenant ([setup](setup.md) step 1). The application keeps, for each of its accounts, that tenant's key and the id of its agent. An application with a single business has one tenant and keeps the two values in its settings.
+
+**The browser never calls parley.** A tenant key can change everything of that tenant. Keep it on the application's server, encrypted, and give the browser the application's own routes. Each route checks the login, finds the account of the logged-in user, and calls parley with that account's key. Never take a tenant id or a key from the request.
+
+What the screen does, and the call behind each action:
+
+| On the screen | Call | Notes |
+|---|---|---|
+| List of questions and answers | `GET /knowledge` with `kind=qa` | Paged with `limit` and `cursor` ([api-conventions](api-conventions.md)). `title` is the question, `text` the answer. |
+| List of texts | `GET /knowledge` with `kind=entry` | |
+| List of documents | `GET /knowledge` with `kind=document` | Show `filename`, `status`, `truncated`. There is no text and no download: parley keeps only the text it read. |
+| New question | `POST /knowledge/qa` | 409 `title already exists`: that question is already there. |
+| New text | `POST /knowledge/entries` | |
+| Edit a question or a text | `PATCH /knowledge/{item_id}` with `title`, `text` or both | For a pair, `title` is the question and `text` the answer. |
+| Upload a document | `POST /knowledge/documents` | Multipart, field `file`, optional `title`. Pass the upload through the application's server. |
+| Replace a document | upload, wait for `ready`, then delete the old one | Step 6. Do the three moves in the server, not in the browser. |
+| Remove | `DELETE /knowledge/{item_id}` | 204. Ask for confirmation first: it cannot be undone. |
+| "Try a question" box | `POST /knowledge/search` | Step 8. Shows the passages the agent would read. |
+| Agent uses the knowledge: on or off | `PATCH /agents/{agent_id}` with `knowledge_enabled` | Step 9. Read the current value with `GET /agents/{agent_id}`. |
+
+**Statuses.** Every create and edit answers with `status` `processing`. Show the item at once as "processing" and read `GET /knowledge/{item_id}` every few seconds until it is `ready` or `failed`; stop after a minute or two and let the user refresh. An entry or a pair is ready within seconds. A document takes longer. For `failed`, show `error` in the user's own language: the three fixed reasons are in step 5. For `truncated` `true`, say that the document was read only in part and should be split.
+
+**Refusals to turn into messages.** Check on the application's side what you can (an empty field, a file type, a file size), then map what parley refuses:
+
+| Answer | Say |
+|---|---|
+| 409 `title already exists` | This question, or a text with this title, already exists. |
+| 413 `file exceeds max size` | The file is too large. |
+| 415 `unsupported file: ...` | Send a PDF, a `.txt` or a `.md` file. |
+| 422 `knowledge limit exceeded: ...` | The knowledge base is full, or this text is too long (step 7). |
+| 422 `the text of a document cannot be changed; ...` | Upload the document again instead. |
+| 404 `knowledge item not found` | The item was removed meanwhile: reload the list. |
+
+The limits of step 7 are the same for every tenant of a parley instance. An application that sells plans with different sizes counts items and characters itself (`chars` of each item) and refuses before it calls parley.
+
+**What to tell the people who fill it in.**
+
+- A question and its answer, in the words customers use, is the most reliable kind. Prefer many short pairs to one long text.
+- One topic in each item, with a specific title.
+- A document is for text that already exists: a manual, a policy, a description of a product. A scanned PDF has no text and fails.
+- What changes often and must be exact (price, stock, the state of an order) does not belong here: the agent would repeat an old value. Serve it through a tool ([business-tools](business-tools.md)).
+
+**The manifest and the screen.** An entry or a pair that a [manifest](manifest.md) manages is put back, or removed, by the next apply. Use one of the two for the knowledge of a tenant: a manifest with no `knowledge` section leaves everything the screen wrote untouched (step 10).
+
+Check: through the application's own routes, add a pair, see it turn `ready`, and find it with the "try a question" box. Logged in as another account, the list does not show it.
