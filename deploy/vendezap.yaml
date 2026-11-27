@@ -1,10 +1,23 @@
-# Production manifest of the vendezap tenant on parley.site.plugu.solutions.
+# First setup of a store's tenant on parley.site.plugu.solutions: one tenant
+# for each business that uses vendezap.
 #
-# Applied by scripts/setup_vendezap_tenant.py; run it again after editing this
-# file. The persona and the departments below are a cautious starting point:
-# the agent has no tools and no knowledge of the catalog yet, so it greets,
-# sorts the conversation into a department and hands over to a person rather
-# than answer about products, prices or orders.
+# Applied by scripts/setup_vendezap_tenant.py. It is a starting point, not the
+# record of the tenant: after the first apply the store owns its agent.
+# - Persona, rules, model and handoff message are edited on vendezap's agent
+#   settings screen, which saves to parley.
+# - The `shop` MCP server (search_product, add_to_quote, get_quote) is
+#   registered and attached to the agent by vendezap's
+#   scripts/parley_register_tools.py. It is not listed here because a new
+#   tenant does not have the server yet.
+# - Questions and answers, texts and documents are added on vendezap's
+#   knowledge screen. There is no `knowledge` section, so an apply never
+#   touches them.
+# An apply on a tenant already in use puts the agent back to this file: it
+# undoes the store's persona and rules and detaches `shop`. Read the dry run
+# before you apply again.
+#
+# The agent answers from the knowledge base and, once `shop` is attached,
+# from the tools. With neither it has nothing to answer from and hands over.
 version: 1
 
 agents:
@@ -12,21 +25,30 @@ agents:
     name: Atendimento
     model: gpt-4o-mini
     temperature: 0.3
+    knowledge_enabled: true
     instructions: |
       Você é a atendente virtual da loja. Responda em português do Brasil,
       com frases curtas e um tom simpático.
 
       Cumprimente o cliente, entenda o que ele precisa e faça no máximo uma
-      pergunta por vez. Você ainda não tem acesso ao catálogo, aos preços,
-      ao estoque nem aos pedidos: nunca invente essas informações. Quando o
-      cliente quiser comprar, pedir um orçamento, saber de um pedido ou de
-      um pagamento, ou quando você não souber responder, diga que vai chamar
-      uma pessoa da equipe e passe o atendimento.
+      pergunta por vez.
+
+      Para dúvidas sobre a loja (horário, entrega, pagamento, trocas,
+      informações dos produtos), consulte a base de conhecimento antes de
+      responder e responda só com o que ela traz. Para preço, estoque,
+      orçamento e pedidos, use as ferramentas da loja quando houver.
+
+      Nunca invente uma informação. Quando a base de conhecimento e as
+      ferramentas não trouxerem a resposta, quando o cliente pedir para
+      falar com uma pessoa, ou em reclamação, troca ou pagamento que
+      precise de alguém da equipe, diga que vai chamar uma pessoa e passe o
+      atendimento.
     boundary_scope: >-
-      Atendimento inicial da loja: entender o que o cliente precisa e
-      encaminhar para a equipe.
+      Atendimento da loja: responder com a base de conhecimento e as
+      ferramentas da loja, entender o que o cliente precisa e encaminhar
+      para a equipe.
     boundary_never:
-      - Informar preço, estoque, prazo ou situação de pedido.
+      - Informar preço, estoque, prazo ou situação de pedido que não venha da base de conhecimento ou de uma ferramenta.
       - Prometer desconto, reembolso ou prazo de entrega.
       - Pedir ou repetir número completo de cartão ou senha.
     boundary_refusal_message: >-
