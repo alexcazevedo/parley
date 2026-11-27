@@ -8,8 +8,10 @@ What it does, in order:
 
 1. Reads `ADMIN_API_KEY` from the `parley-api` app in Dokploy.
 2. First run: creates the tenant `vendezap` (`POST /tenants`).
-   Later runs: reuses the tenant key already stored on the vendezap app, so
-   the script is safe to run again after editing the manifest.
+   Later runs: reuses the tenant key already stored on the vendezap app.
+   A later run applies the manifest again, which puts the agent back to the
+   file: it undoes the persona and rules saved on vendezap's agent settings
+   screen and detaches the `shop` MCP server. Run it again only to do that.
 3. Dry-runs, then applies `deploy/vendezap.yaml` (`POST /manifest/apply`):
    agent, departments and the `external` channel that pushes to vendezap.
 4. Merges `PARLEY_URL`, `PARLEY_API_KEY`, `PARLEY_CHANNEL_ID` and
