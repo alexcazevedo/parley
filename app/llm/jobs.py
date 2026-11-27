@@ -1,7 +1,8 @@
 """A model per auxiliary job, and the record of every job call.
 
-Five calls a turn can make besides the reply are "jobs": the boundary check,
-sentiment, category, the rolling summary and the handoff brief. Each has one
+Six model calls besides the reply are "jobs": the boundary check, sentiment,
+category, the rolling summary and the handoff brief (made by a turn), and the
+session recap (made by the worker when a session ends). Each has one
 setting (`<JOB>_MODEL`, the same for every tenant):
 
 - empty: the agent's own model, exactly as before;
@@ -51,6 +52,7 @@ class Job(enum.StrEnum):
     CATEGORY = "category"
     SUMMARY = "summary"
     HANDOFF_BRIEF = "handoff_brief"
+    SESSION_RECAP = "session_recap"
 
 
 # Jobs that answer a decision; the others write text.

@@ -21,6 +21,10 @@ events); an error is logged as `worker.event_push_error` and the loop goes on.
 and is stopped like the push loop. `mcp_sync_loop` runs `app.mcp.sync.sync_due`
 every `MCP_SYNC_POLL_SECONDS` (or `MCP_SYNC_INTERVAL_SECONDS` when shorter) the
 same way (`worker.mcp_sync_error`); a pass syncs only the servers due.
+`session_end_loop` runs `app.conversations.session_end.end_silent_sessions`
+then `write_recaps` every `SESSION_END_INTERVAL_SECONDS` the same way
+(`worker.session_end_error`), stopped like the push loop (a recap cut off is
+claimed again after its lease).
 
 Shutdown (PRODUCT.md E3.4): the signal sets `stop`. The job loop ends after
 its current `run_once` (at most `DEQUEUE_TIMEOUT_SECONDS`) or at once if it is
@@ -46,6 +50,7 @@ from app.agents.boundaries import load_floor
 from app.agents.runtime import AgentRuntime
 from app.config import assert_secure_settings, get_settings
 from app.conversations import debounce
+from app.conversations.session_end import end_silent_sessions, write_recaps
 from app.conversations.turn import AnyTurnRuntime
 
 # The worker runs outside FastAPI, so it owns its own session factory rather
@@ -219,6 +224,28 @@ async def mcp_sync_loop(
             pass
 
 
+async def session_end_loop(
+    session_factory: SessionFactory, stop: asyncio.Event, interval: float
+) -> None:
+    """Run `end_silent_sessions` then `write_recaps` every `interval` seconds until
+    `stop` is set.
+
+    An error is logged as `worker.session_end_error`; the next pass comes after
+    the same interval. The wait is cut short by `stop`.
+    """
+    while not stop.is_set():
+        try:
+            await end_silent_sessions(session_factory)
+            await write_recaps(session_factory)
+        except Exception:
+            logger.exception("worker.session_end_error")
+        try:
+            async with asyncio.timeout(interval):
+                await stop.wait()
+        except TimeoutError:
+            pass
+
+
 async def _stop_event_push(
     task: asyncio.Task, failed_event: str = "worker.event_push_failed"
 ) -> None:
@@ -325,6 +352,9 @@ async def main() -> None:
             min(settings.mcp_sync_interval_seconds, MCP_SYNC_POLL_SECONDS),
         )
     )
+    session_end_task = asyncio.create_task(
+        session_end_loop(async_session_maker, stop, settings.session_end_interval_seconds)
+    )
     try:
         await job_loop(queue, redis, stop, settings.debounce_seconds)
     finally:
@@ -338,6 +368,8 @@ async def main() -> None:
                 _stop_event_push(ingest_task, "worker.knowledge_ingest_failed"),
                 # A sync cut off is only a discovery; the next pass repeats it.
                 _stop_event_push(mcp_task, "worker.mcp_sync_failed"),
+                # A recap cut off is claimed again after its lease.
+                _stop_event_push(session_end_task, "worker.session_end_failed"),
             )
         finally:
             housekeeping_task.cancel()

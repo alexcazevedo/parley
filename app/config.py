@@ -129,6 +129,9 @@ class Settings(BaseSettings):
     # MCP servers (see app/mcp/sync.py): the worker discovers a server's tools
     # again once its last discovery is this old.
     mcp_sync_interval_seconds: float = Field(default=300.0, gt=0)
+    # Sessions (see app/conversations/session_end.py): pause between two passes
+    # of the worker loop that ends silent sessions and writes their recaps.
+    session_end_interval_seconds: float = Field(default=60.0, gt=0)
     # A model per auxiliary job (see app/llm/jobs.py): empty = the agent's own
     # model; `llm:<model>` = that model on LLM_BASE_URL; `typesafe:<model>` =
     # TypeSafe's decision model (decision jobs only, needs TYPESAFE_API_KEY).
@@ -142,6 +145,8 @@ class Settings(BaseSettings):
     category_model: str = ""
     summary_model: str = ""
     handoff_brief_model: str = ""
+    # The recap and facts written when a session ends (app/conversations/session_end.py).
+    session_recap_model: str = ""
     typesafe_api_key: str = ""
 
 

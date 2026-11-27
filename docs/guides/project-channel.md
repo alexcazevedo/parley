@@ -198,7 +198,7 @@ Close with `POST /conversations/{conversation_id}/close`:
 curl -s -X POST $BASE_URL/conversations/$CONVERSATION_ID/close -H "X-API-Key: $TENANT_KEY"
 ```
 
-Expected: 200 with `state` `CLOSED`. From any state, including `CLOSED`. Parley records `conversation.agent` with `active` false and `cause` `closed`. The agent does not answer a closed conversation; the customer's next message opens a new conversation with a new id.
+Expected: 200 with `state` `CLOSED`. From any state, including `CLOSED`. Parley records `conversation.agent` with `active` false and `cause` `closed`. The agent does not answer a closed conversation; the customer's next message opens a new conversation with a new id. Closing also ends the conversation's open session: the worker then writes a recap of it and updates the customer's lasting facts, and the agent reads them in the customer's next conversation ([agent-behaviour](agent-behaviour.md) section 2). With the agent's `session_memory_enabled` off, closing keeps nothing. The close itself does not wait for the recap.
 
 Check: after the resume, the feed has `conversation.agent` with `active` `true` and `cause` `resumed`.
 

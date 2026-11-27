@@ -40,7 +40,11 @@ REMEMBER_SPEC = ToolSpec(
     parameters={
         "type": "object",
         "properties": {
-            "type": {"type": "string", "enum": [t.value for t in MemoryType]},
+            "type": {
+                "type": "string",
+                # Recaps are written by parley when a session ends, never by the model.
+                "enum": [t.value for t in MemoryType if t is not MemoryType.SESSION_RECAP],
+            },
             "content": {"type": "string", "minLength": 1},
             "importance": {"type": "integer", "minimum": 1, "maximum": 5},
         },

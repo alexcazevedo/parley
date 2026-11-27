@@ -38,6 +38,9 @@ MaxTokens = Annotated[int, Field(ge=1, le=32768)]
 MaxToolIterations = Annotated[int, Field(ge=1, le=20)]
 ContextLimit = Annotated[int, Field(ge=1, le=200)]
 SummaryThreshold = Annotated[int, Field(ge=0, le=1000)]
+SessionGapHours = Annotated[int, Field(ge=1, le=720)]
+SessionRecapLimit = Annotated[int, Field(ge=0, le=10)]
+SessionRecapMaxAgeDays = Annotated[int, Field(ge=1, le=3650)]
 
 
 class AgentCreate(BaseModel):
@@ -63,6 +66,10 @@ class AgentCreate(BaseModel):
     handoff_message: HandoffMessage | None = None
     error_message: FailureText | None = None
     unsupported_media_message: FailureText | None = None
+    session_memory_enabled: bool = True
+    session_gap_hours: SessionGapHours = 48
+    session_recap_limit: SessionRecapLimit = 3
+    session_recap_max_age_days: SessionRecapMaxAgeDays = 90
 
 
 class AgentUpdate(BaseModel):
@@ -89,6 +96,10 @@ class AgentUpdate(BaseModel):
     # An explicit null clears these two back to the default text.
     error_message: FailureText | None = None
     unsupported_media_message: FailureText | None = None
+    session_memory_enabled: bool | None = None
+    session_gap_hours: SessionGapHours | None = None
+    session_recap_limit: SessionRecapLimit | None = None
+    session_recap_max_age_days: SessionRecapMaxAgeDays | None = None
 
 
 class AgentOut(BaseModel):
@@ -115,6 +126,10 @@ class AgentOut(BaseModel):
     handoff_message: str
     error_message: str | None
     unsupported_media_message: str | None
+    session_memory_enabled: bool
+    session_gap_hours: int
+    session_recap_limit: int
+    session_recap_max_age_days: int
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -219,6 +234,10 @@ async def update_agent(
         "knowledge_enabled",
         "handoff_message",
         "mcp_servers",
+        "session_memory_enabled",
+        "session_gap_hours",
+        "session_recap_limit",
+        "session_recap_max_age_days",
     ):
         if key in changes and changes[key] is None:
             del changes[key]

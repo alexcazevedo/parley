@@ -34,6 +34,12 @@ longer apply; check the code before relying on it.
 - Prompt caching, with measurements (From the native providers run).
 - Settings per agent or per tenant for a job's model; today one setting for the server (From the model per job run).
 
+**Memory**
+- Facts that expire (From the session memory run).
+- Searching old messages of earlier sessions (From the session memory run).
+- Per-customer session settings (From the session memory run).
+- Vendezap closing the conversation on a finished pedido (From the session memory run).
+
 **Turns, delivery and recovery**
 - Resend only the missing bubbles (From the reliability run).
 - API or page for the dead-letter list, and replay (From the reliability run).
@@ -494,3 +500,23 @@ PRD epics E1 to E7 are now done. What is left over:
   against and no command.
 - **The recorded boundary reason on a decision model is a hint.** `allowed` decides
   and `broken` names the rule; they are separate answers and can disagree.
+
+## From the session memory run
+
+- **Facts that expire.** A lasting fact stays until it is deleted or has an
+  `expires_at`; the session-end call can add or rewrite a fact but never sets an
+  expiry or drops one, so "lives in Recife" outlives a move unless a later session
+  contradicts it.
+- **Searching old messages.** A new session sees no message of an earlier one,
+  only its recap. A `search_history` built-in over the contact's old messages is
+  not built.
+- **Per-customer settings.** `session_gap_hours`, `session_recap_limit` and
+  `session_recap_max_age_days` are per agent; a customer cannot have their own, and
+  there is no way to ask the agent to forget one customer's recaps except deleting
+  them through the memories API.
+- **Vendezap closing on a finished pedido.** Vendezap does not close the parley
+  conversation when a pedido is done, so the recap waits for `session_gap_hours` of
+  silence. Calling `POST /conversations/{conversation_id}/close` there would write it
+  at once (see `docs/integrations/vendezap.md`).
+- **A failed recap is not retried by itself.** After 3 tries a session is `failed`
+  with no recap; resetting it is a manual `UPDATE` (see operations).

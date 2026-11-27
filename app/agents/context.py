@@ -34,6 +34,11 @@ from app.models.message import Message, MessageRole
 logger = structlog.get_logger(__name__)
 
 MEMORY_HEADER = "## Known facts about this contact"
+RECAPS_HEADER = "## Earlier conversations with this contact"
+RECAPS_NOTE = (
+    "Notes on earlier conversations with this person, for continuity. "
+    "They may be out of date."
+)
 SUMMARY_HEADER = "## Conversation summary"
 KNOWLEDGE_HEADER = "## Knowledge base"
 # Titles listed in the knowledge section at most; the rest are counted.
@@ -151,6 +156,7 @@ class ContextBuilder:
         tools: Sequence[ToolSpec] = (),
         style_hint: str | None = None,
         knowledge_titles: tuple[list[str], int] | None = None,
+        recaps: list[str] | None = None,
     ) -> list[LLMMessage]:
         """System prompt + the history the runtime selected.
 
@@ -169,12 +175,15 @@ class ContextBuilder:
         `knowledge_titles` (titles, total count), given only for an agent with
         `knowledge_enabled`, adds the knowledge section: titles and rules,
         never any passage content. `None` leaves the prompt as it was.
+
+        `recaps` (oldest first) adds the earlier-conversations section after the
+        facts and before the conversation summary; `None` or empty adds nothing.
         """
         messages: list[LLMMessage] = [
             LLMMessage(
                 role=ROLE_SYSTEM,
                 content=self._system_prompt(
-                    agent, conversation, memories, style_hint, knowledge_titles
+                    agent, conversation, memories, style_hint, knowledge_titles, recaps
                 ),
             )
         ]
@@ -188,11 +197,17 @@ class ContextBuilder:
         memories: Sequence[Memory],
         style_hint: str | None = None,
         knowledge_titles: tuple[list[str], int] | None = None,
+        recaps: list[str] | None = None,
     ) -> str:
         parts = [agent.instructions.strip()]
         facts = [m.content.strip() for m in memories if m.content and m.content.strip()]
         if facts:
             parts.append(MEMORY_HEADER + "\n" + "\n".join(f"- {fact}" for fact in facts))
+        recap_lines = [r.strip() for r in recaps or [] if r and r.strip()]
+        if recap_lines:
+            parts.append(
+                RECAPS_HEADER + "\n" + RECAPS_NOTE + "\n" + "\n".join(f"- {r}" for r in recap_lines)
+            )
         summary = (conversation.summary or "").strip()
         if summary:
             parts.append(SUMMARY_HEADER + "\n" + summary)

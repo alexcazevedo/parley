@@ -73,6 +73,21 @@ class Agent(Base, TenantScoped):
     knowledge_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=sa.false()
     )
+    # Sessions (migration 0031, app/conversations/sessions.py): a customer
+    # message after more than `session_gap_hours` of silence starts a new
+    # session. The recap settings are read by the recap ticket.
+    session_memory_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=sa.true()
+    )
+    session_gap_hours: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=48, server_default=sa.text("48")
+    )
+    session_recap_limit: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=3, server_default=sa.text("3")
+    )
+    session_recap_max_age_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=90, server_default=sa.text("90")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

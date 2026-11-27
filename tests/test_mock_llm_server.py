@@ -11,6 +11,7 @@ import pytest
 from app.agents.boundaries import Boundaries, _check_system_prompt, _parse_verdict
 from app.agents.categorize import CATEGORY_SYSTEM_PROMPT, _parse_choice
 from app.agents.sentiment import SENTIMENT_SYSTEM_PROMPT, _parse_score
+from app.conversations.session_end import SESSION_RECAP_SYSTEM_PROMPT, parse_recap_answer
 from app.conversations.summary import SUMMARIZER_SYSTEM_PROMPT
 from app.handoff.summarizer import HANDOFF_SUMMARY_SYSTEM_PROMPT
 from app.llm.base import ROLE_SYSTEM, ROLE_USER, LLMMessage, ToolSpec
@@ -197,6 +198,14 @@ async def test_summary_and_brief_are_a_sentence(provider, prompt):
     assert (response.content or "").strip()
 
 
+async def test_session_recap_is_a_valid_answer(provider):
+    response = await _complete(
+        provider, SESSION_RECAP_SYSTEM_PROMPT, "<transcript>\ncustomer: hi\n</transcript>"
+    )
+    answer = parse_recap_answer(response.content)
+    assert answer.recap and answer.adds == [] and answer.replaces == []
+
+
 async def test_every_fragment_still_matches_its_prompt():
     prompts = [
         _check_system_prompt(
@@ -206,6 +215,7 @@ async def test_every_fragment_still_matches_its_prompt():
         CATEGORY_SYSTEM_PROMPT,
         SUMMARIZER_SYSTEM_PROMPT,
         HANDOFF_SUMMARY_SYSTEM_PROMPT,
+        SESSION_RECAP_SYSTEM_PROMPT,
     ]
     assert len(prompts) == len(AUXILIARY_ANSWERS)
     for prompt, (fragment, _) in zip(prompts, AUXILIARY_ANSWERS, strict=True):

@@ -2,105 +2,101 @@
 mode: mvp                      # prototype | mvp | production
 routing_profile: cloud         # cloud | cloud+local (local is opt-in, never a default)
 parallel_default: sequential   # sequential | parallel
-owner: agent                   # human | agent (set by comb:auto)
+owner: human                   # human | agent (set by comb:auto)
 ---
 
-# Native providers (milestone 6)
-
-The brief is `docs/roadmap/3-native-providers.md`; the decisions common to
-the roadmap are in `docs/roadmap/README.md`. This file is the short form.
+# Session memory: short term and long term (milestone 7)
 
 ## What / why
 
-A reply can only run on an endpoint that speaks the OpenAI chat-completions
-format, with one endpoint and one key for the whole server. Models from
-Anthropic and Google are reachable only through a compatibility layer, and
-two agents cannot use two vendors. This milestone lets an agent run on
-OpenAI, Anthropic or Google through their own APIs, and gives typed answers
-to the auxiliary decisions when they run on a chat model.
+A conversation is reused until someone closes it, and vendezap never closes
+one. So a customer who writes today continues the conversation of a month
+ago: the agent reads the last 20 messages whatever their age, plus one
+summary of the whole history that only grows. Lasting facts are stored only
+when the model happens to call `remember`.
+
+This milestone makes the agent remember yesterday in full, last month as a
+short recap, and the person's lasting facts always.
 
 ## Primary user story
 
-As the owner of a parley server, I put one key per vendor in the
-environment; a tenant then sets an agent's `provider` and `model`, and that
-agent's replies, tool calls and handoffs work as on any other, while every
-agent I do not touch keeps running exactly as before.
+As a shop whose customers come back, I want the agent to continue a chat
+from yesterday as if it never stopped, greet a customer who returns after a
+month without dragging in last month's details, and still know who they are
+and what they usually want.
 
 ## In scope
 
-**Providers.** An agent's `provider` accepts `openai`, `anthropic` and
-`google` beside `openai_compatible`, which stays the default. Credentials
-are per server: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`. An
-agent naming a provider with no key, or an unknown provider, is refused at
-creation, on update and in the manifest, with a message naming the setting.
+**Sessions.** A session is a run of messages with no silence longer than a
+gap, 48 hours by default, counted from the last message of either side.
+Inside a session nothing changes: the agent reads the recent messages and a
+running summary, which no longer spans sessions.
 
-**The reply on a native provider** goes through Pydantic AI as one model
-request per step. Parley's loop is unchanged: it executes the tool calls
-through its registry and ledger, ends on a terminal tool, and checks the
-reply before it is sent. The model layer never runs a tool.
+**When a session ends**, by silence or because the app closed the
+conversation (`POST /conversations/{conversation_id}/close`, which exists
+today), parley does the same two things:
+- writes a short dated recap of the session;
+- extracts lasting facts about the person and merges them with what is
+  known: a repeated fact is not duplicated, a contradicted fact is replaced.
 
-**The same on every provider**, proven with the library's fakes: a plain
-reply, tool calls and their results in history, a history written under one
-provider and continued under another, images, the token limit, usage, the
-turn deadline, and the error path that sends the agent's `error_message`.
+**What a new session reads.** No message of an earlier session. The
+person's facts, at most the 20 most important as today. The most recent
+recaps: at most 3, none older than 90 days. Older recaps stay stored but
+leave the prompt.
 
-**The default path does not move.** `openai_compatible` stays on the
-existing hand-written provider, with `LLM_BASE_URL`, `LLM_API_KEY`,
-`LLM_MODEL` and `LLM_MAX_TOKENS_PARAM`.
+**The `remember` tool stays.**
 
-**One retry rule.** A failed model call on a native provider is retried by
-the vendor's client up to the existing `HTTP_RETRY_ATTEMPTS`; parley adds
-none on top.
+**Settings per agent**: the gap, the number of recaps, their maximum age,
+and a switch to turn the whole behaviour off.
 
-**Recorded.** The agent run records the provider beside the model.
+**On by default.** Conversations already running are not rewritten: the
+next customer message after the gap starts a new session, and the existing
+summary becomes its recap.
 
-**Typed answers on chat models.** A job the server owner sets to a model
-(`llm:`, `openai:`, `anthropic:` or `google:` followed by the model) gets a
-structured answer for the three decisions; the stub model learns that form.
-A job left unset keeps today's text prompt and parsing on the agent's own
-model. The writing jobs accept the same forms and still write text.
+**Visible.** Recaps are listed by the existing contact memories API and
+appear in the handoff brief.
 
-**Docs.** Configuration, setup, manifest, agent behaviour, operations.
+**Docs.** Agent-behaviour, setup, project-channel.
 
 ## Out of scope
 
-Moving `openai_compatible` onto Pydantic AI and deleting the hand-written
-provider (a follow-up, after the new path has run in production). Streaming.
-Credentials per tenant. Fallback from one provider to another. Routing by
-difficulty. Provider-specific agent fields. Prompt caching and reasoning
-settings. Speech-to-text and embeddings, which stay as they are. Other
-vendors. Any framework owning the loop.
+- Remembering business state, such as which pedido a chat is about: that
+  stays with the app, read through its tools.
+- Any change in vendezap. Calling close when a pedido is finished is a
+  follow-up for that repository.
+- Searching old messages on demand.
+- Facts that expire by age.
+- Settings per customer.
+- A new screen or a new event.
 
 ## Constraints
 
-- With `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL` as the only model
-  settings, every existing test passes unchanged.
-- No test calls a real model. A live check runs only for a provider whose
-  key is in `.env`; none is on this machine.
-- Pydantic AI is imported only in `app/llm/decisions.py` and the new native
-  provider module.
+- Switched off, an agent behaves exactly as today.
+- Ending a session costs at most one extra model call and never delays a
+  reply.
+- Customer text is data, never instructions. No stored message is deleted.
 
 ## Success demo
 
-Done when, on one stack with credentials for two vendors, two agents of one
-tenant, each on a different provider, answer a customer; each run records
-its provider and model; a turn with a tool call and a turn that hands off
-work on both; a conversation started on one provider continues correctly
-after the agent is switched to the other; an agent created with a provider
-that has no credentials is refused with a message naming the setting; a
-decision job set to a chat model returns a typed answer; and a deployment
-with only `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL` passes every
-existing test unchanged. The vendors are fakes in tests.
+Done when, with one customer on an external channel: they chat today and
+again tomorrow and the agent still sees yesterday's messages; they write
+after more than 48 hours of silence and the prompt holds no message of the
+old session but does hold its dated recap and the facts learned from it;
+after several sessions only the 3 most recent recaps are in the prompt and
+one older than 90 days is not; a fact contradicted in a later session is
+replaced, not duplicated; an app closing the conversation produces the same
+recap and facts as a session ended by silence; switched off, an agent
+behaves as today; and a returning customer's prompt is smaller than today's
+for the same history.
 
 ## Grill log
 
-| # | question | recommendation | answer | tag |
-|---|----------|----------------|--------|-----|
-| 1 | Mode | (given by the human) | mvp | AGREE |
-| 2 | Which providers ship? | `openai`, `anthropic`, `google`, plus `openai_compatible` | As recommended | AGREE |
-| 3 | Speech-to-text and embeddings unchanged? | Yes | Yes | AGREE |
-| 4 | Provider-specific features? | None that needs a field or setting; no caching work | As recommended; caching a vendor applies by itself stays on; request-level caching is a follow-up | AGREE |
-| 5 | Credentials per server or per tenant? | Per server; per tenant is a follow-up | Per server | AGREE |
-| 6 | What serves `openai_compatible`? | The existing hand-written provider, untouched; only the new values go through Pydantic AI | As recommended; retiring the old path is a follow-up | AGREE |
-| 7 | Retire `LLM_MAX_TOKENS_PARAM`? | No; it belongs to the hand-written provider | It stays, for `openai_compatible` only | AGREE |
-| 8 | Which jobs get typed answers on a chat model? | A job the owner sets to a model; an unset job keeps the text form | As recommended; writing jobs accept the same forms and write text | AGREE |
+| # | Question | Answer |
+|---|---|---|
+| 1 | Mode | mvp |
+| 2 | Where does it live: parley, vendezap or both? | Both: parley ages memory by itself, and an app's explicit close counts as the same kind of ending. Which pedido a chat belongs to is business state and stays with vendezap's tools |
+| 3 | When does the current conversation end by itself? | After a gap of silence, 48 hours by default, per agent |
+| 4 | What is kept from an ended session? | A short dated recap plus lasting facts; the prompt shows at most 3 recaps, none older than 90 days |
+| 5 | Who writes the facts, and do they age? | Written automatically when a session ends, merged and replaced on contradiction; `remember` stays; no expiry by age; at most 20 read |
+| 6 | On for every agent or opt-in? | On by default; an agent can change the numbers or switch it off |
+| 7 | Is the success demo right? | Yes, as written above |

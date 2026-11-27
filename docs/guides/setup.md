@@ -101,6 +101,10 @@ Check: `curl -s $BASE_URL/tools -H "X-API-Key: $TENANT_KEY"` lists it, and the r
 | `tool_names` | `[]` | | Names of your tools this agent may call. Not checked at creation: a name with no such tool is silently never called. |
 | `context_message_limit` | `20` | 1 to 200 | Recent messages sent to the model each turn. |
 | `summary_threshold` | `40` | 0 to 1000 | Message count that triggers a summary of older messages. `0` turns summaries off. |
+| `session_memory_enabled` | `true` | | Splits a conversation into sessions: a customer message after more than `session_gap_hours` of silence starts a new session, and the agent no longer reads the messages or the running summary of the earlier one. `false` keeps one history for the whole conversation. |
+| `session_gap_hours` | `48` | 1 to 720 | Silence, counted from the last message of either side, that ends a session. |
+| `session_recap_limit` | `3` | 0 to 10 | Most recaps of earlier sessions a new session reads. |
+| `session_recap_max_age_days` | `90` | 1 to 3650 | Recaps older than this many days leave the prompt. |
 | `boundary_scope` | `null` | up to 2000 characters | What the agent may talk about. See [agent-behaviour](agent-behaviour.md). |
 | `boundary_never` | `[]` | up to 50 items, each 1 to 300 characters | Things the agent must never do. |
 | `boundary_refusal_message` | `null` | 1 to 1000 characters | Text sent when a reply is blocked. |

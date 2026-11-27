@@ -568,8 +568,15 @@ def worker(monkeypatch):
             state["housekeeping_cancelled"] = True
             raise
 
+    async def idle_session_end(session_factory, stop, interval) -> None:
+        # The real loop would take `pending` sessions other tests left in the
+        # shared database and call the model for their recaps. This test is
+        # about stopping the worker, so the loop only waits for the stop.
+        await stop.wait()
+
     monkeypatch.setattr(worker_main, "run_once", fake_run_once)
     monkeypatch.setattr(worker_main, "housekeeping_loop", fake_housekeeping)
+    monkeypatch.setattr(worker_main, "session_end_loop", idle_session_end)
     return state
 
 

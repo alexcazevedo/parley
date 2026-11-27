@@ -53,6 +53,10 @@ AUXILIARY_ANSWERS: list[tuple[str, str]] = [
         "brief for a human operator who is about to take over",
         "The customer asked for help and the assistant could not resolve it.",
     ),
+    (
+        "short recap of one customer-support session",
+        "RECAP: The customer asked a question and the assistant answered it.\nNONE",
+    ),
 ]
 
 # Pydantic AI's tool-mode structured output: the tool's name and, by a field
